@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Register types for userspace-kernel communication.
-//!
-//! This module re-exports register types from `bedrock-vmx` to ensure
-//! ABI compatibility between userspace and kernel.
+//! Register types, re-exported from `bedrock-vmx` for ABI compatibility.
 
-// Re-export all register types from bedrock-vmx
 pub use bedrock_vmx::registers::{
     ControlRegisters, Cr0, Cr2, Cr3, Cr4, Cr8, DebugRegisters, DescriptorTableRegisters, Efer,
     ExtendedControlRegisters, Gdtr, GeneralPurposeRegisters, GuestRegisters, Idtr,
     SegmentAccessRights, SegmentRegister, SegmentRegisters, SegmentSelector,
 };
 
-// Local constants for control registers used by userspace tools.
-// These are not needed in the kernel module.
+// Userspace-only control-register constants.
 
 /// CR0 bit constants for userspace.
 pub mod cr0 {
@@ -189,11 +184,9 @@ impl Regs {
         regs.segment_regs.tr = SegmentRegister::new(0, 0x8B, 0xFFFF, 0);
         regs.segment_regs.ldtr = SegmentRegister::new(0, seg_ar::UNUSABLE, 0, 0);
 
-        // Descriptor tables
         regs.descriptor_tables.gdtr = Gdtr::new(0, 0xFFFF);
         regs.descriptor_tables.idtr = Idtr::new(0, 0xFFFF);
 
-        // Start at reset vector
         regs.rip = 0xFFF0;
 
         regs

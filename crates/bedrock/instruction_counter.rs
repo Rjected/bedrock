@@ -2,46 +2,31 @@
 
 //! Direct MSR-based instruction counter using `IA32_PMC0`.
 //!
-//! Counts guest instructions retired (`INST_RETIRED.ANY_P`, event 0xC0) on
-//! general-purpose counter 0, programmed directly via MSRs. Determinism is
-//! achieved by hooking the counter MSR into the VMCS VM-exit MSR-store list
-//! and VM-entry MSR-load list pointing at the same memory entry, so:
+//! Counts guest `INST_RETIRED.ANY_P` (event 0xC0) on GP counter 0. The counter
+//! MSR is in both the VM-exit MSR-store and VM-entry MSR-load lists, pointing
+//! at the same entry: exit saves `IA32_PMC0` before any host code runs, and the
+//! next entry reloads it, wiping host-side ticks. A GP counter is used because
+//! PEBS needs `IA32_FIXED_CTR0` (see `exits/pebs.rs`).
 //!
-//! * On VM exit, the CPU atomically saves `IA32_PMC0` into the entry before
-//!   any host code runs.
-//! * On the next VM entry, the CPU atomically reloads `IA32_PMC0` from the
-//!   entry, wiping any ticks the host counter accumulated in between.
-//!
-//! `IA32_PMC0` is used here (rather than the more obvious `IA32_FIXED_CTR0`)
-//! because the precise-VM-exit PEBS facility wants `IA32_FIXED_CTR0` for its
-//! own arming (see `exits/pebs.rs`); putting the IC on a GP counter frees the
-//! fixed counter for PEBS.
-//!
-//! Userspace must pin the thread to the desired CPU before creating the VM;
-//! on hybrid CPUs that should be a P-core (where general-purpose counter 0
-//! supports `INST_RETIRED.ANY_P`).
+//! Userspace must pin the thread before creating the VM; on hybrid CPUs, to a
+//! P-core (where GP counter 0 supports `INST_RETIRED.ANY_P`).
 
 use super::page::{alloc_zeroed_page, KernelPage};
 use crate::c_helpers;
 use crate::vmx::traits::{InstructionCounter, InstructionCounterError};
 
-/// Full-width-write alias for general-purpose counter 0 (`IA32_PMC0`,
-/// MSR `0xC1`). `WRMSR` to `IA32_PMC0` itself truncates the input to 32
-/// bits and sign-extends from bit 31, which garbles the counter once
-/// the value crosses ~2.1 billion. Writing through `IA32_A_PMC0` writes
-/// all 48 counter bits directly. Available when
-/// `IA32_PERF_CAPABILITIES.FULL_WRITE` (bit 13) is set; required by the
-/// VMCS auto-load round-trip the IC depends on. See SDM Vol 3B Section
-/// 21.2.8.
+/// Full-width-write alias for `IA32_PMC0`. `WRMSR` to `IA32_PMC0` (0xC1)
+/// truncates to 32 bits and sign-extends bit 31, garbling values past ~2.1B;
+/// the alias writes all 48 bits. Requires `IA32_PERF_CAPABILITIES.FULL_WRITE`
+/// (bit 13). SDM Vol 3B 21.2.8.
 const IA32_A_PMC0: u32 = 0x4C1;
 /// Performance event-select register for `IA32_PMC0`.
 const IA32_PERFEVTSEL0: u32 = 0x186;
 /// Global enable for performance counters (SDM Vol 4 Table 2-2).
 const IA32_PERF_GLOBAL_CTRL: u32 = 0x38F;
 
-/// `IA32_PERFEVTSEL0` programming for `INST_RETIRED.ANY_P`: event select
-/// 0xC0, unit mask 0x00, USR (bit 16), OS (bit 17), EN (bit 22). Counts
-/// every retired instruction.
+/// `IA32_PERFEVTSEL0` for `INST_RETIRED.ANY_P`: event 0xC0, umask 0, USR (16),
+/// OS (17), EN (22).
 const PERFEVTSEL0_INST_RETIRED_ANY_P: u64 = (1u64 << 16) | (1u64 << 17) | (1u64 << 22) | 0xC0;
 /// Bit 0 in `IA32_PERF_GLOBAL_CTRL` enables `IA32_PMC0`.
 const PERF_GLOBAL_CTRL_PMC0: u64 = 1;
@@ -79,8 +64,8 @@ fn wrmsr(addr: u32, value: u64) -> Result<(), InstructionCounterError> {
 
 /// Direct MSR-based instruction counter for general-purpose counter 0.
 pub(crate) struct LinuxInstructionCounter {
-    /// Backing page for the VMCS MSR-list entry. The first 16 bytes are the
-    /// entry; the rest is unused. None on null counters.
+    /// Backing page; the first 16 bytes are the MSR-list entry. None on null
+    /// counters.
     msr_entry_page: Option<KernelPage>,
     /// Saved `IA32_PERFEVTSEL0`, captured in `prepare`, restored in `finish`.
     saved_perfevtsel0: u64,
@@ -92,18 +77,16 @@ pub(crate) struct LinuxInstructionCounter {
     armed: bool,
 }
 
-// SAFETY: KernelPage is itself Send (its only state is a kernel `Page` and
-// physical/virtual addresses). The MSR list entry it backs is accessed only
-// while preemption is disabled inside the run loop, on the CPU that owns the
-// VMCS, so there is no concurrent access.
+// SAFETY: KernelPage is Send. The MSR list entry is only accessed with
+// preemption disabled in the run loop on the CPU owning the VMCS, so there is
+// no concurrent access.
 unsafe impl Send for LinuxInstructionCounter {}
 
 impl LinuxInstructionCounter {
     pub(crate) fn new() -> Self {
         let msr_entry_page = alloc_zeroed_page().inspect(|page| {
-            // SAFETY: the page is freshly allocated, zeroed, and not aliased.
-            // We initialize the first 16 bytes as a single MSR list entry
-            // pointing at IA32_A_PMC0 (full-width-write alias).
+            // SAFETY: the page is freshly allocated, zeroed, and not aliased;
+            // write a single MSR list entry for IA32_A_PMC0.
             unsafe {
                 let entry = page.virt.as_u64() as *mut MsrListEntry;
                 core::ptr::write(
@@ -126,17 +109,14 @@ impl LinuxInstructionCounter {
         }
     }
 
-    /// Read the MSR-data field of the VMCS list entry. The CPU writes this
-    /// atomically on VM exit, so it's the counter value at exit time.
+    /// Counter value at the last VM exit (written by the CPU's MSR-store).
     #[inline]
     fn entry_msr_data(&self) -> u64 {
         match self.msr_entry_page.as_ref() {
             Some(page) => {
-                // SAFETY: the entry was initialized in `new` and lives as
-                // long as `self`. The CPU writes it on VM exit (under our
-                // VMCS configuration) and we read it from the host between
-                // exits; there is no concurrent access while preemption is
-                // disabled.
+                // SAFETY: the entry was initialized in `new` and lives as long
+                // as `self`. The CPU writes it only on VM exit; no concurrent
+                // access while preemption is disabled.
                 unsafe {
                     let entry = page.virt.as_u64() as *const MsrListEntry;
                     core::ptr::read_volatile(&(*entry).msr_data)
@@ -153,16 +133,12 @@ impl InstructionCounter for LinuxInstructionCounter {
             return Ok(());
         }
 
-        // Compute PERF_GLOBAL_CTRL values for VMCS auto-load. These act as a
-        // first-line gate: bit 0 is cleared on host so the counter is disabled
-        // outside of guest execution. NMI handlers can still flip this bit,
-        // but the VMCS auto-save/load of IA32_PMC0 makes any host-side ticks
-        // irrelevant — they're overwritten on the next VM entry.
+        // Host value clears PMC0's enable bit as a first-line gate. NMI handlers
+        // can still flip it, but host ticks are overwritten on the next entry.
         let current_global = rdmsr(IA32_PERF_GLOBAL_CTRL)?;
         self.host_perf_global_ctrl = current_global & !PERF_GLOBAL_CTRL_PMC0;
         self.guest_perf_global_ctrl = self.host_perf_global_ctrl | PERF_GLOBAL_CTRL_PMC0;
 
-        // Save the host's IA32_PERFEVTSEL0 and program ours.
         let saved = rdmsr(IA32_PERFEVTSEL0)?;
         self.saved_perfevtsel0 = saved;
         wrmsr(IA32_PERFEVTSEL0, PERFEVTSEL0_INST_RETIRED_ANY_P)?;
@@ -175,8 +151,7 @@ impl InstructionCounter for LinuxInstructionCounter {
         if !self.armed {
             return Ok(());
         }
-        // Restore the host's IA32_PERFEVTSEL0. PERF_GLOBAL_CTRL was already
-        // loaded by hardware on the most recent VM exit.
+        // PERF_GLOBAL_CTRL was already loaded by hardware on the last VM exit.
         if wrmsr(IA32_PERFEVTSEL0, self.saved_perfevtsel0).is_err() {
             return Err(InstructionCounterError::RestoreFailed);
         }
@@ -185,10 +160,8 @@ impl InstructionCounter for LinuxInstructionCounter {
     }
 
     fn read(&self) -> u64 {
-        // The MSR-data field grows monotonically across iterations and across
-        // run loops: each VM entry reloads `IA32_PMC0` from this entry, so
-        // guest ticks land back here on the next VM exit's auto-save and host
-        // ticks (between exits) get overwritten on the next entry.
+        // Monotonic across run loops: each entry reloads `IA32_PMC0` from this
+        // entry and each exit saves it back.
         self.entry_msr_data()
     }
 

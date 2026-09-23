@@ -2,10 +2,7 @@
 
 //! VM exit information returned from the RUN ioctl.
 
-/// Categorized VM exit types for cleaner pattern matching.
-///
-/// This enum provides a higher-level categorization of VM exits,
-/// making it easier to handle exits in a `match` expression.
+/// Categorized VM exit types.
 ///
 /// # Example
 ///
@@ -21,57 +18,32 @@
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitKind {
-    /// VMCALL shutdown hypercall.
     VmcallShutdown,
-    /// VMCALL snapshot hypercall.
     VmcallSnapshot {
-        /// Snapshot tag from guest.
         tag: u64,
     },
-    /// VMCALL ready hypercall — guest signaled it has finished its
-    /// boot/initialization and is ready for the host's workload.
+    /// Guest finished booting and is ready for the host's workload.
     VmcallReady,
-    /// Stop-at-TSC threshold reached.
     StopTscReached,
-    /// VMCALL feedback buffer registration hypercall.
     FeedbackBufferRegistered,
-    /// I/O channel response delivered by the guest.
-    ///
-    /// The guest's `bedrock-io.ko` workqueue has finished executing an
-    /// action and written the response into the registered shared page.
-    /// The hypervisor has copied the response bytes into VmState; userspace
-    /// should call `Vm::drain_io_response()` to consume them and optionally
-    /// queue the next request via `Vm::queue_io_action()`.
+    /// I/O channel response ready; consume it with `Vm::drain_io_response()`.
     IoResponse,
     /// RDRAND instruction (ExitToUserspace mode).
     Rdrand,
     /// RDSEED instruction (ExitToUserspace mode).
     Rdseed,
-    /// Guest requested random bytes via `HYPERCALL_GET_RANDOM` and the random
-    /// device is in ExitToUserspace mode. Userspace reads the pending request
-    /// (PID + length) via `Vm::random_request()`, stages the reply bytes with
-    /// `Vm::set_random_bytes()`, and runs again.
+    /// `HYPERCALL_GET_RANDOM` in ExitToUserspace mode: read the request with
+    /// `Vm::random_request()`, reply with `Vm::set_random_bytes()`, run again.
     VmcallGetRandom,
-    /// Event buffer is full - userspace must drain it, then call run() again.
+    /// Drain the event buffer, then run again.
     EventBufferFull,
-    /// Guest requested the next chunk of a host-side file (`HYPERCALL_FILE_FETCH`).
-    ///
-    /// The guest framed a request (offset + name) into its registered
-    /// `bedrock-file-xfer` feedback buffer and wants it filled with the next
-    /// chunk. The host should serve it — see [`crate::file_xfer::FileServer`] —
-    /// and call `run()` again.
+    /// `HYPERCALL_FILE_FETCH`: serve the next chunk with
+    /// [`crate::file_xfer::FileServer`], then run again.
     FileFetch,
-    /// Continuable exit - userspace should call run() again.
-    ///
-    /// Includes: preemption timer, need_resched, MWAIT, MONITOR,
-    /// I/O instruction (serial buffer full), pool exhausted.
+    /// Handled internally; just run again.
     Continue,
-    /// Unhandled VM exit (error condition).
-    ///
-    /// The hypervisor did not handle this exit. Use `VmExit::reason_str()`
-    /// and the raw `VmExit` fields for diagnostics.
+    /// The hypervisor did not handle this exit.
     UnhandledExit {
-        /// Raw exit reason code.
         reason: u32,
     },
     /// Guest sent the next chunk of a guest file (`HYPERCALL_FILE_STORE`).
@@ -79,36 +51,23 @@ pub enum ExitKind {
 }
 
 /// VM exit information returned from the RUN ioctl.
-///
-/// All host-visible output (serial console included) is carried by the unified
-/// event buffer, mmap'd separately and drained as `buffer[0..event_len]`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VmExit {
-    /// Exit reason (corresponds to ExitReason enum in kernel).
+    /// Kernel `ExitReason`.
     pub exit_reason: u32,
-    /// Reserved (formerly the serial buffer length; guest serial output now
-    /// flows through the event stream as `Serial` records). Kept so the ioctl
-    /// struct layout is unchanged.
     pub _reserved: u32,
-    /// Exit qualification (interpretation depends on exit reason).
     pub exit_qualification: u64,
-    /// Guest physical address (for EPT violations).
+    /// For EPT violations.
     pub guest_physical_addr: u64,
-    /// Number of valid bytes in the event buffer (mmap'd separately), i.e. the
-    /// cursor userspace drains as `event_buffer()[0..event_len]`. Zero when the
-    /// event stream is disabled.
+    /// Valid bytes in `event_buffer()` for this run.
     pub event_len: u32,
-    /// Explicit padding so the following `u64` fields are 8-byte aligned.
     pub _pad: u32,
-    /// Current emulated TSC value.
     pub emulated_tsc: u64,
-    /// TSC frequency in Hz.
     pub tsc_frequency: u64,
 }
 
 impl VmExit {
-    /// Get the exit reason as a string (for common reasons).
     pub fn reason_str(&self) -> &'static str {
         match self.exit_reason {
             0 => "EXCEPTION_NMI",
@@ -145,7 +104,6 @@ impl VmExit {
         }
     }
 
-    /// Get the categorized exit kind for pattern matching.
     pub fn kind(&self) -> ExitKind {
         match self.exit_reason {
             258 => ExitKind::VmcallShutdown,
@@ -162,20 +120,14 @@ impl VmExit {
             268 => ExitKind::FileFetch,
             269 => ExitKind::VmcallGetRandom,
             270 => ExitKind::FileStore,
-            // Continuable: preemption timer, need_resched, mwait, monitor,
-            // I/O instruction, pool exhausted, PEBS scratch-page registration,
-            // I/O channel page registration (no userspace action needed —
-            // bookkeeping is entirely between the guest and the kernel
-            // module).
+            // Preemption timer, need_resched, mwait, monitor, I/O instruction,
+            // pool exhausted, PEBS page and I/O page registration.
             52 | 256 | 36 | 39 | 30 | 262 | 263 | 264 => ExitKind::Continue,
             reason => ExitKind::UnhandledExit { reason },
         }
     }
 
-    /// Check if this exit should be followed by another run() call.
-    ///
-    /// Returns true for exits that are handled internally and don't require
-    /// userspace intervention beyond draining the serial buffer.
+    /// Whether to just run again (after draining events).
     pub fn is_continue(&self) -> bool {
         matches!(self.kind(), ExitKind::Continue | ExitKind::EventBufferFull)
     }

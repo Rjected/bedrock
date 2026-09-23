@@ -12,8 +12,7 @@ fn pod_bytes<T: Copy>(v: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts((v as *const T).cast::<u8>(), std::mem::size_of::<T>()) }
 }
 
-/// Append one TLV record to `buf`, padding to an 8-byte boundary. Mirrors the
-/// producer's framing so the reader can be tested against realistic bytes.
+/// Append one TLV record to `buf`, padded to 8 bytes like the producer does.
 fn push_record(buf: &mut Vec<u8>, seq: u64, tsc: u64, real_tsc: u64, kind: u16, payload: &[u8]) {
     let flags = match kind {
         k if k == EventKind::Diagnostic.as_u16() => 0,
@@ -223,9 +222,7 @@ fn jsonl_output_renders_kinds() {
         pod_bytes(&rand),
     );
 
-    // I/O channel request (bash on host): the metadata struct followed by the
-    // bedrock-io.ko request envelope. The reader should decode it into
-    // target/command/record_output rather than dumping the raw envelope bytes.
+    // A request envelope must decode into target/command/record_output.
     let io = IoChannelPayload {
         phase: IoChannelPhase::Request as u8,
         _pad: [0; 7],
@@ -296,9 +293,7 @@ fn filtered_jsonl_keeps_only_category() {
 
 #[test]
 fn exit_record_json_round_trips() {
-    // The CLI writes each `Exit` record's `ExitRecord` payload to the log JSONL,
-    // and the determinism tooling reads it back. Validate the serde round-trip
-    // and that padding is skipped.
+    // The determinism tooling reads `ExitRecord`s back from JSONL.
     let mut entry = crate::ExitRecord::new();
     entry.tsc = 1234;
     entry.exit_reason = 30;

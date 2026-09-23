@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Memory address types for x86-64 virtualization.
-//!
-//! This crate provides type-safe wrappers for physical and virtual addresses
-//! used in virtualization contexts (EPT, VMCS, etc.).
+//! Type-safe physical and virtual address wrappers for x86-64 virtualization.
 
 #![no_std]
 

@@ -161,16 +161,11 @@ fn send_pushover_notification(token: &str, user: &str, message: &str) {
 /// Result from a single VM run.
 struct RunResult {
     run_num: usize,
-    /// For single-entry modes (AtShutdown), this contains the single entry.
-    /// For checkpoint mode, this is empty and checkpoint_entries is used instead.
+    /// Single-entry modes (AtShutdown) only; otherwise see `checkpoint_entries`.
     exit_record: Option<ExitRecord>,
-    /// Checkpoint entries (only used when --checkpoint-interval is set).
     checkpoint_entries: Vec<ExitRecord>,
-    /// Path to the run directory containing all artifacts.
     run_dir: PathBuf,
-    /// Exit statistics from the VM run.
     exit_stats: Option<ExitStats>,
-    /// Wall-clock time for this run.
     wall_time: Duration,
 }
 
@@ -181,7 +176,6 @@ fn format_run_error(run_num: usize, run_dir: &Path, message: &str) -> String {
         run_num, message, run_dir
     );
 
-    // Include stderr tail if available
     let stderr_file = run_dir.join("stderr.txt");
     if let Ok(content) = fs::read_to_string(&stderr_file) {
         let content = content.trim();
@@ -209,37 +203,30 @@ fn generate_test_dir_name(args: &Args, vmlinux: &str) -> String {
     let minutes = (day_secs % 3600) / 60;
     let seconds = day_secs % 60;
 
-    // Simple days-since-epoch to date conversion
     let (year, month, day) = days_to_ymd(days);
 
     let mut parts = Vec::new();
 
-    // Kernel basename (without path and extension)
     let kernel_name = Path::new(vmlinux)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("kernel");
     parts.push(kernel_name.to_string());
 
-    // Memory
     parts.push(format!("{}mb", args.memory));
 
-    // Stop condition
     if let Some(tsc) = args.stop_at_tsc {
         parts.push(format!("tsc{}", tsc));
     } else if let Some(vt) = args.stop_at_vt {
         parts.push(format!("vt{:.1}s", vt));
     }
 
-    // Seed
     if let Some(seed) = args.rdrand_seed {
         parts.push(format!("seed{:#x}", seed));
     }
 
-    // Run count
     parts.push(format!("n{}", args.runs));
 
-    // Timestamp
     parts.push(format!(
         "{:04}{:02}{:02}-{:02}{:02}{:02}",
         year, month, day, hours, minutes, seconds
@@ -355,7 +342,6 @@ impl ProgressDisplay {
             0.0
         };
 
-        // Progress bar
         let filled = (self.completed * self.bar_width)
             .checked_div(self.total)
             .unwrap_or(0);
@@ -366,7 +352,6 @@ impl ProgressDisplay {
             "\u{2591}".repeat(empty),
         );
 
-        // Rate and ETA
         let rate = if elapsed.as_secs_f64() > 0.0 {
             self.completed as f64 / elapsed.as_secs_f64()
         } else {
@@ -379,7 +364,6 @@ impl ProgressDisplay {
             "--:--".to_string()
         };
 
-        // Average run time
         let avg_run = if !self.run_times.is_empty() {
             let total: Duration = self.run_times.iter().sum();
             format_run_time(total / self.run_times.len() as u32)
@@ -392,7 +376,6 @@ impl ProgressDisplay {
             eprint!("\x1b[{}A", self.lines_printed);
         }
 
-        // Line 1: progress bar + counts
         eprintln!(
             "\x1b[K  {} {}/{} ({:.1}%)",
             bar,
@@ -401,7 +384,6 @@ impl ProgressDisplay {
             pct,
         );
 
-        // Line 2: timing info
         eprintln!(
             "\x1b[K  \x1b[90mElapsed:\x1b[0m {:<10} \x1b[90mETA:\x1b[0m {:<10} \x1b[90mRate:\x1b[0m {:.1}/s   \x1b[90mAvg:\x1b[0m {}/run",
             format_duration(elapsed),
@@ -410,7 +392,6 @@ impl ProgressDisplay {
             avg_run,
         );
 
-        // Line 3: results breakdown
         let ok_str = format!("\x1b[32m{} ok\x1b[0m", format_count(self.ok));
         let div_str = if self.divergent > 0 {
             format!("\x1b[31m{} divergent\x1b[0m", format_count(self.divergent))
@@ -549,7 +530,6 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    // Generate test subdirectory within workdir
     let test_dir_name = args
         .test_name
         .clone()
@@ -558,7 +538,6 @@ fn main() -> std::process::ExitCode {
     // Replace workdir with the full test directory path for the rest of the run
     args.workdir = test_dir;
 
-    // Create work directory
     if let Err(e) = fs::create_dir_all(&args.workdir) {
         eprintln!(
             "Error: Failed to create work directory {:?}: {}",
@@ -567,7 +546,6 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
-    // Write configuration file
     write_config_file(&args, &vmlinux, &cli_path).expect("Failed to write config file");
 
     eprintln!();
@@ -684,7 +662,6 @@ fn run_sequential(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::
             format_run_time(result.wall_time)
         );
 
-        // Print the exit record or checkpoint summary
         if let Some(ref entry) = result.exit_record {
             print_exit_record(entry);
         } else {
@@ -692,7 +669,6 @@ fn run_sequential(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::
         }
         eprintln!("  Run data saved to: {:?}", result.run_dir);
 
-        // Compare
         match &reference_result {
             None => {
                 eprintln!("  \x1b[90m(reference run)\x1b[0m");
@@ -705,7 +681,6 @@ fn run_sequential(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::
                 if let Some(diff) = diff {
                     divergent_count += 1;
                     summary_lines.push(format!("Run {:03}: DIVERGENT", run_num));
-                    // Move divergent run directory into workdir for analysis
                     let dest = args.workdir.join(format!("run-{:03}", run_num));
                     let status = Command::new("mv").arg(&result.run_dir).arg(&dest).status();
                     match status {
@@ -745,7 +720,6 @@ fn run_sequential(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::
                     ok_count += 1;
                     eprintln!("  \x1b[32m(matches reference)\x1b[0m");
                     summary_lines.push(format!("Run {:03}: OK", run_num));
-                    // Clean up matching run directory
                     let _ = fs::remove_dir_all(&result.run_dir);
                 }
             }
@@ -794,9 +768,8 @@ fn compare_run_results(
     }
 }
 
-/// Compare a run result against the reference, record the outcome, and clean up
-/// matching run directories. Divergent runs are moved from their temp directory
-/// into the workdir for later analysis.
+/// Compare against the reference and record the outcome. Matching run dirs are
+/// deleted; divergent ones are moved into the workdir.
 fn compare_and_record(
     reference: &RunResult,
     run_result: RunResult,
@@ -810,7 +783,6 @@ fn compare_and_record(
     let diff = compare_run_results(reference, &run_result, multi_entry);
     if let Some(diff) = diff {
         summary_lines.push(format!("Run {:03}: DIVERGENT", run_num));
-        // Move divergent run directory into workdir for analysis
         let dest = workdir.join(format!("run-{:03}", run_num));
         let status = Command::new("mv")
             .arg(&run_result.run_dir)
@@ -831,7 +803,6 @@ fn compare_and_record(
     } else {
         summary_lines.push(format!("Run {:03}: OK", run_num));
         *ok_count += 1;
-        // Clean up matching run directory
         let _ = fs::remove_dir_all(&run_result.run_dir);
     }
 }
@@ -839,15 +810,12 @@ fn compare_and_record(
 fn run_parallel(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::ExitCode {
     let (tx, rx) = mpsc::channel::<Result<RunResult, String>>();
 
-    // Spawn worker threads
     let mut next_run = 1;
     let mut active_threads = 0;
 
     let multi_entry = args.checkpoint_interval.is_some() || args.all_exits;
 
-    // Compare results incrementally as they arrive to avoid accumulating all
-    // results in memory (which would be catastrophic for large run counts with
-    // multi-entry capture modes).
+    // Compare incrementally so multi-entry results aren't all held in memory.
     let mut reference: Option<RunResult> = None;
     let mut pending: Vec<RunResult> = Vec::new();
     let mut completed = 0;
@@ -860,7 +828,6 @@ fn run_parallel(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::Ex
     let mut notified = false;
 
     while completed < args.runs {
-        // Spawn new threads up to the parallel limit
         while active_threads < args.parallel && next_run <= args.runs {
             let run_num = next_run;
             next_run += 1;
@@ -870,7 +837,6 @@ fn run_parallel(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::Ex
             let cli_path = cli_path.to_path_buf();
             let workdir = args.workdir.clone();
 
-            // Clone args for the thread
             let vmlinux = vmlinux.to_string();
             let initramfs = args.initramfs.clone();
             let cmdline = args.cmdline.clone();
@@ -913,7 +879,6 @@ fn run_parallel(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::Ex
             });
         }
 
-        // Wait for a result
         if let Ok(result) = rx.recv() {
             active_threads -= 1;
             completed += 1;
@@ -995,7 +960,6 @@ fn run_parallel(args: &Args, vmlinux: &str, cli_path: &Path) -> std::process::Ex
         return std::process::ExitCode::FAILURE;
     }
 
-    // Print divergence details if any
     if !divergences.is_empty() {
         eprintln!();
         for (run_num, diff) in &divergences {
@@ -1135,7 +1099,6 @@ fn run_vm_inner(
     let stderr_file = run_dir.join("stderr.txt");
     let command_file = run_dir.join("command.txt");
 
-    // Build CLI command with absolute paths
     let mut cmd = Command::new(cli_path);
     cmd.arg(make_absolute(vmlinux));
 
@@ -1187,7 +1150,6 @@ fn run_vm_inner(
     let exit_stats_file = run_dir.join("exit-stats.json");
     cmd.arg("--exit-stats-json").arg(&exit_stats_file);
 
-    // Write command to file
     {
         let mut f = File::create(&command_file)
             .map_err(|e| format!("Run {}: failed to create command file: {}", run_num, e))?;
@@ -1199,7 +1161,6 @@ fn run_vm_inner(
         writeln!(f, "{}", args_str.join(" ")).ok();
     }
 
-    // Set up output capture
     let stdout_handle = File::create(&stdout_file)
         .map_err(|e| format!("Run {}: failed to create stdout file: {}", run_num, e))?;
     let stderr_handle = File::create(&stderr_file)
@@ -1214,7 +1175,6 @@ fn run_vm_inner(
         .map_err(|e| format!("Run {}: failed to execute bedrock-cli: {}", run_num, e))?;
     let wall_time = run_start.elapsed();
 
-    // Write exit status to a status file
     {
         let status_file = run_dir.join("status.txt");
         if let Ok(mut f) = File::create(&status_file) {
@@ -1231,10 +1191,9 @@ fn run_vm_inner(
         ));
     }
 
-    // Parse exit stats JSON
     let exit_stats = parse_exit_stats_file(&exit_stats_file).ok();
 
-    // Parse log file (don't delete it - keep for analysis)
+    // Keep the log file for analysis.
     let multi_entry = checkpoint_interval.is_some() || all_exits;
     if multi_entry {
         let entries = parse_events_file_entries(&events_file).map_err(|e| {
@@ -1424,14 +1383,11 @@ fn compare_exit_records(a: &ExitRecord, b: &ExitRecord) -> Option<String> {
     }
 }
 
-/// Compare two sets of checkpoint results and find the first divergence.
-///
-/// Returns a string describing where and how the results diverged, or None if identical.
+/// Describe the first divergence between two checkpoint runs, if any.
 fn compare_checkpoint_results(ref_result: &RunResult, test_result: &RunResult) -> Option<String> {
     let ref_entries = &ref_result.checkpoint_entries;
     let test_entries = &test_result.checkpoint_entries;
 
-    // Find first divergent checkpoint
     let min_len = ref_entries.len().min(test_entries.len());
 
     for i in 0..min_len {
@@ -1448,7 +1404,6 @@ fn compare_checkpoint_results(ref_result: &RunResult, test_result: &RunResult) -
         }
     }
 
-    // Check for different number of checkpoints
     if ref_entries.len() != test_entries.len() {
         return Some(format!(
             "Different number of checkpoints: {} vs {}",
@@ -1470,14 +1425,11 @@ fn parse_exit_stats_file(path: &Path) -> io::Result<ExitStats> {
     })
 }
 
-/// Compare deterministic exit type counts between two runs.
-///
-/// Non-deterministic exits (external_interrupt, exception_nmi, ept_violation, other)
-/// are excluded from comparison since they vary between runs by design.
+/// Compare deterministic exit type counts; non-deterministic ones
+/// (external_interrupt, exception_nmi, ept_violation, other) are excluded.
 fn compare_exit_stats(a: &ExitStats, b: &ExitStats) -> Option<String> {
     let mut diffs = Vec::new();
 
-    // Deterministic exit types only
     let deterministic_exits: &[(&str, u64, u64)] = &[
         ("cpuid", a.cpuid.count, b.cpuid.count),
         ("msr_read", a.msr_read.count, b.msr_read.count),

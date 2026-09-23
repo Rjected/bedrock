@@ -19,10 +19,7 @@ use crate::rng::{InputRecording, InputSource, IoInput, RngMode};
 use crate::time::{VirtDuration, VirtTime};
 use crate::tree::Tree;
 
-/// Tree-wide options passed to [`Checkpoint::initial_when_ready_with`].
-///
-/// All fields have sensible defaults; use struct-update syntax for the ones
-/// you want to override:
+/// Tree-wide options passed to [`Checkpoint::initial_when_ready_with`]:
 ///
 /// ```ignore
 /// use bedrock_lab::{Checkpoint, LabOpts, RngMode};
@@ -32,21 +29,14 @@ use crate::tree::Tree;
 /// })?;
 /// ```
 pub struct LabOpts {
-    /// Emulated TSC frequency in Hz. Must match the value the [`Vm`] was
-    /// built with.
+    /// Emulated TSC frequency in Hz; must match the [`Vm`]'s.
     pub tsc_frequency: u64,
-    /// Where to forward serial lines, branch creations, and checkpoint
-    /// creations. Defaults to a sink that discards everything.
+    /// Defaults to discarding everything.
     pub sink: Arc<dyn EventSink>,
-    /// How guest `RDRAND`/`RDSEED` is served for every branch in this tree.
     pub rng: RngMode,
-    /// Host files exposed to the guest over the file-transmission hypercall
-    /// (`HYPERCALL_FILE_FETCH`), as `(guest_name, host_path)` pairs. The
-    /// generic podman initrd downloads its workload files (`compose.yaml` /
-    /// `images.tar`) by name during boot, so callers booting such an initrd
-    /// must supply them here. Files are only fetched before the ready
-    /// hypercall, so they are served during this constructor's boot loop and
-    /// need not persist into the tree.
+    /// `(guest_name, host_path)` pairs served over `HYPERCALL_FILE_FETCH`
+    /// during boot (e.g. the podman initrd's `compose.yaml` / `images.tar`).
+    /// Only served before the ready hypercall.
     pub files: Vec<(String, String)>,
 }
 
@@ -65,13 +55,9 @@ impl Default for LabOpts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CheckpointId(pub(crate) u64);
 
-/// An immutable moment in virtual time — a halted VM that can be forked into
-/// one or more [`Branch`]es.
-///
-/// `Checkpoint` is a cheap-to-clone handle (`Arc` under the hood). All clones
-/// of the same checkpoint refer to the same frozen VM and share the same tree
-/// registry. The underlying VM is dropped automatically when the last handle
-/// (and any descendant branch/checkpoint that pinned it) goes away.
+/// An immutable moment in virtual time: a halted VM that can be forked into
+/// [`Branch`]es. Cheap to clone (`Arc`); the VM is dropped with the last handle
+/// or descendant pinning it.
 #[derive(Clone)]
 pub struct Checkpoint {
     pub(crate) inner: Arc<CheckpointInner>,
@@ -80,73 +66,42 @@ pub struct Checkpoint {
 pub(crate) struct CheckpointInner {
     pub(crate) id: CheckpointId,
     pub(crate) time: VirtTime,
-    /// The halted VM. Used only as a `vm.fork()` source — never run again.
+    /// Only ever used as a `vm.fork()` source; never run again.
     pub(crate) vm: Vm,
-    /// VM replay parent. This is the checkpoint whose VM state was forked to
-    /// construct this checkpoint's VM state. It never changes.
+    /// The checkpoint whose VM was forked to build this one (fixed; may differ
+    /// from the logical tree parent after a rewind).
     pub(crate) _vm_parent: Option<Weak<CheckpointInner>>,
     pub(crate) lab: Arc<LabInner>,
-    /// Serial line in progress at the moment this checkpoint was taken.
-    /// Descendant branches start with this prepended so a line that
-    /// straddles `Branch::checkpoint` is not split across two events.
+    /// Serial line in progress, prepended to descendant branches.
     pub(crate) partial_line: PartialLine,
-    /// Userspace input source captured at this checkpoint's virtual time.
-    /// Branches fork their own clone, so the order in which sibling branches
-    /// run does not affect the RNG or I/O inputs any individual branch sees.
-    /// `None` for kernel-side RNG modes without a userspace source — those
-    /// propagate through the VM-state COW like everything else.
+    /// Cloned into each branch. `None` for kernel-side RNG modes, whose state
+    /// propagates through the VM fork.
     pub(crate) input_source: Option<Box<dyn InputSource>>,
-    /// Next source-provided I/O action not yet queued because it was beyond
-    /// the last run target or the VM queue was full.
     pub(crate) pending_input_io: Option<IoInput>,
-    /// True once the input source has no more I/O actions.
     pub(crate) input_io_exhausted: bool,
-    /// Inputs consumed along the path to this checkpoint.
     pub(crate) input_recording: InputRecording,
 }
 
 impl Checkpoint {
-    /// Run a fully-set-up root [`Vm`] directly until the guest issues the
-    /// ready hypercall, then create the initial checkpoint at that point.
+    /// Boot a fully set-up root [`Vm`] (unforked, like `bedrock-cli`) until
+    /// `HYPERCALL_READY` and make the initial checkpoint there. Errors if
+    /// `deadline` (at [`bedrock_vm::DEFAULT_TSC_FREQUENCY`]) passes first or on
+    /// an unexpected exit.
     ///
-    /// This is the usual constructor for Linux workload exploration: the VM is
-    /// booted without forking, which matches `bedrock-cli`'s startup path, and
-    /// only the ready guest is handed to the lab for branching. `deadline`
-    /// bounds the boot in virtual time and must use
-    /// [`bedrock_vm::DEFAULT_TSC_FREQUENCY`]; use
-    /// [`Checkpoint::initial_when_ready_with`] to pick a different rate.
-    ///
-    /// The VM must already have its kernel/initramfs loaded and
-    /// [`Vm::setup_linux_boot`](bedrock_vm::Vm::setup_linux_boot) applied.
-    /// The guest must eventually issue `HYPERCALL_READY`; otherwise this
-    /// returns an error when the deadline is reached or on any unexpected VM
-    /// exit. Serial output and feedback-buffer registrations before ready are
-    /// emitted through the configured [`EventSink`] using reserved
-    /// [`BranchId(0)`](crate::BranchId), and the ready checkpoint inherits any
-    /// feedback-buffer registrations.
+    /// Pre-ready serial output and feedback-buffer registrations are emitted
+    /// under reserved [`BranchId(0)`](crate::BranchId).
     pub fn initial_when_ready(vm: Vm, deadline: VirtTime) -> Result<Self> {
         Self::initial_when_ready_with(vm, deadline, LabOpts::default())
     }
 
-    /// One-stop ready constructor that takes a [`LabOpts`] for everything
-    /// configurable about the tree.
+    /// [`initial_when_ready`](Self::initial_when_ready) with [`LabOpts`].
     ///
-    /// If `opts.rng` is [`RngMode::Seeded`] or [`RngMode::Source`], the VM's
-    /// `RDRAND`/`RDSEED` mode is configured before the root VM is first run.
-    /// If `opts.rng` is [`RngMode::Source`], the userspace source is not
-    /// consumed during the root boot; root boot simply exits to userspace if
-    /// the guest executes `RDRAND`/`RDSEED` before ready.
+    /// The RNG mode is configured before first run. A [`RngMode::Source`] is
+    /// not consumed during boot: pre-ready `RDRAND`/`RDSEED` exits are errors.
     pub fn initial_when_ready_with(mut vm: Vm, deadline: VirtTime, opts: LabOpts) -> Result<Self> {
         Self::check_frequency(deadline.frequency(), opts.tsc_frequency)?;
         let (mut opts, input_source) = Self::configure_rng(&vm, opts)?;
-        // The guest downloads its workload files (compose.yaml / images.tar)
-        // over `HYPERCALL_FILE_FETCH` during boot, before it issues
-        // `HYPERCALL_READY`. Serve them from the host paths the caller supplied.
-        // Take them out of `opts` (which is moved into the checkpoint below);
-        // they need not persist past boot.
         let mut file_server = FileServer::new(std::mem::take(&mut opts.files));
-        // Capture guest console output as `Serial` event records during boot,
-        // the same channel branches use; the root VM gets reserved `BranchId(0)`.
         vm.set_event_config(&VmEventConfig::enabled(EventCategories::SERIAL))
             .map_err(|source| {
                 LabError::Vm(VmError::Ioctl {
@@ -298,27 +253,15 @@ impl Checkpoint {
         crate::RecordedInputSource::new(self.inner.input_recording.clone())
     }
 
-    /// Fork a fresh [`Branch`] from this checkpoint.
-    ///
-    /// Multiple branches can be forked from the same checkpoint; each gets
-    /// its own COW VM, its own clone of any userspace input source, and
-    /// explores forward independently. Two sibling branches see the same
-    /// input stream regardless of the order in which they're driven.
+    /// Fork a [`Branch`] with its own CoW VM and input-source clone.
     pub fn branch(&self) -> Result<Branch> {
         let input_source = self.inner.input_source.as_ref().map(|s| s.clone_box());
         self.branch_inner(input_source, false)
     }
 
-    /// Fork a branch that *overrides* the checkpoint's userspace input
-    /// source, regardless of the tree's original [`RngMode`](crate::RngMode).
-    ///
-    /// The source can provide both RDRAND/RDSEED values and caller-consumed
-    /// I/O inputs. Intended for fuzzing loops: snapshot the guest at a
-    /// "ready" point once, then call this per iteration with the next input
-    /// wrapped in an [`InputSource`] so each iteration sees fresh bytes. The
-    /// override forces the kernel into exit-to-userspace mode on the new
-    /// branch's VM — descendants of *this* branch then inherit that mode via
-    /// the usual VM-state COW.
+    /// Fork a branch with `source` overriding the tree's input source and
+    /// [`RngMode`](crate::RngMode) (e.g. one fuzz input per branch). Forces
+    /// exit-to-userspace RDRAND on the new VM, which descendants inherit.
     pub fn branch_with_input_source<S: InputSource + 'static>(&self, source: S) -> Result<Branch> {
         self.branch_inner(Some(Box::new(source)), true)
     }
@@ -345,18 +288,12 @@ impl Checkpoint {
             self.inner.input_io_exhausted,
             self.inner.input_recording.clone(),
         );
-        // Forked VMs start with the event stream disabled; turn on the lab's
-        // always-on capture (SERIAL, plus the input-recording categories for a
-        // sourced branch) from the first instruction.
         branch.enable_event_capture()?;
         Ok(branch)
     }
 
-    /// Logical parent checkpoint in the lab tree, if any. `None` for the root.
-    ///
-    /// This is the user-facing ancestry used by [`Tree`](crate::Tree). It may
-    /// differ from the underlying VM replay parent for checkpoints created by
-    /// [`Checkpoint::rewind`].
+    /// Logical parent in the [`Tree`](crate::Tree); `None` for the root. May
+    /// differ from the VM fork parent after [`Checkpoint::rewind`].
     pub fn parent(&self) -> Option<Checkpoint> {
         self.inner
             .lab
@@ -367,18 +304,10 @@ impl Checkpoint {
             .map(|inner| Checkpoint { inner })
     }
 
-    /// Take a new [`Checkpoint`] at `self.time() - by`.
-    ///
-    /// Walks `self`'s ancestry for the latest checkpoint whose time is at or
-    /// before the target, forks a fresh VM from it, replays forward to the
-    /// exact target time, and freezes the result into a new checkpoint.
-    ///
-    /// If a logical ancestor checkpoint or a prior rewind-created checkpoint
-    /// already sits at exactly the target time, that checkpoint is returned
-    /// directly without replaying or adding a new node.
-    ///
-    /// Errors with [`LabError::NoCheckpointBefore`] if no ancestor checkpoint
-    /// is early enough.
+    /// A checkpoint at `self.time() - by`, made by replaying from the latest
+    /// ancestor at or before that time. An ancestor exactly at the target is
+    /// returned as-is. Errors with [`LabError::NoCheckpointBefore`] if none is
+    /// early enough.
     pub fn rewind(&self, by: VirtDuration) -> Result<Checkpoint> {
         if by.frequency() != self.inner.lab.tsc_frequency {
             return Err(LabError::FrequencyMismatch {

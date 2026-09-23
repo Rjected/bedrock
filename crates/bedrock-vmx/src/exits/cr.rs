@@ -17,7 +17,6 @@ pub fn handle_cr_access<C: VmContext>(
 ) -> ExitHandlerResult {
     let gpr_value = get_gpr_value(&ctx.state().gprs, qual.register);
 
-    // Get VMX capabilities for fixed bits
     let vcpu = <C::V as Vmx>::current_vcpu();
     let caps = vcpu.capabilities();
 
@@ -25,14 +24,11 @@ pub fn handle_cr_access<C: VmContext>(
         CrAccessType::MovToCr => {
             let result = match qual.cr_number {
                 0 => {
-                    // CR0 - apply VMX constraints (bhyve approach)
-                    // ones_mask = bits that must be 1, zeros_mask = bits that must be 0
+                    // Apply VMX fixed bits (like bhyve); the read shadow keeps
+                    // the guest's requested value.
                     let ones_mask = caps.cr0_fixed0 & caps.cr0_fixed1;
                     let zeros_mask = !caps.cr0_fixed0 & !caps.cr0_fixed1;
                     let cr0 = (gpr_value | ones_mask) & !zeros_mask;
-
-                    // Shadow gets the guest's requested value (what they think CR0 is)
-                    // Actual GUEST_CR0 gets the constrained value
                     ctx.state()
                         .vmcs
                         .write_natural(VmcsFieldNatural::GuestCr0, cr0)
@@ -44,8 +40,8 @@ pub fn handle_cr_access<C: VmContext>(
                         .map_err(|_| ExitError::Fatal("Failed to write CR0"))
                 }
                 3 => {
-                    // CR3 - clear bit 63 (PCID preserve flag - not stored in VMCS)
-                    // Intel SDM Vol 3C 28.3.1.1: CR3 field should not set bits 63:MAXPHYADDR
+                    // Clear bit 63 (PCID no-flush); the VMCS field must not set
+                    // bits 63:MAXPHYADDR (SDM Vol 3C 28.3.1.1).
                     let cr3 = gpr_value & !(1u64 << 63);
                     let write_result = ctx
                         .state()
@@ -53,11 +49,8 @@ pub fn handle_cr_access<C: VmContext>(
                         .write_natural(VmcsFieldNatural::GuestCr3, cr3)
                         .map_err(|_| ExitError::Fatal("Failed to write CR3"));
 
-                    // With VPID enabled, TLB entries are tagged and persist across VM entry/exit.
-                    // When the guest changes CR3, we must flush TLB entries for this VPID to
-                    // ensure the new page tables take effect. This is critical for text_poke
-                    // and other code that relies on TLB coherency after CR3 switches.
-                    // Use single-context INVVPID (type 1) to flush all entries for this VPID.
+                    // VPID-tagged TLB entries survive VM entry/exit, so flush
+                    // this VPID on CR3 writes (text_poke relies on it).
                     if caps.has_vpid {
                         if let Ok(vpid) = ctx.state().vmcs.read16(VmcsField16::VirtualProcessorId) {
                             let _ = <C::V as Vmx>::invvpid_single_context(vpid);
@@ -66,14 +59,10 @@ pub fn handle_cr_access<C: VmContext>(
                     write_result
                 }
                 4 => {
-                    // CR4 - apply VMX constraints (bhyve approach)
-                    // ones_mask = bits that must be 1, zeros_mask = bits that must be 0
+                    // Same fixed-bit handling as CR0.
                     let ones_mask = caps.cr4_fixed0 & caps.cr4_fixed1;
                     let zeros_mask = !caps.cr4_fixed0 & !caps.cr4_fixed1;
                     let cr4 = (gpr_value | ones_mask) & !zeros_mask;
-
-                    // Shadow gets the guest's requested value (what they think CR4 is)
-                    // Actual GUEST_CR4 gets the constrained value
                     ctx.state()
                         .vmcs
                         .write_natural(VmcsFieldNatural::GuestCr4, cr4)
@@ -85,7 +74,7 @@ pub fn handle_cr_access<C: VmContext>(
                         .map_err(|_| ExitError::Fatal("Failed to write CR4"))
                 }
                 8 => {
-                    // CR8 (TPR) - ignore for now
+                    // CR8 (TPR) ignored.
                     Ok(())
                 }
                 _ => Err(ExitError::Fatal("Write to unsupported CR")),
@@ -110,7 +99,6 @@ pub fn handle_cr_access<C: VmContext>(
             }
         }
         CrAccessType::Clts => {
-            // Clear TS bit in CR0
             let cr0 = match ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr0) {
                 Ok(v) => v & !(1 << 3),
                 Err(e) => return ExitHandlerResult::Error(ExitError::VmcsReadError(e)),
@@ -135,7 +123,6 @@ pub fn handle_cr_access<C: VmContext>(
             }
         }
         CrAccessType::Lmsw => {
-            // Load machine status word (low 16 bits of CR0)
             let msw = qual.lmsw_source_data;
             let cr0 = match ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr0) {
                 Ok(v) => (v & 0xFFFFFFF0) | (u64::from(msw) & 0xF),

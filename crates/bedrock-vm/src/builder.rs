@@ -38,15 +38,8 @@ pub struct VmBuilder {
 }
 
 impl VmBuilder {
-    /// Create a new VM builder with default settings.
-    ///
-    /// Default settings:
-    /// - Memory size: 4 GB (ignored for forked VMs)
-    /// - Device path: /dev/bedrock
-    /// - RDRAND: Not configured (uses kernel default)
-    /// - Single-step: Disabled
-    /// - Stop-at-TSC: Disabled
-    /// - Parent: None (creates root VM)
+    /// Defaults: 4 GB root VM on /dev/bedrock, kernel-default RDRAND, no
+    /// single-step or stop-at-TSC.
     pub fn new() -> Self {
         Self {
             memory_size: DEFAULT_MEMORY_SIZE,
@@ -59,85 +52,59 @@ impl VmBuilder {
         }
     }
 
-    /// Create a forked VM from an existing parent VM.
-    ///
-    /// When this is set, `memory_size` is ignored as forked VMs share memory
-    /// with their parent using copy-on-write semantics.
+    /// Build a CoW fork of `parent_id` instead of a root VM.
     pub fn forked_from(mut self, parent_id: u64) -> Self {
         self.parent_id = Some(parent_id);
         self
     }
 
-    /// Set the guest memory size in bytes.
-    ///
-    /// This is ignored for forked VMs.
+    /// Ignored for forked VMs.
     pub fn memory_size(mut self, size: usize) -> Self {
         self.memory_size = size;
         self
     }
 
-    /// Set the guest memory size in megabytes.
-    ///
-    /// This is ignored for forked VMs.
+    /// Ignored for forked VMs.
     pub fn memory_mb(mut self, mb: usize) -> Self {
         self.memory_size = mb * 1024 * 1024;
         self
     }
 
-    /// Set the emulated TSC frequency in Hz.
-    ///
-    /// Defaults to [`DEFAULT_TSC_FREQUENCY`]. Ignored for forked VMs, which
-    /// inherit the TSC frequency from their parent.
+    /// Emulated TSC frequency in Hz (default [`DEFAULT_TSC_FREQUENCY`]).
+    /// Forked VMs inherit their parent's.
     pub fn tsc_frequency(mut self, hz: u64) -> Self {
         self.tsc_frequency = hz;
         self
     }
 
-    /// Configure RDRAND/RDSEED emulation.
     pub fn rdrand(mut self, config: RdrandConfig) -> Self {
         self.rdrand_config = Some(config);
         self
     }
 
-    /// Set a custom device path (default: /dev/bedrock).
     pub fn device_path(mut self, path: &str) -> Self {
         self.device_path = path.to_string();
         self
     }
 
-    /// Enable single-stepping (MTF) for a specific TSC range.
+    /// Single-step (MTF) within a TSC range.
     pub fn single_step(mut self, tsc_start: u64, tsc_end: u64) -> Self {
         self.single_step = Some((tsc_start, tsc_end));
         self
     }
 
-    /// Set the TSC value at which the VM should stop.
     pub fn stop_at_tsc(mut self, tsc: u64) -> Self {
         self.stop_at_tsc = Some(tsc);
         self
     }
 
-    /// Build the VM with the configured settings.
-    ///
-    /// Creates either a root VM or a forked VM depending on whether
-    /// `forked_from()` was called.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The device cannot be opened
-    /// - VM creation fails
-    /// - Memory mapping fails
-    /// - Configuration fails
     pub fn build(self) -> Result<Vm, VmError> {
         let vm = if let Some(parent_id) = self.parent_id {
-            // Create forked VM
             Vm::create_forked(parent_id).map_err(|e| VmError::Ioctl {
                 operation: "CREATE_FORKED_VM",
                 source: e,
             })?
         } else {
-            // Create root VM
             use std::fs::OpenOptions;
 
             if self.memory_size == 0 {
@@ -159,7 +126,6 @@ impl VmBuilder {
             })?
         };
 
-        // Apply configuration (works for both root and forked VMs)
         if let Some(config) = self.rdrand_config {
             vm.set_rdrand_config(&config).map_err(|e| VmError::Ioctl {
                 operation: "SET_RDRAND_CONFIG",

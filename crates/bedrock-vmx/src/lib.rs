@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! VMX (Virtual Machine Extensions) support for x86-64 virtualization.
-//!
-//! This crate provides platform-agnostic VMX abstractions including:
-//! - VMCS field encodings organized by width (16-bit, 32-bit, 64-bit, natural-width)
-//! - Traits for VMCS operations
+//! Platform-agnostic VMX abstractions: VMCS fields, VMX/VMCS traits, VM
+//! implementations, and exit handling.
 
 #![no_std]
 
@@ -58,8 +55,7 @@ pub use exits::{
     ExitReason, IoQualification, IO_CHANNEL_IRQ,
 };
 
-/// Test mocks for use in other crates' tests.
-/// Available when the `test-utils` feature is enabled.
+/// Test mocks for other crates' tests (`test-utils` feature).
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_mocks;
 

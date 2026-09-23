@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
 //! Constants for Linux x86-64 boot protocol.
-//!
-//! Organized by category for clarity and maintainability.
 
 /// Memory layout constants for guest memory.
 pub mod memory {
@@ -76,11 +74,8 @@ pub mod mptable {
 /// Default values for boot configuration.
 pub mod defaults {
     pub const MEMORY_MB: usize = 5120;
-    // The kernel console is the paravirtual batch console (hvc0), registered
-    // by the guest `bedrock-console.ko` module — one VMCALL per printk line
-    // instead of one VMX I/O exit per byte through the emulated 8250.
-    // earlyprintk=serial still handles the early-boot window (before the
-    // module loads) through the 8250; that output is bounded and fine.
+    // hvc0 is `bedrock-console.ko`'s paravirtual console: one VMCALL per line
+    // instead of one I/O exit per byte. Early boot still goes via the 8250.
     pub const CMDLINE: &str = "console=hvc0 nopti nokaslr mitigations=off break audit=0";
     pub const RDRAND_SEED: u64 = 0x12345678_deadbeef;
 }

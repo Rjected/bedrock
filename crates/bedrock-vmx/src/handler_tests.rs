@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Tests for BedrockHandler.
-//!
-//! These tests verify the handler's VMX state management and VM tracking functionality.
-//! In the new architecture, VMs are owned by file descriptors (via anon_inodes),
-//! and the handler only maintains weak references for tracking.
+//! Tests for BedrockHandler VMX state management and VM tracking.
 
 extern crate std;
 
@@ -14,8 +10,7 @@ use std::sync::Mutex;
 
 use core::ptr::NonNull;
 
-/// Global lock to ensure multi-CPU tests run serially.
-/// Tests using GLOBAL_TEST_STATE must acquire this lock.
+/// Serializes tests that use GLOBAL_TEST_STATE.
 static MULTI_CPU_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 use crate::{
@@ -30,8 +25,7 @@ use memory::VirtAddr;
 
 use crate::BedrockHandler;
 
-/// Mock Page for testing.
-/// Uses a heap-allocated buffer to provide a valid virtual address.
+/// Mock Page backed by a heap buffer.
 struct MockPage {
     buffer: Box<[u8; 4096]>,
 }
@@ -325,9 +319,7 @@ impl Vmx for MockVmx {
     }
 }
 
-// =============================================================================
 // Multi-CPU Mock Infrastructure for VMX Initialization Testing
-// =============================================================================
 
 const MAX_TEST_CPUS: usize = 8;
 
@@ -342,8 +334,7 @@ struct MultiCpuState {
     has_vmxon_region: bool,
     /// CR4 value for this CPU.
     cr4: u64,
-    /// Feature control MSR value for this CPU.
-    /// Feature control starts unlocked with VMX disabled.
+    /// Feature control MSR value; starts unlocked with VMX disabled.
     feature_control: u64,
 }
 
@@ -491,7 +482,6 @@ impl MultiCpuPage {
     fn new() -> Self {
         let buffer = Box::new([0u8; 8192]);
         let ptr = buffer.as_ptr() as usize;
-        // Find offset to next 4KB boundary
         let aligned_offset = if ptr & 0xFFF == 0 {
             0
         } else {
@@ -510,7 +500,6 @@ impl MultiCpuPage {
 
 impl Page for MultiCpuPage {
     fn physical_address(&self) -> HostPhysAddr {
-        // Return the 4KB-aligned address
         HostPhysAddr::new(self.aligned_ptr() as u64)
     }
 
@@ -734,8 +723,7 @@ impl Vmx for MultiCpuVmx {
         !with_state(|s| s.error_config.vmx_not_supported)
     }
 
-    // Uses the default implementation from the trait!
-    // This exercises the real VMX initialization logic.
+    // Uses the trait's default initialize() to exercise the real logic.
 
     fn current_vcpu() -> &'static <Self::M as Machine>::Vcpu {
         &MULTI_CPU_VCPU
@@ -803,9 +791,7 @@ fn get_cpu_states() -> [MultiCpuState; MAX_TEST_CPUS] {
     with_state(|s| s.cpu_states)
 }
 
-// =============================================================================
 // Handler VM Tracking Tests
-// =============================================================================
 
 /// Mock VM for testing VM tracking.
 struct MockVm;
@@ -832,13 +818,11 @@ fn test_handler_vm_tracking() {
     let machine = MockMachine;
     let mut handler = BedrockHandler::<MockVmx, 64>::new(&machine).unwrap();
 
-    // Simulate adding VMs
     let vm1 = Box::new(MockVm);
     let vm2 = Box::new(MockVm);
     let vm1_ptr = Box::into_raw(vm1);
     let vm2_ptr = Box::into_raw(vm2);
 
-    // Add VMs to tracking
     handler.add_vm(NonNull::new(vm1_ptr).unwrap(), 1);
     handler.add_vm(NonNull::new(vm2_ptr).unwrap(), 2);
 
@@ -846,7 +830,6 @@ fn test_handler_vm_tracking() {
     handler.remove_vm(vm1_ptr);
     handler.remove_vm(vm2_ptr);
 
-    // Clean up
     unsafe {
         let _ = Box::from_raw(vm1_ptr);
         let _ = Box::from_raw(vm2_ptr);
@@ -861,7 +844,6 @@ fn test_handler_vm_limit() {
     assert!(handler.can_create_vm());
     assert!(handler.alloc_vm_id().is_some());
 
-    // Simulate adding a VM
     let vm1 = Box::new(MockVm);
     let vm1_ptr = Box::into_raw(vm1);
     handler.add_vm(NonNull::new(vm1_ptr).unwrap(), 1);
@@ -869,7 +851,6 @@ fn test_handler_vm_limit() {
     assert!(handler.can_create_vm());
     assert!(handler.alloc_vm_id().is_some());
 
-    // Add second VM
     let vm2 = Box::new(MockVm);
     let vm2_ptr = Box::into_raw(vm2);
     handler.add_vm(NonNull::new(vm2_ptr).unwrap(), 2);
@@ -878,16 +859,13 @@ fn test_handler_vm_limit() {
     assert!(!handler.can_create_vm());
     assert!(handler.alloc_vm_id().is_none());
 
-    // Clean up
     unsafe {
         let _ = Box::from_raw(vm1_ptr);
         let _ = Box::from_raw(vm2_ptr);
     }
 }
 
-// =============================================================================
 // Multi-CPU VMX Initialization Tests
-// =============================================================================
 
 #[test]
 fn test_handler_new_initializes_vmx_on_all_cpus() {

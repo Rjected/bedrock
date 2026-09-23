@@ -15,8 +15,7 @@ use super::vmx::{
 
 /// Real VMCS implementation backed by a kernel page.
 pub(crate) struct RealVmcs {
-    /// The underlying kernel page for the VMCS region.
-    /// When dropped, the page is freed.
+    /// Backing page for the VMCS region; freed on drop.
     page: Option<KernelPage>,
 }
 
@@ -109,7 +108,6 @@ impl VirtualMachineControlStructure for RealVmcs {
         let zf = (rflags >> 6) & 1;
 
         if cf == 1 || zf == 1 {
-            // Try to read VM instruction error if ZF is set
             let vm_err: u64 = if zf == 1 {
                 let err: u64;
                 // SAFETY: VMREAD of the error field is valid after a failed VM instruction.
@@ -158,7 +156,6 @@ impl VirtualMachineControlStructure for RealVmcs {
         let zf = (rflags >> 6) & 1;
 
         if cf == 1 || zf == 1 {
-            // Try to read VM instruction error if ZF is set
             let vm_err: u64 = if zf == 1 {
                 let err: u64;
                 // SAFETY: VMREAD of the error field is valid after a failed VM instruction.

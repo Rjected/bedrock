@@ -1,77 +1,46 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! VM traits for fork hierarchy support.
-//!
-//! This module defines the traits that allow VMs to participate in fork hierarchies
-//! with copy-on-write memory sharing.
+//! Traits for VMs participating in copy-on-write fork hierarchies.
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
-/// Object-safe trait for parent VM access in fork hierarchies.
+/// Object-safe parent access for ForkedVm: page reads through the COW chain
+/// and child-count tracking.
 ///
-/// This trait allows ForkedVm to interact with its parent without knowing
-/// the concrete parent type. It provides:
-/// - Memory access: reading pages through the COW chain
-/// - Child tracking: decrementing children count on drop
-///
-/// When a ForkedVm needs to read memory that isn't in its own COW pages,
-/// it calls `read_page` on its parent, which recursively walks the chain
-/// until reaching the RootVm.
-///
-/// The returned pointer from `read_page` is only valid while the parent VM exists.
-/// ForkedVm's children counter mechanism ensures the parent outlives its children.
+/// Pointers from `read_page` are valid only while the parent exists; the
+/// children counter guarantees the parent outlives its children.
 pub trait ParentVm {
-    /// Read a page at the given guest physical address.
-    ///
-    /// Returns a pointer to the page data, or None if the GPA is out of range.
-    /// For RootVm, this returns a pointer into contiguous guest memory.
-    /// For ForkedVm, this checks COW pages first, then delegates to its parent.
+    /// Pointer to the page containing `gpa`, or None if out of range. ForkedVm
+    /// checks its COW pages first, then delegates to its parent.
     fn read_page(&self, gpa: GuestPhysAddr) -> Option<*const u8>;
 
-    /// Get the total guest memory size.
     fn memory_size(&self) -> usize;
 
-    /// Remove a child from this VM's children count.
-    /// Called when a ForkedVm is dropped to update the parent's count.
+    /// Decrement children count; called when a child ForkedVm is dropped.
     fn remove_child(&self);
 }
 
-/// Trait for VM types that can be forked (used as parents for ForkedVm).
-///
-/// This trait provides the interface needed to create copy-on-write child VMs.
-/// Both `RootVm` and `ForkedVm` implement this trait, allowing nested forking.
-///
-/// Extends `ParentVm` to provide the memory reading interface needed
-/// for COW chain traversal.
+/// VM types that can be forked. Implemented by both `RootVm` and `ForkedVm`,
+/// allowing nested forks.
 pub trait ForkableVm<V: VirtualMachineControlStructure, I: InstructionCounter>: ParentVm {
-    /// The page type used by this VM.
     type Page: Page;
 
-    /// Get the VmState for this VM.
     fn vm_state(&self) -> &VmState<V, I>;
 
-    /// Get the mutable VmState for this VM.
     fn vm_state_mut(&mut self) -> &mut VmState<V, I>;
 
-    /// Increment children count.
-    ///
-    /// Called when a child ForkedVm is created from this VM.
-    /// Takes &self since children_count uses atomic operations.
+    /// Increment children count when a child ForkedVm is created.
     fn add_child(&self);
 
-    /// Decrement children count.
-    ///
-    /// Called when a child ForkedVm is dropped.
-    /// Takes &self since children_count uses atomic operations.
+    /// Decrement children count when a child ForkedVm is dropped.
     fn remove_child(&self);
 
-    /// Get the current number of child VMs.
     fn children_count(&self) -> usize;
 
-    /// Check if this VM can be run (no children).
+    /// A VM with children must not run.
     fn can_run(&self) -> bool {
         self.children_count() == 0
     }

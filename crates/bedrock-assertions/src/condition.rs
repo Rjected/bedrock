@@ -4,60 +4,39 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A condition evaluated by an assertion, storing its operands.
-///
-/// Each comparison variant keeps the values it was evaluated against (`x` and
-/// `y`) so the assertion record is self-describing — e.g. a failed `Lt` shows
-/// exactly which `x` was not less than which `y`.
-///
-/// Operands are `i128` so the full `u64` and `i64` ranges are representable
-/// without loss. The creation macros ([`always_lt!`](crate::always_lt) etc.)
-/// accept any integer value up to `u64`.
-///
-/// More variants (`Ne`, …) will be added as needed.
+/// A condition evaluated by an assertion. Comparisons keep their operands so a
+/// record is self-describing; `i128` holds the full `u64` and `i64` ranges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Condition {
-    /// A bare boolean, with no operands to compare.
     Bool(bool),
     /// `x < y`.
     Lt {
-        /// Left-hand operand.
         x: i128,
-        /// Right-hand operand.
         y: i128,
     },
     /// `x > y`.
     Gt {
-        /// Left-hand operand.
         x: i128,
-        /// Right-hand operand.
         y: i128,
     },
     /// `x <= y`.
     Lte {
-        /// Left-hand operand.
         x: i128,
-        /// Right-hand operand.
         y: i128,
     },
     /// `x >= y`.
     Gte {
-        /// Left-hand operand.
         x: i128,
-        /// Right-hand operand.
         y: i128,
     },
     /// `x == y`.
     Eq {
-        /// Left-hand operand.
         x: i128,
-        /// Right-hand operand.
         y: i128,
     },
 }
 
 impl Condition {
-    /// Evaluate the condition to its boolean result.
     pub fn evaluate(&self) -> bool {
         match self {
             Condition::Bool(b) => *b,
@@ -117,9 +96,7 @@ mod tests {
 
     #[test]
     fn full_u64_range_is_representable() {
-        // u64::MAX must widen into the i128 operands without loss and compare
-        // correctly at the very top of the range, where a u64-backed Condition
-        // would have no headroom.
+        // u64::MAX must widen into i128 without loss.
         let max = i128::from(u64::MAX);
         assert!(!Condition::Lt { x: max, y: max }.evaluate());
         assert!(Condition::Lt { x: max - 1, y: max }.evaluate());

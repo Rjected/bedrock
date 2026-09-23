@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! ForkedVm - Copy-on-write VM derived from a parent.
-//!
-//! This module provides `ForkedVm`, which shares its parent's memory but
-//! allocates new pages on write using copy-on-write semantics.
+//! ForkedVm - copy-on-write VM derived from a parent.
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
@@ -30,39 +27,22 @@ pub enum ForkedVmError<E> {
 
 /// A forked VM using copy-on-write memory.
 ///
-/// `ForkedVm` shares its parent's memory but allocates new pages on write.
-/// The EPT is cloned from parent with R+X (no write) permissions, so
-/// writes cause EPT violations that trigger COW page allocation.
-///
-/// # Parent Relationship
-///
-/// ForkedVm holds a trait object pointer to the parent VM. When reading
-/// non-COW pages, it calls through to the parent's `ParentVm` implementation,
-/// which may recursively check its own COW pages (for nested forks) before
-/// reaching the root memory.
-///
-/// The parent must outlive the ForkedVm, which is enforced by the children
-/// counter on the parent. When a ForkedVm is created, the parent's
-/// children_count is incremented. When dropped, children_count is decremented.
-///
-/// # Type Parameters
-///
-/// * `V` - The VMCS type, must implement `VirtualMachineControlStructure`
-/// * `P` - The page type for COW pages
-/// * `I` - The instruction counter type
+/// The EPT is cloned from the parent with R+X permissions, so writes fault
+/// and trigger COW page allocation. Non-COW reads go through the parent's
+/// `ParentVm` impl (recursively for nested forks). The parent must outlive
+/// the fork; this is enforced by the parent's children_count.
 #[repr(C)]
 pub struct ForkedVm<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> {
-    /// VM state (VMCS, registers, devices, etc.). Boxed to reduce stack usage.
+    /// VM state. Boxed to reduce stack usage.
     pub state: VmStateBox<V, I>,
 
     /// Copy-on-write pages owned by this VM.
     pub cow_pages: CowPageMap<P>,
 
-    /// Parent VM for reading non-COW pages (type-erased trait object).
+    /// Parent VM for reading non-COW pages.
     parent: *const dyn ParentVm,
 
-    /// Number of child ForkedVms derived from this VM.
-    /// Uses AtomicUsize for interior mutability (remove_child called via &self).
+    /// Number of child forks. Atomic because remove_child takes &self.
     children_count: AtomicUsize,
 }
 
@@ -81,27 +61,7 @@ unsafe impl<V: VirtualMachineControlStructure + Sync, P: Page + Sync, I: Instruc
 }
 
 impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm<V, P, I> {
-    /// Create a new ForkedVm from a parent VM.
-    ///
-    /// This method:
-    /// 1. Increments the parent's children count
-    /// 2. Clones the parent's EPT with R+X (no write) permissions for COW
-    /// 3. Creates a new VmState by copying parent's device/MSR/register state
-    /// 4. Creates an empty COW page map
-    /// 5. Stores a trait object pointer to the parent for COW chain traversal
-    ///
-    /// # Arguments
-    ///
-    /// * `parent` - The parent VM (RootVm or another ForkedVm)
-    /// * `machine` - Machine for allocating pages and VMCS
-    /// * `allocator` - Frame allocator for EPT cloning and COW pages
-    /// * `exit_handler_rip` - Address of the VM exit handler
-    /// * `instruction_counter` - Instruction counter for this VM
-    ///
-    /// # Type Parameters
-    ///
-    /// * `A` - Frame allocator type
-    /// * `Parent` - Parent VM type (implements ForkableVm)
+    /// Create a new ForkedVm from a parent VM, incrementing its children count.
     #[inline(never)]
     pub fn new<
         A: FrameAllocator<Frame = V::P> + CowAllocator<P>,
@@ -117,7 +77,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm
         V::P: Into<P>,
         V::M: Machine,
     {
-        // Increment parent's children count (atomic operation)
         parent.add_child();
 
         Self::new_internal(
@@ -129,21 +88,17 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm
         )
     }
 
-    /// Create a new ForkedVm from a parent VM whose children_count was already incremented.
+    /// Parallel-fork-safe variant of `new()` for a parent whose children_count
+    /// was already incremented.
     ///
-    /// This is the parallel-fork-safe variant of `new()`. The caller is responsible for:
-    /// 1. Incrementing the parent's children_count BEFORE calling this method
-    /// 2. Decrementing children_count if this method returns an error
-    ///
-    /// This design allows the caller to increment children_count while holding a lock,
-    /// release the lock, then call this method for the expensive work. Multiple threads
-    /// can call this method concurrently for the same parent since all operations are
-    /// read-only (the parent cannot run while children_count > 0).
+    /// Lets the caller bump children_count under a lock, drop the lock, then do
+    /// the expensive work here. Concurrent calls for the same parent are fine
+    /// since the parent cannot run while children_count > 0.
     ///
     /// # Safety
     ///
-    /// Caller must have already called `parent.add_child()` before calling this method.
-    /// If this method returns an error, caller must call `parent.remove_child()`.
+    /// Caller must have called `parent.add_child()` first, and must call
+    /// `parent.remove_child()` if this returns an error.
     #[inline(never)]
     pub fn new_with_incremented_parent<
         A: FrameAllocator<Frame = V::P> + CowAllocator<P>,
@@ -159,7 +114,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm
         V::P: Into<P>,
         V::M: Machine,
     {
-        // Note: caller has already incremented parent's children_count
         Self::new_internal(
             parent,
             machine,
@@ -185,17 +139,14 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm
         V::P: Into<P>,
         V::M: Machine,
     {
-        // Clone parent's EPT with R+X permissions (COW setup)
         let ept: EptPageTable<V::P> = parent
             .vm_state()
             .ept
             .clone_for_fork(allocator)
             .map_err(ForkedVmError::EptClone)?;
 
-        // Create a new VMCS for this forked VM
         let vmcs = V::new(machine).map_err(|_| ForkedVmError::VmcsAlloc)?;
 
-        // Create VmState by copying from parent
         let state = VmState::new_for_fork::<A, I>(
             vmcs,
             ept,
@@ -206,8 +157,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm
         )
         .map_err(ForkedVmError::VmState)?;
 
-        // Store trait object pointer to parent for COW chain traversal.
-        // Parent must outlive this ForkedVm, enforced by children_count.
         let parent_ptr: *const dyn ParentVm = parent as &dyn ParentVm;
 
         let mut forked_vm = Self {
@@ -217,38 +166,29 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ForkedVm
             children_count: AtomicUsize::new(0),
         };
 
-        // Feedback buffers need no special handling at fork: their pages are
-        // copied-on-write lazily through the normal EPT write-fault path
-        // (`handle_cow_fault`) when the guest writes them. When userspace maps
-        // a buffer, `cow_feedback_buffer_for_mapping` COWs its pages so the
-        // mapping stays coherent with subsequent guest writes.
+        // Feedback buffers are COW'd lazily via handle_cow_fault, or eagerly by
+        // cow_feedback_buffer_for_mapping when userspace maps them.
 
-        // Pre-COW the I/O channel shared page if registered. Without this
-        // any HYPERCALL_IO_GET_REQUEST that fires on the fork would hit
-        // write_guest_memory's "page not COW'd yet" error path and the
-        // request would never reach the guest module.
+        // Pre-COW the I/O channel page: HYPERCALL_IO_GET_REQUEST writes it via
+        // write_guest_memory, which fails on not-yet-COW'd pages.
         forked_vm.pre_cow_io_channel_page(allocator);
 
         Ok(forked_vm)
     }
 
-    /// Get a reference to the COW pages.
     pub fn cow_pages(&self) -> &CowPageMap<P> {
         &self.cow_pages
     }
 
-    /// Get a mutable reference to the COW pages.
     pub fn cow_pages_mut(&mut self) -> &mut CowPageMap<P> {
         &mut self.cow_pages
     }
 
-    /// Get the parent's memory size.
     fn parent_memory_size(&self) -> usize {
         // SAFETY: Parent is valid as long as this ForkedVm exists (enforced by children_count)
         unsafe { (*self.parent).memory_size() }
     }
 
-    /// Read a page from the parent.
     fn parent_read_page(&self, gpa: GuestPhysAddr) -> Option<*const u8> {
         // SAFETY: Parent is valid as long as this ForkedVm exists (enforced by children_count)
         unsafe { (*self.parent).read_page(gpa) }
@@ -275,14 +215,11 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         let page_gpa = GuestPhysAddr::new(gpa.as_u64() & !0xFFF);
         let page_offset = (gpa.as_u64() & 0xFFF) as usize;
 
-        // Check if we have a COW page for this GPA
         if let Some(cow_page) = <CowPageMap<P>>::get(&self.cow_pages, page_gpa) {
-            // Read from COW page
             let cow_ptr = Page::virtual_address(cow_page).as_u64() as *const u8;
             let available_in_page = PAGE_SIZE - page_offset;
 
             if buf.len() <= available_in_page {
-                // Read fits in single page
                 // SAFETY: cow_ptr points to a valid COW page; page_offset + buf.len() <= PAGE_SIZE.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -292,7 +229,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                     );
                 }
             } else {
-                // Read spans pages - read what we can from this page
                 // SAFETY: cow_ptr points to a valid COW page; page_offset + available_in_page == PAGE_SIZE.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -301,14 +237,12 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                         available_in_page,
                     );
                 }
-                // Recursively read the rest from next page(s)
                 self.read_guest_memory(
                     GuestPhysAddr::new(page_gpa.as_u64() + PAGE_SIZE as u64),
                     &mut buf[available_in_page..],
                 )?;
             }
         } else {
-            // Read from parent (walks COW chain for nested forks)
             let parent_page = self
                 .parent_read_page(page_gpa)
                 .ok_or(MemoryError::OutOfRange)?;
@@ -324,7 +258,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                     );
                 }
             } else {
-                // Read spans pages
                 // SAFETY: parent_page points to a valid parent memory page; page_offset + available_in_page == PAGE_SIZE.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -346,9 +279,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         let page_gpa = GuestPhysAddr::new(gpa.as_u64() & !0xFFF);
         let page_offset = (gpa.as_u64() & 0xFFF) as usize;
 
-        // Check if we have a COW page for this GPA
         if let Some(cow_page) = self.cow_pages.get_mut(page_gpa) {
-            // Write to COW page
             let cow_ptr = cow_page.virtual_address().as_u64() as *mut u8;
             let available_in_page = PAGE_SIZE - page_offset;
 
@@ -362,7 +293,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                     );
                 }
             } else {
-                // Write spans pages
                 // SAFETY: cow_ptr points to a valid writable COW page; page_offset + available_in_page == PAGE_SIZE.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -378,9 +308,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             }
             Ok(())
         } else {
-            // Page not COW'd yet - this shouldn't normally happen as writes
-            // should go through EPT fault -> handle_cow_fault first.
-            // Return an error to indicate the page needs COW handling.
+            // Not COW'd yet; writes should go through handle_cow_fault first.
             Err(MemoryError::PermissionDenied)
         }
     }
@@ -392,11 +320,9 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
     ) -> Option<ExitHandlerResult> {
         let page_gpa = GuestPhysAddr::new(gpa.as_u64() & !0xFFF);
 
-        // Check if we already have a COW page for this address
         if self.cow_pages.contains(page_gpa) {
-            // Already copied - this means the EPT was already remapped to RWX but
-            // the TLB still had a stale R+X entry. The EPT violation auto-invalidates
-            // the stale entry, so the retry will use the correct mapping.
+            // EPT already remapped to RWX but the TLB held a stale R+X entry.
+            // The EPT violation auto-invalidates it, so the retry succeeds.
             self.state.exit_stats.cow.stale_tlb_faults += 1;
             if self.state.exit_stats.cow.stale_tlb_faults == 1 {
                 log_err!(
@@ -407,7 +333,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             return Some(ExitHandlerResult::Continue);
         }
 
-        // Allocate a new page for COW
         let new_page = match allocator.allocate_cow_page() {
             Ok(page) => page,
             Err(_) => {
@@ -419,11 +344,9 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             }
         };
 
-        // Get virtual address for copying
         let new_page_virt = new_page.virtual_address().as_u64() as *mut u8;
         let new_page_phys = new_page.physical_address();
 
-        // Copy content from parent (walks COW chain for nested forks)
         let parent_page = match self.parent_read_page(page_gpa) {
             Some(ptr) => ptr,
             None => {
@@ -441,13 +364,11 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             core::ptr::copy_nonoverlapping(parent_page, new_page_virt, PAGE_SIZE);
         }
 
-        // Insert into COW page map
         if self.cow_pages.insert(page_gpa, new_page).is_err() {
             log_err!("COW: Failed to insert page into COW map\n");
             return None;
         }
 
-        // Remap EPT entry to point to the new page with RWX permissions
         if let Err(_e) = self.state.ept.remap_4k(
             allocator,
             page_gpa,
@@ -462,13 +383,10 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             return None;
         }
 
-        // SDM Vol 3C §30.4.3.4 requires single-context INVEPT after changing
-        // the HPA in an EPT leaf. The EPT-violation auto-invalidation only
-        // covers the faulting linear address; combined mappings cached for
-        // other GVAs that target this GPA (e.g. the kernel just faulted via
-        // its tmpfs mapping, but a user-space mmap of the same file has its
-        // own combined mapping in the TLB) would otherwise keep the old
-        // HPA and read pre-COW data.
+        // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a leaf's
+        // HPA. EPT-violation auto-invalidation only covers the faulting linear
+        // address; combined mappings for other GVAs of this GPA (e.g. a
+        // userspace mmap of a tmpfs file) would keep the old HPA.
         let _ = <<V::M as Machine>::V as Vmx>::invept_single_context(self.state.ept.eptp());
 
         log_debug!(
@@ -477,7 +395,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             new_page_phys.as_u64()
         );
 
-        // Return Continue to retry the faulting instruction
         Some(ExitHandlerResult::Continue)
     }
 
@@ -504,7 +421,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                 continue;
             }
 
-            // Allocate a child-owned page for COW.
             let new_page = match allocator.allocate_cow_page() {
                 Ok(page) => page,
                 Err(_) => {
@@ -519,7 +435,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             let new_page_virt = new_page.virtual_address().as_u64() as *mut u8;
             let new_page_phys = new_page.physical_address();
 
-            // Copy current contents from the parent chain.
             let parent_page = match self.parent_read_page(page_gpa) {
                 Some(ptr) => ptr,
                 None => {
@@ -542,9 +457,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                 continue;
             }
 
-            // Remap the EPT entry to the new page with RWX permissions, so the
-            // guest writes directly to this (now mapped) frame with no further
-            // fault or re-COW.
             if let Err(_e) = self.state.ept.remap_4k(
                 allocator,
                 page_gpa,
@@ -579,7 +491,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         }
         let page_gpa = GuestPhysAddr::new(page_gpa_raw & !0xFFF);
 
-        // Already CoW'd — nothing to do.
         if self.cow_pages.contains(page_gpa) {
             return;
         }
@@ -597,9 +508,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         let new_page_virt = new_page.virtual_address().as_u64() as *mut u8;
         let new_page_phys = new_page.physical_address();
 
-        // Copy current contents from parent so the guest module's view
-        // of the page is preserved (the kernel module may have initial
-        // bookkeeping on it).
         let parent_page = match self.parent_read_page(page_gpa) {
             Some(ptr) => ptr,
             None => {
@@ -662,13 +570,10 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                 | ExitTrigger::AllExits
                 | ExitTrigger::Checkpoints
                 | ExitTrigger::TscRange => {
-                    // Hash only COW (modified) pages for forked VMs.
-                    // This captures the delta from parent, which is what matters
-                    // for comparing forked VM states.
+                    // Hash only COW pages: the delta from the parent.
                     let mut hasher = Xxh64Hasher::new();
 
                     for (gpa, cow_page) in self.cow_pages.iter() {
-                        // Include GPA in hash so page position matters
                         hasher.write_u64(gpa.as_u64());
                         let page_ptr = Page::virtual_address(cow_page).as_u64() as *const u8;
                         // SAFETY: page_ptr points to a valid COW page of PAGE_SIZE bytes.
@@ -682,8 +587,6 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             }
         };
 
-        // Patch the pending `Exit` record's memory_hash and cow_page_count in
-        // the event buffer.
         let cow_page_count = self.cow_pages.len() as u32;
         self.state
             .finalize_exit_memory_hash(memory_hash, cow_page_count);
@@ -694,14 +597,11 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> ParentVm
     for ForkedVm<V, P, I>
 {
     fn read_page(&self, gpa: GuestPhysAddr) -> Option<*const u8> {
-        // Align to page boundary
         let page_gpa = GuestPhysAddr::new(gpa.as_u64() & !0xFFF);
 
-        // First check our COW pages
         if let Some(page) = <CowPageMap<P>>::get(&self.cow_pages, page_gpa) {
             Some(Page::virtual_address(page).as_u64() as *const u8)
         } else {
-            // Delegate to parent (walks COW chain for nested forks)
             self.parent_read_page(page_gpa)
         }
     }
@@ -744,15 +644,11 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> Forkable
 /// Ensure VMCS is cleared and parent notified when ForkedVm is dropped.
 impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> Drop for ForkedVm<V, P, I> {
     fn drop(&mut self) {
-        // Clear the VMCS to transition it to "clear" state
         if let Err(_e) = self.state.vmcs.clear() {
             log_err!("Failed to clear VMCS during ForkedVm drop\n");
         }
-        // Return the VPID to the pool for reuse
         deallocate_vpid(self.state.vpid);
-        // Decrement parent's children count
-        // SAFETY: Parent is valid as long as children_count > 0, which it is since
-        // we're still alive (about to drop). The parent pointer is valid.
+        // SAFETY: Parent outlives us: our children_count entry is still held.
         unsafe {
             (*self.parent).remove_child();
         }

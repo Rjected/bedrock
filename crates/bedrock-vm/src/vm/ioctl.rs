@@ -40,14 +40,11 @@ const fn ioctl_iow(ty: u8, nr: u8, size: usize) -> u64 {
 }
 
 /// Configuration passed to CREATE_ROOT_VM ioctl.
-///
-/// Userspace fills this out to configure the VM at creation time.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CreateVmConfig {
-    /// Size of guest memory to allocate in bytes.
     pub memory_size: u64,
-    /// TSC frequency in Hz for deterministic time emulation.
+    /// Emulated TSC frequency in Hz.
     pub tsc_frequency: u64,
 }
 
@@ -70,38 +67,30 @@ pub(crate) const BEDROCK_VM_GET_EXIT_STATS: u64 =
     ioctl_ior(BEDROCK_IOC_MAGIC, 7, size_of::<ExitStats>());
 pub(crate) const BEDROCK_VM_SET_STOP_TSC: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 8, size_of::<u64>());
 pub(crate) const BEDROCK_VM_GET_VM_ID: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 9, size_of::<u64>());
-/// Unified event-stream configuration (enable + category mask + exit trigger).
 pub(crate) const BEDROCK_VM_SET_EVENT_CONFIG: u64 =
     ioctl_iow(BEDROCK_IOC_MAGIC, 13, size_of::<EventConfig>());
 
-/// Maximum bytes served per `HYPERCALL_GET_RANDOM`. Must stay in lockstep with
-/// `bedrock_vmx::RANDOM_REPLY_MAX` — the kernel caps each request at this many
-/// bytes and the guest loops for larger reads.
+/// Max bytes served per `HYPERCALL_GET_RANDOM` (the guest loops for more).
+/// Must match `bedrock_vmx::RANDOM_REPLY_MAX`.
 pub const RANDOM_REPLY_MAX: usize = 256;
 
-/// The pending `HYPERCALL_GET_RANDOM` request, read by userspace after a
-/// `VmcallGetRandom` exit so it knows how many bytes to serve and which process
-/// asked.
+/// The pending `HYPERCALL_GET_RANDOM` request.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct RandomRequest {
-    /// PID (`current->tgid`) of the requesting process.
+    /// Requester's `current->tgid`.
     pub pid: u32,
-    /// Number of bytes requested (already capped at `RANDOM_REPLY_MAX`).
+    /// Capped at `RANDOM_REPLY_MAX`.
     pub len: u32,
 }
 
-/// Reply bytes staged by userspace to satisfy the pending `GET_RANDOM` request.
-/// Inline buffer (like `IoActionPayload`) so the ABI is self-contained — no
-/// guest-supplied pointer to `copy_from_user`.
+/// Reply bytes for the pending `GET_RANDOM` request, inline so the ABI carries
+/// no pointers.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RandomBytes {
-    /// Number of valid bytes in `data` (capped at `RANDOM_REPLY_MAX`).
     pub len: u32,
-    /// Reserved for alignment.
     pub _reserved: u32,
-    /// Reply bytes.
     pub data: [u8; RANDOM_REPLY_MAX],
 }
 
@@ -131,10 +120,8 @@ pub(crate) const BEDROCK_CREATE_FORKED_VM: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 1,
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FeedbackBufferInfoRequest {
-    /// 0-based buffer index to query. The number of feedback buffers is
-    /// unbounded; querying an unregistered index reports `registered = 0`.
+    /// An unregistered index reports `registered = 0`.
     pub index: u32,
-    /// Reserved for alignment.
     pub _reserved: u32,
 }
 
@@ -148,33 +135,19 @@ pub(crate) const BEDROCK_VM_GET_FEEDBACK_BUFFER_INFO: u64 = ioctl_ior(
 /// Maximum size of an I/O channel request or response payload (one 4KB page).
 pub const IO_CHANNEL_BUF_SIZE: usize = 4096;
 
-/// I/O channel action payload exchanged with the kernel via ioctl.
-///
-/// Both `BEDROCK_VM_QUEUE_IO_ACTION` and `BEDROCK_VM_DRAIN_IO_RESPONSE`
-/// use the same shape: a `u32 len` header (with reserved padding) followed
-/// by up to `IO_CHANNEL_BUF_SIZE` bytes of data. Storing the whole buffer
-/// inline keeps the userspace ABI self-contained — no extra pointer
-/// indirection or kernel-side `copy_from_user` of a guest-supplied pointer.
-///
-/// Kernel-side handling stages the header through the stack (8 bytes) and
-/// copies the data directly into / out of `VmState.io_channel.{request,response}_buf`,
-/// avoiding a 4KB stack burst.
+/// Payload for both `BEDROCK_VM_QUEUE_IO_ACTION` and
+/// `BEDROCK_VM_DRAIN_IO_RESPONSE`, with the data inline so the ABI carries no
+/// pointers. The kernel copies `data` directly to/from `VmState` to avoid a
+/// 4KB stack burst.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IoActionPayload {
-    /// For QUEUE: number of valid bytes the user supplies in `data`.
-    /// For DRAIN: on input, the maximum capacity of `data`; on output, the
-    /// actual number of response bytes the kernel wrote (capped at the
-    /// input value).
+    /// QUEUE: bytes supplied. DRAIN: capacity on input, bytes written on output.
     pub len: u32,
-    /// Reserved for alignment.
     pub _reserved: u32,
-    /// Earliest emulated-TSC value at which the queued request may fire
-    /// (QUEUE only; ignored by DRAIN). Zero means "fire as soon as the
-    /// guest is interruptible"; non-zero arms PEBS so the IRQ lands at
-    /// the precise instruction count corresponding to this TSC.
+    /// QUEUE only: 0 = fire when interruptible; otherwise PEBS lands the IRQ
+    /// at exactly this emulated TSC.
     pub target_tsc: u64,
-    /// Payload bytes.
     pub data: [u8; IO_CHANNEL_BUF_SIZE],
 }
 
@@ -199,36 +172,25 @@ pub(crate) const BEDROCK_VM_QUEUE_IO_ACTION: u64 =
 pub(crate) const BEDROCK_VM_DRAIN_IO_RESPONSE: u64 =
     ioctl_ior(BEDROCK_IOC_MAGIC, 12, size_of::<IoActionPayload>());
 
-/// Maximum length of a feedback-buffer identifier. Must stay in lockstep with
-/// `bedrock_vmx::FEEDBACK_BUFFER_ID_MAX_LEN` — the kernel module writes that
-/// many bytes into the `id` field of [`FeedbackBufferInfo`].
+/// Max feedback-buffer id length; must match
+/// `bedrock_vmx::FEEDBACK_BUFFER_ID_MAX_LEN`.
 pub const FEEDBACK_BUFFER_ID_MAX_LEN: usize = 128;
 
-/// Feedback buffer info returned from kernel.
-///
-/// Describes a feedback buffer registered by the guest via the
-/// `HYPERCALL_REGISTER_FEEDBACK_BUFFER` hypercall. Each registration carries
-/// a byte-string identifier (e.g. the guest binary's build-id). IDs are
-/// *not* required to be unique — see the docs on
-/// `bedrock_vmx::FeedbackBufferInfo` for the rationale.
+/// A guest-registered feedback buffer. `id` (e.g. a build-id) need not be
+/// unique; see `bedrock_vmx::FeedbackBufferInfo`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FeedbackBufferInfo {
     /// Original guest virtual address.
     pub gva: u64,
-    /// Size in bytes.
     pub size: u64,
-    /// Number of pages.
     pub num_pages: u64,
-    /// Whether a feedback buffer is registered (0 = no, 1 = yes).
+    /// 0 = no, 1 = yes.
     pub registered: u32,
-    /// 0-based slot index this entry occupies.
     pub index: u32,
-    /// Length of the meaningful prefix of `id`, in bytes.
     pub id_len: u32,
-    /// Reserved for alignment.
     pub _reserved: u32,
-    /// Identifier bytes; trailing bytes past `id_len` are zero.
+    /// Zero past `id_len`.
     pub id: [u8; FEEDBACK_BUFFER_ID_MAX_LEN],
 }
 
@@ -248,7 +210,6 @@ impl Default for FeedbackBufferInfo {
 }
 
 impl FeedbackBufferInfo {
-    /// The identifier as a byte slice.
     pub fn id_bytes(&self) -> &[u8] {
         &self.id[..self.id_len as usize]
     }

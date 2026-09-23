@@ -1,7 +1,5 @@
-//! The feedback-buffer channel: a guest process registers a buffer via the
-//! `HYPERCALL_REGISTER_FEEDBACK_BUFFER` hypercall and the lab reads its
-//! contents back out of the guest's physical memory — including across a COW
-//! fork, where a child branch inherits the same bytes.
+//! Feedback buffers: a guest process registers a buffer and the lab reads it
+//! back, including from CoW-forked children.
 
 use bedrock_lab::BashTarget;
 
@@ -29,7 +27,6 @@ fn feedback_buffer_round_trips_from_guest() {
 
     let mut branch = ready.branch().expect("fork branch");
 
-    // The driver ships in the workload image; expect it to be there.
     let probe = branch
         .bash(
             BashTarget::container("idle"),
@@ -44,11 +41,8 @@ fn feedback_buffer_round_trips_from_guest() {
         probe.exit_code,
     );
 
-    // Launch it detached: it writes our payload into a zeroed page, registers
-    // it as a feedback buffer, and then stays alive forever so the pages stay
-    // mapped and pinned (a dead driver would let the guest reallocate the GPA
-    // and overwrite the buffer with junk). Redirect its stdio so it neither
-    // holds the I/O channel's output-capture pipe open nor blocks this call.
+    // Detached and kept alive so its pages stay pinned (otherwise the GPA could
+    // be reused); stdio redirected so it doesn't hold the output pipe open.
     branch
         .bash(
             BashTarget::container("idle"),
@@ -57,9 +51,8 @@ fn feedback_buffer_round_trips_from_guest() {
         )
         .expect("launch feedback-buffer driver");
 
-    // The driver runs asynchronously; advance the guest until its registration
-    // shows up. Deterministic execution means it lands at the same point every
-    // run, so this is reproducible — the budget is just a safety net.
+    // Deterministic, so this lands at the same point every run; the budget is
+    // a safety net.
     let deadline = branch.current_time() + vt_dur!(5 s);
     while !registered(&branch) {
         assert!(
@@ -70,8 +63,7 @@ fn feedback_buffer_round_trips_from_guest() {
         branch.run_for(vt_dur!(50 ms)).expect("advance guest");
     }
 
-    // Read it back: the bytes we asked the guest to write must survive the
-    // GVA->GPA->host mapping, with the rest of the page left zeroed.
+    // The payload must survive GVA->GPA->host mapping; the rest stays zeroed.
     let bufs = branch
         .feedback_buffers_to_vec(FB_ID)
         .expect("read feedback buffers");
@@ -90,12 +82,8 @@ fn feedback_buffer_round_trips_from_guest() {
         "feedback buffer content did not match what the guest wrote",
     );
 
-    // The registration and its contents are inherited through COW: a branch
-    // forked off this point sees the same bytes without re-running the driver.
-    // The child never writes the buffer, so its mapping resolves each page
-    // straight through the COW chain to the shared snapshot's frame. This holds
-    // even though nothing runs in the child — the content lives in the
-    // snapshot, not in a live guest process.
+    // A fork sees the same bytes without running: its mapping resolves through
+    // the CoW chain to the snapshot's frames.
     let checkpoint = branch.checkpoint().expect("checkpoint parent branch");
     let mut child = checkpoint.branch().expect("branch off checkpoint");
     let child_bufs = child
@@ -112,10 +100,8 @@ fn feedback_buffer_round_trips_from_guest() {
     );
 }
 
-/// The number of registerable feedback buffers is unbounded — there is no
-/// fixed slot cap. Launching many instances of the driver, well past the old
-/// hard limit of 16, registers a distinct buffer for each, and the lab can map
-/// and read back every one.
+/// The number of feedback buffers is unbounded: many driver instances each get
+/// their own readable buffer.
 #[test]
 fn feedback_buffer_count_is_unbounded() {
     let Some(ready) = common::ready_checkpoint() else {
@@ -138,11 +124,8 @@ fn feedback_buffer_count_is_unbounded() {
         probe.exit_code,
     );
 
-    // Spawn many instances, each registering its own pinned buffer under the
-    // shared id (ids need not be unique — each registration gets a fresh slot).
-    // COUNT is deliberately well above the legacy fixed cap of 16 to prove the
-    // count is unbounded and grows on the heap. Each stays alive (`&`) so its
-    // page stays pinned, exactly like the single-driver test above.
+    // All under the shared id (each registration gets a fresh slot); each
+    // stays alive (`&`) to keep its page pinned.
     const COUNT: usize = 20;
     branch
         .bash(
@@ -152,8 +135,6 @@ fn feedback_buffer_count_is_unbounded() {
         )
         .expect("launch feedback-buffer drivers");
 
-    // Advance until all COUNT registrations land. Deterministic execution makes
-    // this reproducible; the budget is just a safety net.
     let deadline = branch.current_time() + vt_dur!(10 s);
     loop {
         let n = branch
@@ -170,9 +151,6 @@ fn feedback_buffer_count_is_unbounded() {
         branch.run_for(vt_dur!(50 ms)).expect("advance guest");
     }
 
-    // Every buffer must carry the payload the driver wrote — proving all of
-    // them (not just the first 16) mapped and read back correctly through the
-    // unbounded slot vector.
     let bufs = branch
         .feedback_buffers_to_vec(FB_ID)
         .expect("read feedback buffers");
@@ -198,11 +176,8 @@ fn feedback_buffer_count_is_unbounded() {
     }
 }
 
-/// Each feedback buffer is independent: writing a *different* payload into
-/// every buffer and reading them all back yields exactly the set of distinct
-/// payloads, with no buffer aliasing another's pages. Combined with a count
-/// past the legacy cap of 16, this exercises distinct content across the
-/// unbounded slot vector.
+/// Distinct payloads in many buffers read back as exactly that set: no buffer
+/// aliases another's pages.
 #[test]
 fn feedback_buffers_hold_distinct_content() {
     let Some(ready) = common::ready_checkpoint() else {
@@ -225,9 +200,6 @@ fn feedback_buffers_hold_distinct_content() {
         probe.exit_code,
     );
 
-    // Launch one driver per distinct payload, all under the shared FB_ID. Each
-    // writes its own payload into its own pinned page, so the buffers must come
-    // back carrying different content. COUNT is past the legacy cap of 16.
     const COUNT: usize = 18;
     let expected: Vec<String> = (1..=COUNT).map(|i| format!("fb-distinct-{i}")).collect();
     branch
@@ -240,7 +212,6 @@ fn feedback_buffers_hold_distinct_content() {
         )
         .expect("launch feedback-buffer drivers");
 
-    // Advance until all COUNT registrations land.
     let deadline = branch.current_time() + vt_dur!(10 s);
     loop {
         let n = branch
@@ -257,10 +228,7 @@ fn feedback_buffers_hold_distinct_content() {
         branch.run_for(vt_dur!(50 ms)).expect("advance guest");
     }
 
-    // Read every buffer and recover its payload (the bytes up to the first NUL,
-    // since the driver writes payload + zero padding). The multiset of recovered
-    // payloads must equal the set we wrote — each buffer holds its own distinct
-    // content, none aliases another's, and none is missing or duplicated.
+    // Payload = bytes up to the first NUL.
     let bufs = branch
         .feedback_buffers_to_vec(FB_ID)
         .expect("read feedback buffers");
@@ -282,18 +250,10 @@ fn feedback_buffers_hold_distinct_content() {
     );
 }
 
-/// A feedback buffer mapped once stays coherent with later guest writes, even
-/// on a forked child that maps the buffer *before* it has written it: "map
-/// once, keep running, re-read".
-///
-/// This is the case that needs the kernel to copy-on-write the buffer's pages
-/// into the child at map time. A child forked off a checkpoint inherits the
-/// buffer's pages shared (read-only) from its parent — none are COW'd in the
-/// child. If the mapping just pointed at the parent's frames, the child's
-/// later writes would COW each page to a *new* frame and the mapping would go
-/// stale. The test maps the counter buffer in a fresh child, then runs the
-/// child so the inherited driver keeps bumping the counter, and verifies the
-/// value advances through the same mapping.
+/// A buffer mapped in a fresh fork *before* the child writes it stays coherent
+/// with later writes. Requires the kernel to CoW the pages into the child at
+/// map time; otherwise the mapping would point at the parent's frames and go
+/// stale.
 #[test]
 fn feedback_buffer_reflects_writes_after_mapping() {
     let Some(ready) = common::ready_checkpoint() else {
@@ -316,9 +276,6 @@ fn feedback_buffer_reflects_writes_after_mapping() {
         probe.exit_code,
     );
 
-    // Launch the counter driver in the parent branch: it registers the buffer
-    // (COWing its page in this branch as it faults the page in) and then bumps
-    // the counter forever.
     parent
         .bash(
             BashTarget::container("idle"),
@@ -327,7 +284,6 @@ fn feedback_buffer_reflects_writes_after_mapping() {
         )
         .expect("launch counter driver");
 
-    // Advance until the buffer is registered.
     let deadline = parent.current_time() + vt_dur!(5 s);
     while !registered_id(&parent, COUNTER_FB_ID) {
         assert!(
@@ -337,23 +293,16 @@ fn feedback_buffer_reflects_writes_after_mapping() {
         parent.run_for(vt_dur!(50 ms)).expect("advance parent");
     }
 
-    // Checkpoint the parent and fork a fresh child. The child inherits the
-    // registration and the still-running driver, but NONE of the buffer's pages
-    // are COW'd in the child yet — they're shared read-only from the parent.
+    // None of the buffer's pages are CoW'd in the child yet.
     let checkpoint = parent.checkpoint().expect("checkpoint parent");
     let mut child = checkpoint.branch().expect("fork child");
 
-    // Map the buffer in the child BEFORE it runs, and read the counter. The
-    // kernel COWs the buffer's pages into the child at map time so this mapping
-    // tracks the child's own frames.
+    // Map before the child runs.
     let c1 = read_counter(&mut child).expect("counter buffer mapped in child");
 
-    // Let the inherited, still-running driver keep bumping the counter in the
-    // child for a while.
     child.run_for(vt_dur!(200 ms)).expect("advance child");
 
-    // Re-read THROUGH THE SAME MAPPING (no remap). It must reflect the child's
-    // post-mapping writes — proving the mapping did not go stale.
+    // Same mapping, no remap.
     let c2 = read_counter(&mut child).expect("counter buffer still mapped");
 
     assert!(
@@ -372,8 +321,7 @@ fn registered_id(branch: &bedrock_lab::Branch, id: &[u8]) -> bool {
         .any(|i| i == id)
 }
 
-/// Map (lazily, once) the counter buffer and read its leading little-endian
-/// u64. Subsequent calls re-read the same live mapping.
+/// Read the counter buffer's leading LE u64 (mapped once, then re-read).
 fn read_counter(branch: &mut bedrock_lab::Branch) -> Option<u64> {
     let bufs = branch
         .feedback_buffers_to_vec(COUNTER_FB_ID)

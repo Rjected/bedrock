@@ -15,25 +15,20 @@ use crate::registers::{seg_ar, Cr3, Gdtr, Regs, SegmentRegister};
 pub fn linux_boot_regs(kernel_entry: u64, gdt_base: u64, gdt_limit: u16) -> Regs {
     let mut regs = Regs::long_mode();
 
-    // RIP = kernel entry point
     regs.rip = kernel_entry;
 
-    // RSI = pointer to boot_params (zero page) - REQUIRED by boot protocol
     regs.gprs.rsi = BOOT_PARAMS_ADDR;
 
-    // RSP = give it a stack (Linux kernel sets up its own stack)
+    // Linux sets up its own stack.
     regs.gprs.rsp = BOOT_PARAMS_ADDR;
 
-    // CR3 = page table base
     regs.control_regs.cr3 = Cr3::new(PML4_ADDR);
 
-    // RFLAGS = interrupts disabled, reserved bit set
+    // Interrupts disabled.
     regs.rflags = Regs::RFLAGS_RESERVED;
 
-    // Set up GDTR to point to our GDT
     regs.descriptor_tables.gdtr = Gdtr::new(gdt_base, gdt_limit);
 
-    // Set up segment registers per Linux boot protocol:
     // CS = __BOOT_CS = 0x10 (GDT entry 2)
     let code_ar = seg_ar::PRESENT
         | seg_ar::S

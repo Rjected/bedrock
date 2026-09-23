@@ -21,7 +21,6 @@ pub fn setup_gdt(memory: &mut [u8]) -> (u64, u16) {
 
     let gdt_base = GDT_ADDR as usize;
 
-    // Clear GDT area
     for i in 0..64 {
         memory[gdt_base + i] = 0;
     }

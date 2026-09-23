@@ -106,22 +106,14 @@ pub struct Args {
     pub virt_tsc_frequency: Option<u64>,
 
     /// Queue a deterministic I/O channel action for the guest's bedrock-io
-    /// module. Repeatable; actions fire in `target_tsc` order at the first
-    /// VM exit where `emulated_tsc >= target_tsc` and no prior action is
-    /// still in flight.
+    /// module. Repeatable; actions fire in order, one in flight at a time.
     ///
-    /// An optional scheduling prefix sets the earliest emulated TSC at
-    /// which the action may fire:
-    ///   `tsc=<N>:<action>`      — earliest fire-time as a raw TSC value.
-    ///   `vt=<seconds>:<action>` — earliest fire-time as virtual time
-    ///                             (converted via DEFAULT_TSC_FREQUENCY).
-    /// Without a prefix, `target_tsc` defaults to 0 (queue immediately).
+    /// Optional prefix for the earliest fire time (default: immediately):
+    ///   `tsc=<N>:<action>` or `vt=<seconds>:<action>` (at DEFAULT_TSC_FREQUENCY).
     ///
-    /// Action body formats (optional `rec:` prefix records the command's
-    /// output into the output feedback buffer, which the CLI then prints):
-    ///   `exec:<container>:<cmd>`    — run `podman exec <container> /bin/sh -c <cmd>`
-    ///   `exec:host:<cmd>`           — run `/bin/sh -c <cmd>` on the guest itself
-    ///                                 (outside any container)
+    /// Action bodies (a `rec:` prefix also captures and prints the output):
+    ///   `exec:<container>:<cmd>`    — `podman exec <container> /bin/sh -c <cmd>`
+    ///   `exec:host:<cmd>`           — `/bin/sh -c <cmd>` outside any container
     ///
     /// Examples:
     ///   --io-action 'exec:host:uname -a'
@@ -132,62 +124,46 @@ pub struct Args {
     pub io_actions: Vec<ScheduledIoAction>,
 
     /// Expose a host file to the guest over the file-transmission hypercall.
-    /// Repeatable. Format: `<guest-name>=<host-path>`. The guest's initrd
-    /// downloads files by name at boot (e.g. its `compose.yaml` and
-    /// `images.tar`), so a podman workload is launched with the generic initrd
-    /// plus, for example:
+    /// Repeatable. Format: `<guest-name>=<host-path>`. E.g. for a podman workload:
     ///   --file compose.yaml=workloads/bitcoin/compose.yaml
     ///   --file images.tar=workloads/bitcoin/images.tar
     #[arg(long = "file", value_parser = parse_file_arg, verbatim_doc_comment)]
     pub files: Vec<FileArg>,
 }
 
-/// One `--file <guest-name>=<host-path>` mapping: a file the guest can pull
-/// over the file-transmission hypercall by `name`.
+/// One `--file <guest-name>=<host-path>` mapping.
 #[derive(Clone, Debug)]
 pub struct FileArg {
-    /// The name the guest requests (e.g. `images.tar`).
     pub name: String,
-    /// The host path served for that name.
     pub path: String,
 }
 
-/// One scheduled I/O channel action. Parsed from the CLI's repeated
-/// `--io-action` flag and serialised into the wire format the guest module
-/// expects. `target_tsc == 0` means "queue at startup".
+/// One parsed `--io-action`.
 #[derive(Clone, Debug)]
 pub struct ScheduledIoAction {
-    /// Earliest emulated-TSC value at which this action may be queued
-    /// with the kernel. The CLI's run-loop checks `exit.emulated_tsc`
-    /// after each VM exit and queues the next eligible action.
+    /// Earliest emulated TSC at which the run loop queues this action (0 =
+    /// at startup).
     pub target_tsc: u64,
-    /// The action body.
     pub action: IoAction,
 }
 
-/// A bash command to run on the I/O channel — the channel's one action.
+/// A bash command to run on the I/O channel.
 #[derive(Clone, Debug)]
 pub struct IoAction {
-    /// Container to run inside (`podman exec`), or `None` to run on the host.
+    /// `None` runs on the guest host.
     pub container: Option<String>,
-    /// The bash command line.
     pub command: String,
-    /// Whether to additionally capture the command's combined stdout+stderr
-    /// into the output feedback buffer (printed by the CLI when the response
-    /// arrives). The output streams to the guest journal either way.
+    /// Also capture stdout+stderr for printing (it always goes to the journal).
     pub record_output: bool,
 }
 
 impl Args {
-    /// Returns true if `Exit` records should be captured (single-stepping or an
-    /// explicit `--exit-capture` mode).
     pub fn should_capture_exits(&self) -> bool {
         self.single_step.is_some() || self.exit_capture.is_some()
     }
 
-    /// The `Exit`-record trigger policy and its mode-specific TSC, derived from
-    /// `--single-step` / `--exit-capture`. Single-stepping takes precedence and
-    /// uses the `TscRange` trigger.
+    /// Trigger policy and TSC from `--single-step` (takes precedence) or
+    /// `--exit-capture`.
     pub fn exit_trigger(&self) -> (ExitTrigger, u64) {
         if self.single_step.is_some() {
             (ExitTrigger::TscRange, 0)
@@ -199,13 +175,11 @@ impl Args {
     }
 }
 
-/// Parsed `--exit-capture` argument: an [`ExitTrigger`] plus its mode-specific
-/// TSC value (`AtTsc` threshold / `Checkpoints` interval; 0 otherwise).
+/// Parsed `--exit-capture`.
 #[derive(Clone, Debug)]
 pub struct ExitCaptureArg {
-    /// The trigger policy.
     pub trigger: ExitTrigger,
-    /// Mode-specific TSC value.
+    /// `AtTsc` threshold / `Checkpoints` interval; 0 otherwise.
     pub target_tsc: u64,
 }
 
@@ -239,7 +213,6 @@ fn parse_exit_capture(s: &str) -> Result<ExitCaptureArg, String> {
     Ok(arg)
 }
 
-/// RDRAND emulation mode.
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RdrandMode {
     /// Use seeded PRNG (deterministic)
@@ -279,17 +252,13 @@ fn parse_tsc_range(s: &str) -> Result<(u64, u64), String> {
     Ok((start, end))
 }
 
-/// Parse an f64 value from a string.
 fn parse_f64(s: &str) -> Result<f64, String> {
     s.trim()
         .parse()
         .map_err(|_| format!("Invalid number: {}", s))
 }
 
-/// Parse a `--file` spec (`<guest-name>=<host-path>`) into a [`FileArg`].
-///
-/// Splits on the first `=` so host paths may contain `=`. Both sides must be
-/// non-empty.
+/// Parse `<guest-name>=<host-path>`, splitting on the first `=`.
 fn parse_file_arg(s: &str) -> Result<FileArg, String> {
     let (name, path) = s
         .split_once('=')
@@ -307,11 +276,7 @@ fn parse_file_arg(s: &str) -> Result<FileArg, String> {
     })
 }
 
-/// Parse a `--io-action` spec into a `ScheduledIoAction`.
-///
-/// Accepts an optional `tsc=<N>:` or `vt=<seconds>:` scheduling prefix
-/// (the colon after the value separates the prefix from the action body),
-/// then dispatches on the body via [`parse_io_action_body`].
+/// Parse `[tsc=<N>:|vt=<seconds>:]<body>`.
 fn parse_scheduled_io_action(s: &str) -> Result<ScheduledIoAction, String> {
     let (target_tsc, body) = if let Some(rest) = s.strip_prefix("tsc=") {
         let (value, body) = rest.split_once(':').ok_or_else(|| {
@@ -335,10 +300,8 @@ fn parse_scheduled_io_action(s: &str) -> Result<ScheduledIoAction, String> {
         if secs < 0.0 {
             return Err(format!("Negative virtual time in '{}'", s));
         }
-        // Conversion uses DEFAULT_TSC_FREQUENCY because the parser runs
-        // before `--virt-tsc-frequency` is applied to the VM. Users who pass
-        // `--virt-tsc-frequency` and want precise alignment should specify
-        // `tsc=...` directly.
+        // `--virt-tsc-frequency` isn't known at parse time; use `tsc=` for
+        // precise alignment with a custom frequency.
         let tsc = (secs * DEFAULT_TSC_FREQUENCY as f64) as u64;
         (tsc, body)
     } else {
@@ -348,18 +311,8 @@ fn parse_scheduled_io_action(s: &str) -> Result<ScheduledIoAction, String> {
     Ok(ScheduledIoAction { target_tsc, action })
 }
 
-/// Parse the body portion of an `--io-action` spec, after any scheduling
-/// prefix has been stripped.
-///
-/// Accepts an optional `rec:` prefix (record the command's output into the
-/// output feedback buffer) then one exec form:
-///   `exec:host:<cmd>`            → run on the host
-///   `exec:<container>:<cmd>`     → run inside the container
-///
-/// The split on the first `:` after `exec:` leaves the `<cmd>` part free
-/// to contain colons of its own (`exec:bitcoind1:bitcoin-cli getinfo`).
-/// `host` in the container slot is reserved for the guest-direct form, so
-/// a container literally named `host` cannot be targeted via `exec:`.
+/// Parse `[rec:]exec:<host|container>:<cmd>`. `<cmd>` may contain colons; a
+/// container literally named `host` cannot be targeted.
 fn parse_io_action_body(s: &str) -> Result<IoAction, String> {
     let (record_output, body) = match s.strip_prefix("rec:") {
         Some(rest) => (true, rest),

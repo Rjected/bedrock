@@ -13,7 +13,7 @@ impl EptPermissions {
     /// Read, write, and execute permissions.
     pub const READ_WRITE_EXECUTE: Self = Self(0b111);
 
-    /// Read and execute permissions (no write) - used for COW pages in forked VMs.
+    /// Read and execute (no write): COW pages in forked VMs.
     pub const READ_EXECUTE: Self = Self(0b101);
 
     /// Create permissions from raw bits.
@@ -21,7 +21,6 @@ impl EptPermissions {
         Self(bits & 0b111)
     }
 
-    /// Get the raw bits.
     pub const fn bits(self) -> u64 {
         self.0
     }
@@ -79,7 +78,6 @@ impl EptEntry {
         EptPermissions::from_bits(self.0)
     }
 
-    /// Get the raw u64 value.
     pub const fn raw(&self) -> u64 {
         self.0
     }

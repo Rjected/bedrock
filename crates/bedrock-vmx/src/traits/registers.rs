@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Register access methods for VmContext.
-//!
-//! This module provides the set_registers, get_registers, and helper methods
-//! for reading/writing guest registers via VMCS.
+//! Guest register get/set via the VMCS, backing `VmContext`'s register methods.
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
@@ -15,10 +12,7 @@ use super::{
     Vmx,
 };
 
-/// Set guest registers from the provided register struct.
-///
-/// This writes all guest registers to the VMCS and updates the GPR state.
-/// The VMCS must be loaded before calling this method.
+/// Write all guest registers to the VMCS and GPR state. VMCS must be loaded.
 pub fn set_registers<V, I>(
     state: &mut VmState<V, I>,
     regs: &GuestRegisters,
@@ -27,10 +21,8 @@ where
     V: VirtualMachineControlStructure,
     I: InstructionCounter,
 {
-    // Update general-purpose registers
     state.gprs = regs.gprs;
 
-    // Write guest state to control registers
     state
         .vmcs
         .write_natural(VmcsFieldNatural::GuestRsp, regs.gprs.rsp)
@@ -44,7 +36,7 @@ where
         .write_natural(VmcsFieldNatural::GuestRflags, regs.rflags)
         .map_err(VmSetRegistersError::VmcsWrite)?;
 
-    // Fix and write CR0 and CR4 if needed
+    // CR0/CR4 are forced to satisfy the VMX fixed bits.
     {
         let vcpu = <V::M as super::Machine>::V::current_vcpu();
         let fixed_cr0 =
@@ -77,7 +69,7 @@ where
         }
     }
 
-    // CR3 - page table base address
+    // CR3
     state
         .vmcs
         .write_natural(VmcsFieldNatural::GuestCr3, regs.control_regs.cr3.bits())
@@ -326,47 +318,42 @@ where
         .write_natural(VmcsFieldNatural::GuestIa32SysenterEip, 0)
         .map_err(VmSetRegistersError::VmcsWrite)?;
 
-    // Additional MSRs required by Intel SDM Vol 3C Section 28.3.1.1:
-    // Even if "load" controls aren't enabled, these fields must be
-    // initialized to avoid VM-entry failures.
+    // Must be initialized even without the "load" controls, or VM entry fails
+    // (SDM Vol 3C §28.3.1.1).
     state
         .vmcs
-        .write64(VmcsField64::GuestIa32Debugctl, 0) // No debug features enabled
+        .write64(VmcsField64::GuestIa32Debugctl, 0)
         .map_err(VmSetRegistersError::VmcsWrite)?;
     state
         .vmcs
-        .write64(VmcsField64::GuestIa32Pat, 0x0007040600070406) // Default PAT value
+        .write64(VmcsField64::GuestIa32Pat, 0x0007040600070406) // reset default
         .map_err(VmSetRegistersError::VmcsWrite)?;
 
-    // Guest interruptibility and activity state (required by Intel SDM)
+    // Fully interruptible, active, no pending debug exceptions.
     state
         .vmcs
-        .write32(VmcsField32::GuestInterruptibilityState, 0) // Fully interruptible
+        .write32(VmcsField32::GuestInterruptibilityState, 0)
         .map_err(VmSetRegistersError::VmcsWrite)?;
     state
         .vmcs
-        .write32(VmcsField32::GuestActivityState, 0) // Active state
+        .write32(VmcsField32::GuestActivityState, 0)
         .map_err(VmSetRegistersError::VmcsWrite)?;
     state
         .vmcs
-        .write_natural(VmcsFieldNatural::GuestPendingDebugExceptions, 0) // No pending debug exceptions
+        .write_natural(VmcsFieldNatural::GuestPendingDebugExceptions, 0)
         .map_err(VmSetRegistersError::VmcsWrite)?;
 
     Ok(())
 }
 
-/// Get all guest registers from VMCS and GPR state.
-///
-/// The VMCS must be loaded before calling this method.
+/// Read all guest registers from the VMCS and GPR state. VMCS must be loaded.
 pub fn get_registers<V, I>(state: &VmState<V, I>) -> Result<GuestRegisters, VmGetRegistersError>
 where
     V: VirtualMachineControlStructure,
     I: InstructionCounter,
 {
-    // Read GPRs from our cached state
     let gprs = state.gprs;
 
-    // Read control registers from VMCS
     let vmcs = &state.vmcs;
     let cr0 = vmcs
         .read_natural(VmcsFieldNatural::GuestCr0)
@@ -386,7 +373,7 @@ where
         cr8: Cr8::new(0), // CR8 (TPR) not commonly used
     };
 
-    // Read debug registers
+    // Debug registers
     let dr7 = vmcs
         .read_natural(VmcsFieldNatural::GuestDr7)
         .map_err(VmGetRegistersError::VmcsRead)?;
@@ -399,7 +386,7 @@ where
         dr7,
     };
 
-    // Read segment registers
+    // Segment registers
     let cs = read_segment(
         vmcs,
         VmcsField16::GuestCsSelector,
@@ -468,7 +455,7 @@ where
         ldtr,
     };
 
-    // Read descriptor tables
+    // Descriptor tables
     let gdtr_base = vmcs
         .read_natural(VmcsFieldNatural::GuestGdtrBase)
         .map_err(VmGetRegistersError::VmcsRead)?;
@@ -487,7 +474,7 @@ where
         idtr: Idtr::new(idtr_base, idtr_limit as u16),
     };
 
-    // Read EFER
+    // EFER
     let efer = vmcs
         .read64(VmcsField64::GuestIa32Efer)
         .map_err(VmGetRegistersError::VmcsRead)?;
@@ -495,7 +482,7 @@ where
         efer: Efer::new(efer),
     };
 
-    // Read RIP and RFLAGS
+    // RIP and RFLAGS
     let rip = vmcs
         .read_natural(VmcsFieldNatural::GuestRip)
         .map_err(VmGetRegistersError::VmcsRead)?;
@@ -515,7 +502,6 @@ where
     })
 }
 
-/// Helper to read a segment register from VMCS.
 fn read_segment<V: VirtualMachineControlStructure>(
     vmcs: &V,
     sel_field: VmcsField16,

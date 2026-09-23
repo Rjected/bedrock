@@ -14,24 +14,20 @@ pub enum LabError {
     /// The underlying VM operation failed.
     Vm(bedrock_vm::VmError),
 
-    /// `run_until(t)` was called with `t` earlier than the branch's current
-    /// time. To move backward, take a checkpoint and call
-    /// [`Checkpoint::rewind`](crate::Checkpoint::rewind).
+    /// `run_until` target before the current time; use
+    /// [`Checkpoint::rewind`](crate::Checkpoint::rewind) to go back.
     TargetInPast { current: VirtTime, target: VirtTime },
 
-    /// [`Checkpoint::rewind`](crate::Checkpoint::rewind) was called but no
-    /// ancestor checkpoint exists at or before the target time.
+    /// No ancestor checkpoint at or before the rewind target.
     NoCheckpointBefore { target: VirtTime },
 
     /// Two times were combined with mismatched TSC frequencies.
     FrequencyMismatch { lhs: u64, rhs: u64 },
 
-    /// A `bash` call saw an unexpected exit while waiting for the I/O channel
-    /// response (e.g. the guest halted or shut down before replying).
+    /// An exit the lab couldn't handle while waiting (e.g. guest shut down).
     UnexpectedExit { at: VirtTime, kind: ExitKind },
 
-    /// Queueing an I/O action supplied by an [`InputSource`](crate::InputSource)
-    /// failed.
+    /// Queueing an [`InputSource`](crate::InputSource) I/O action failed.
     QueueInputIo {
         at: VirtTime,
         target: BashTarget,
@@ -108,5 +104,4 @@ impl From<std::io::Error> for LabError {
     }
 }
 
-/// Result alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, LabError>;

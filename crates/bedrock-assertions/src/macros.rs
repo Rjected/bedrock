@@ -2,25 +2,12 @@
 
 //! Convenience macros for constructing [`Assertion`](crate::Assertion)s.
 //!
-//! Two families are provided, one per [`Assertion`](crate::Assertion) variant:
-//! `always_*` builds [`Assertion::Always`](crate::Assertion::Always) and
-//! `sometimes_*` builds [`Assertion::Sometimes`](crate::Assertion::Sometimes).
-//!
-//! Every macro takes an obligatory trailing `message` (anything `Into<String>`)
-//! describing the property, and captures the call-site source location via
-//! [`file!`]/[`line!`]/[`column!`]. The evaluated result is recorded too. All of
-//! these land in the serialized [`AssertionData`](crate::AssertionData).
-//!
-//! Comparison operands accept any integer value up to `u64`: they are converted
-//! with [`i128::from`], which accepts every signed/unsigned integer type
-//! through `u64`/`i64` and rejects anything wider (e.g. `u128`) at compile
-//! time.
+//! `always_*` / `sometimes_*` build the matching variant. Each takes a trailing
+//! `message` and captures the call-site location. Comparison operands go
+//! through [`i128::from`], so anything wider than `u64`/`i64` fails to compile.
 
-/// Internal: generate one comparison macro that builds an assertion of the
-/// given variant for a given [`Condition`](crate::Condition).
-///
-/// `$d` threads a literal `$` into the generated macro so its metavariables
-/// don't clash with this generator's own parser (same trick as `bedrock-log`).
+/// Generate one comparison macro. `$d` threads a literal `$` into the
+/// generated macro so its metavariables don't clash with this one's.
 macro_rules! define_cmp_macro {
     ($d:tt $(#[$doc:meta])* $name:ident => $ctor:ident, $variant:ident) => {
         $(#[$doc])*

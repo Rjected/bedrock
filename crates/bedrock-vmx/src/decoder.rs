@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Minimal x86-64 instruction decoder for MMIO emulation.
-//!
-//! This module decodes MOV instructions that access memory, which is needed
-//! for software MMIO emulation (e.g., APIC register access). It only handles
-//! the common instruction patterns used for MMIO operations.
-//!
-//! Intel SDM Vol 2A/2B contains the full instruction encoding reference.
+//! Minimal x86-64 decoder for the MOV/MOVZX memory forms used in MMIO
+//! emulation (e.g. APIC access). Encodings: Intel SDM Vol 2A/2B.
 
 /// Decoded instruction information for MMIO emulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,20 +65,7 @@ impl RexPrefix {
     }
 }
 
-/// Decode an x86-64 instruction for MMIO emulation.
-///
-/// This decoder handles the common patterns used for MMIO register access:
-/// - `MOV r32/r64, [mem]` - load from memory
-/// - `MOV [mem], r32/r64` - store to memory
-///
-/// # Arguments
-///
-/// * `bytes` - Instruction bytes starting at the instruction to decode
-///
-/// # Returns
-///
-/// * `Ok(DecodedInstruction)` - Successfully decoded instruction
-/// * `Err(DecodeError)` - Decoding failed
+/// Decode an x86-64 MMIO load/store instruction starting at `bytes[0]`.
 pub fn decode_instruction(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
     if bytes.is_empty() {
         return Err(DecodeError::BufferTooShort);
@@ -91,8 +73,7 @@ pub fn decode_instruction(bytes: &[u8]) -> Result<DecodedInstruction, DecodeErro
 
     let mut pos = 0;
 
-    // Skip legacy prefixes (operand-size, address-size, segment overrides)
-    // These appear before REX in x86-64
+    // Skip legacy prefixes; these precede REX.
     let mut has_operand_size_prefix = false;
     while pos < bytes.len() {
         match bytes[pos] {
@@ -115,7 +96,7 @@ pub fn decode_instruction(bytes: &[u8]) -> Result<DecodedInstruction, DecodeErro
         return Err(DecodeError::BufferTooShort);
     }
 
-    // Check for REX prefix (0x40-0x4F)
+    // REX prefix (0x40-0x4F)
     let rex = RexPrefix::from_byte(bytes[pos]);
     if rex.is_some() {
         pos += 1;
@@ -131,7 +112,6 @@ pub fn decode_instruction(bytes: &[u8]) -> Result<DecodedInstruction, DecodeErro
         return Err(DecodeError::BufferTooShort);
     }
 
-    // Determine operand size
     let operand_size = if rex.w {
         8 // REX.W = 64-bit
     } else if has_operand_size_prefix {
@@ -143,10 +123,8 @@ pub fn decode_instruction(bytes: &[u8]) -> Result<DecodedInstruction, DecodeErro
     let opcode = bytes[pos];
     pos += 1;
 
-    // Handle the opcode
     match opcode {
         // MOV r32/r64, r/m32/r/m64 (8B /r)
-        // Load from memory to register
         0x8B => {
             let (register, length) = parse_modrm_mem(bytes, pos, &rex)?;
             Ok(DecodedInstruction {
@@ -158,7 +136,6 @@ pub fn decode_instruction(bytes: &[u8]) -> Result<DecodedInstruction, DecodeErro
         }
 
         // MOV r/m32/r/m64, r32/r64 (89 /r)
-        // Store from register to memory
         0x89 => {
             let (register, length) = parse_modrm_mem(bytes, pos, &rex)?;
             Ok(DecodedInstruction {
@@ -204,15 +181,13 @@ pub fn decode_instruction(bytes: &[u8]) -> Result<DecodedInstruction, DecodeErro
                 0xB6 | 0xB7 => {
                     let (register, length) = parse_modrm_mem(bytes, pos, &rex)?;
 
-                    // Source operand size (memory)
                     let mem_operand_size = if opcode2 == 0xB6 { 1 } else { 2 };
 
                     Ok(DecodedInstruction {
                         length,
                         operation: MemoryOperation::Load,
                         register,
-                        // For MOVZX, we return the source (memory) operand size
-                        // The emulation needs to know to zero-extend
+                        // MOVZX reports the memory operand size; emulation zero-extends.
                         operand_size: mem_operand_size,
                     })
                 }
@@ -252,9 +227,7 @@ fn parse_modrm_mem(bytes: &[u8], pos: usize, rex: &RexPrefix) -> Result<(u8, u8)
     Ok((reg, pos as u8))
 }
 
-/// Calculate the displacement length for a ModR/M byte.
-///
-/// This handles SIB byte presence and displacement sizes.
+/// Bytes following the ModR/M byte (SIB plus displacement).
 fn modrm_displacement_length(mod_bits: u8, rm: u8, remaining: &[u8]) -> Result<usize, DecodeError> {
     let mut len = 0;
 
@@ -266,7 +239,6 @@ fn modrm_displacement_length(mod_bits: u8, rm: u8, remaining: &[u8]) -> Result<u
         }
         len += 1;
 
-        // Check SIB base for additional displacement
         let sib = remaining[0];
         let base = sib & 0x07;
 
@@ -279,7 +251,6 @@ fn modrm_displacement_length(mod_bits: u8, rm: u8, remaining: &[u8]) -> Result<u
         }
     }
 
-    // Displacement based on mod bits
     match mod_bits {
         // mod=00: no displacement, except:
         // - rm=5 (RIP-relative in 64-bit mode) has 32-bit disp

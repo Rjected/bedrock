@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Forked VM file operations and handlers.
-//!
-//! This module provides the file_operations callbacks for bedrock forked-vm
-//! anonymous inodes. Forked VMs share most handlers with root VMs via the
-//! `VmFileOps` trait.
+//! Forked VM file operations; most handlers are shared with root VMs via
+//! `VmFileOps`.
 
 use core::ffi::c_int;
 use core::sync::atomic::AtomicBool;
@@ -27,7 +24,6 @@ use super::handlers::{self, VmFileOps};
 use super::structs::*;
 use crate::memory::GuestPhysAddr;
 
-/// Implement VmFileOps for BedrockForkedVmFile.
 impl VmFileOps for BedrockForkedVmFile {
     type Vm = super::super::vmx::ForkedVm<
         super::super::vmcs::RealVmcs,
@@ -127,8 +123,7 @@ impl
 
 /// File operations for bedrock forked-vm anonymous inodes.
 pub(crate) static BEDROCK_FORKED_VM_FOPS: SyncFileOps = {
-    // SAFETY: SyncFileOps::zeroed() produces an all-zeros file_operations, which is valid.
-    // We immediately set the required function pointers below.
+    // SAFETY: An all-zeros file_operations is valid; required callbacks are set below.
     let mut fops: bindings::file_operations = unsafe { SyncFileOps::zeroed() };
     fops.owner = core::ptr::null_mut();
     fops.release = Some(bedrock_forked_vm_release);
@@ -147,8 +142,7 @@ unsafe extern "C" fn bedrock_forked_vm_release(
     _inode: *mut bindings::inode,
     file: *mut bindings::file,
 ) -> c_int {
-    // SAFETY: `file` is a valid pointer to a file struct, guaranteed by the kernel
-    // VFS layer which calls this release callback.
+    // SAFETY: `file` is valid, guaranteed by the VFS layer calling this callback.
     let private_data = unsafe { (*file).private_data };
 
     if private_data.is_null() {
@@ -157,12 +151,11 @@ unsafe extern "C" fn bedrock_forked_vm_release(
     }
 
     let vm_ptr = private_data.cast::<BedrockForkedVmFile>();
-    // SAFETY: We verified private_data is non-null above, and it was set to a valid
-    // KBox<BedrockForkedVmFile> pointer when the fd was created in create_forked_vm_fd.
+    // SAFETY: private_data is non-null and was set to a valid BedrockForkedVmFile
+    // in create_forked_vm_fd.
     let vm_id = unsafe { (*vm_ptr).vm_id };
     log_info!("Releasing forked VM {} (fd closed)\n", vm_id);
 
-    // Remove from global vm_list
     {
         let mut guard = HANDLER.lock();
         if let Some(handler) = guard.as_mut() {
@@ -170,11 +163,10 @@ unsafe extern "C" fn bedrock_forked_vm_release(
         }
     }
 
-    // Drop the file descriptor's Arc reference. Nested forked children may still
-    // hold cloned parent Arcs; in that case the allocation is reclaimed when the
-    // last child drops.
-    // SAFETY: vm_ptr was created by Arc::into_raw in create_forked_vm_fd. This
-    // release callback consumes the fd-owned reference exactly once.
+    // Nested forked children may still hold parent Arcs; the allocation is then
+    // freed when the last child drops.
+    // SAFETY: vm_ptr came from Arc::into_raw in create_forked_vm_fd; release
+    // consumes the fd-owned reference exactly once.
     let _ = unsafe { Arc::from_raw(vm_ptr) };
 
     log_info!("Forked VM {} released successfully\n", vm_id);
@@ -183,9 +175,8 @@ unsafe extern "C" fn bedrock_forked_vm_release(
 
 /// Mmap callback for bedrock forked-vm files.
 ///
-/// Forked VMs support mapping auxiliary buffers (feedback buffers and the
-/// unified event buffer). Guest memory cannot be mapped as one contiguous
-/// region because it uses COW from the parent.
+/// Only feedback buffers and the event buffer can be mapped; guest memory is
+/// COW from the parent and not contiguous.
 ///
 /// # Safety
 ///
@@ -203,41 +194,27 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
         return -(bindings::EBADF as i32);
     }
 
-    // SAFETY: private_data is non-null (checked above) and was set to a valid
-    // BedrockForkedVmFile pointer when the fd was created. We hold exclusive access
-    // because the kernel serializes mmap calls per file.
+    // SAFETY: private_data is non-null and points to the BedrockForkedVmFile set
+    // at fd creation; the kernel serializes mmap calls per file.
     let vm_file = unsafe { &mut *(private_data.cast::<BedrockForkedVmFile>()) };
 
-    // SAFETY: `vma` is a valid pointer to a vm_area_struct, guaranteed by the kernel
-    // VFS/mmap layer. These helpers read standard VMA fields.
+    // SAFETY: `vma` is a valid VMA pointer from the kernel mmap layer.
     let vma_start = unsafe { bedrock_vma_start(vma) };
-    // SAFETY: Same as above — `vma` is a valid VMA pointer from the kernel mmap layer.
+    // SAFETY: Same as above.
     let vma_end = unsafe { bedrock_vma_end(vma) };
-    // SAFETY: Same as above — `vma` is a valid VMA pointer from the kernel mmap layer.
+    // SAFETY: Same as above.
     let vma_pgoff = unsafe { bedrock_vma_pgoff(vma) };
 
     let requested_size = vma_end - vma_start;
     let offset_bytes = vma_pgoff * 4096;
 
-    // ForkedVm doesn't have contiguous guest memory - it uses COW from parent.
-    // We only allow mapping:
-    // - offset 0: feedback buffer 0 (up to 1MB)
-    // - ... (each feedback slot reserves 1MB)
-    // - past the feedback region: the unified event buffer (1MB)
-    //
-    // Guest serial output flows through the event buffer as `Serial` records,
-    // so there is no dedicated serial/TSC page in the layout.
+    // Same layout as root.rs minus guest memory: feedback slots start at 0, the
+    // event buffer sits at EVENT_BUFFER_MMAP_OFFSET and is checked first.
     let feedback_buffer_base_offset: u64 = 0;
-    // 1MB per feedback slot; sourced from vmx so userspace and kernel never
-    // drift. Per-buffer size is capped but the number of buffers is unbounded.
     let feedback_buffer_slot_size: u64 = super::super::vmx::FEEDBACK_BUFFER_SLOT_SIZE;
-    // Event buffer sits at a fixed sentinel offset above the (unbounded)
-    // feedback-buffer region (see root.rs). Checked before the feedback
-    // catch-all since its offset is also `>= feedback_buffer_base_offset`.
     let event_buffer_offset: u64 = super::super::vmx::EVENT_BUFFER_MMAP_OFFSET;
 
     if offset_bytes == event_buffer_offset {
-        // Event buffer mapping
         if requested_size as usize != EVENT_BUFFER_SIZE {
             log_err!(
                 "mmap: event buffer must be exactly {} bytes, got {}\n",
@@ -256,8 +233,7 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
         };
 
         let addr = event_buffer.as_ptr().cast::<core::ffi::c_void>();
-        // SAFETY: `vma` is a valid VMA pointer from the kernel. `addr` is a valid
-        // vmalloc'd pointer to the event buffer. Offset 0 maps from the start.
+        // SAFETY: `vma` is a valid kernel VMA and `addr` is the vmalloc'd event buffer.
         let ret = unsafe { bedrock_remap_vmalloc_range(vma, addr, 0) };
 
         if ret != 0 {
@@ -271,20 +247,15 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
         let relative_offset = offset_bytes - feedback_buffer_base_offset;
         let buffer_index = (relative_offset / feedback_buffer_slot_size) as usize;
 
-        // Check alignment within slot
         if !relative_offset.is_multiple_of(feedback_buffer_slot_size) {
             log_err!("mmap: feedback buffer offset not aligned to slot boundary\n");
             return -(bindings::EINVAL as i32);
         }
 
-        // COW this buffer's pages into the VM now, so the frames we map are the
-        // ones the guest will write to. Without this, a forked child mapped
-        // before it writes the buffer would later COW each written page to a
-        // new frame, leaving this mapping stale ("map once, keep running,
-        // re-read"). A no-op for pages already COW'd and for an unregistered /
-        // out-of-range index (handled by the `.get()` below). mmap runs in
-        // sleepable context, so direct GFP_KERNEL allocation (pool = None) is
-        // fine.
+        // COW the buffer's pages now so we map the frames the guest will write;
+        // otherwise a later guest write would COW to a new frame and leave this
+        // mapping stale. No-op for already-COW'd pages and invalid indices.
+        // mmap is sleepable, so direct GFP_KERNEL allocation is fine.
         {
             let mut allocator = KernelFrameAllocator::new(MACHINE.kernel());
             vm_file
@@ -292,8 +263,7 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
                 .cow_feedback_buffer_for_mapping(buffer_index, &mut allocator);
         }
 
-        // Feedback buffer mapping. An unregistered or out-of-range index has no
-        // entry in the (unbounded) buffer vector.
+        // Unregistered or out-of-range indices have no entry.
         let feedback_buffer = match vm_file.vm.state.feedback_buffers.get(buffer_index) {
             Some(fb) => fb,
             None => {
@@ -313,23 +283,18 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
             return -(bindings::EINVAL as i32);
         }
 
-        // For forked VM, resolve each GPA to HPA:
-        // 1. Check COW pages first (if guest wrote to this page, it's in COW map)
-        // 2. Otherwise, get from parent chain (walks through nested forks to root)
+        // Resolve each GPA via the COW map first, else the parent chain.
         let mut hpas = [0u64; 256]; // FEEDBACK_BUFFER_MAX_PAGES = 256
 
         for (i, hpa) in hpas.iter_mut().enumerate().take(feedback_buffer.num_pages) {
             let gpa = feedback_buffer.gpas[i];
             let page_gpa = GuestPhysAddr::new(gpa);
 
-            // Check if this page is in our COW map
             if let Some(cow_page) =
                 <CowPageMap<super::super::page::KernelPage>>::get(&vm_file.vm.cow_pages, page_gpa)
             {
-                // Page is in COW map - use its physical address directly
                 *hpa = Page::physical_address(cow_page).as_u64();
             } else {
-                // Page is in parent chain - get virtual address and convert to physical
                 let virt_ptr = match vm_file.vm.read_page(page_gpa) {
                     Some(ptr) => ptr,
                     None => {
@@ -341,10 +306,8 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
                         return -(bindings::EINVAL as i32);
                     }
                 };
-                // Convert kernel virtual address to physical
-                // SAFETY: virt_ptr is a valid kernel virtual address obtained from
-                // read_page, which returns a pointer into the parent's guest memory.
-                // bedrock_kva_to_phys converts it to a physical address.
+                // SAFETY: virt_ptr is a valid kernel virtual address into the
+                // parent's guest memory, returned by read_page.
                 let phys =
                     unsafe { bedrock_kva_to_phys(virt_ptr.cast::<core::ffi::c_void>().cast_mut()) };
                 if phys == 0 {
@@ -359,9 +322,8 @@ unsafe extern "C" fn bedrock_forked_vm_mmap(
             }
         }
 
-        // SAFETY: `vma` is a valid VMA pointer from the kernel. `hpas` contains valid
-        // physical addresses resolved from COW pages or parent memory. num_pages does
-        // not exceed the array size (256).
+        // SAFETY: `vma` is a valid kernel VMA, `hpas` holds HPAs resolved from
+        // COW pages or parent memory, and num_pages <= 256 (the array size).
         let ret =
             unsafe { bedrock_remap_pages(vma, hpas.as_ptr(), feedback_buffer.num_pages as i32) };
 
@@ -405,9 +367,8 @@ unsafe extern "C" fn bedrock_forked_vm_ioctl(
         return -(bindings::EBADF as isize);
     }
 
-    // SAFETY: private_data is non-null (checked above) and was set to a valid
-    // BedrockForkedVmFile pointer when the fd was created. The kernel serializes
-    // ioctls per file descriptor.
+    // SAFETY: private_data is non-null and points to the BedrockForkedVmFile set
+    // at fd creation; the kernel serializes ioctls per file.
     let vm_file = unsafe { &mut *(private_data.cast::<BedrockForkedVmFile>()) };
 
     match cmd {

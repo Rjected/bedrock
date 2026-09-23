@@ -2,15 +2,9 @@
 // VMX Capabilities Structure
 // =============================================================================
 
-/// VMX capabilities read from processor MSRs.
-///
-/// Contains the adjusted control values that can be used directly
-/// when writing to VMCS control fields.
-///
-/// See Intel SDM Vol 3C, Appendix A.
-///
-/// Note: This struct must be `#[repr(C)]` to match the layout of
-/// `struct bedrock_vmx_caps` in helpers.c for per-CPU access.
+/// VMX capabilities from MSRs, with control values already adjusted for direct
+/// VMCS use (SDM Vol 3C, Appendix A). Layout must match `struct
+/// bedrock_vmx_caps` in helpers.c (per-CPU access).
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct VmxCapabilities {
@@ -39,27 +33,21 @@ pub struct VmxCapabilities {
     /// VPID support available.
     pub has_vpid: bool,
 
-    /// IA32_PERF_CAPABILITIES.PEBS_FMT (bits 11:8). Encoding of the PEBS record
-    /// layout. Format >= 4 is required for adaptive / EPT-friendly PEBS.
-    /// See Intel SDM Vol 3B Section 21.8.
+    /// IA32_PERF_CAPABILITIES.PEBS_FMT (bits 11:8); >= 4 needed for adaptive /
+    /// EPT-friendly PEBS. SDM Vol 3B §21.8.
     pub pebs_format: u8,
-    /// IA32_PERF_CAPABILITIES.PEBS_BASELINE (bit 14). When set:
-    /// IA32_PEBS_ENABLE exists, all counters support PEBS, adaptive PEBS via
-    /// MSR_PEBS_DATA_CFG is supported. See Intel SDM Vol 3B Section 21.8.
+    /// IA32_PERF_CAPABILITIES.PEBS_BASELINE (bit 14): IA32_PEBS_ENABLE exists, all
+    /// counters support PEBS, adaptive PEBS via MSR_PEBS_DATA_CFG. SDM Vol 3B §21.8.
     pub pebs_baseline: bool,
-    /// IA32_PERF_CAPABILITIES.PEBS_TRAP (bit 6). 1 = trap-like (record points
-    /// to instruction following overflow); 0 = fault-like.
+    /// IA32_PERF_CAPABILITIES.PEBS_TRAP (bit 6): 1 = trap-like (record points
+    /// after the overflowing instruction), 0 = fault-like.
     pub pebs_trap: bool,
 }
 
 impl VmxCapabilities {
-    /// Whether the processor supports the architectural prerequisites for
-    /// EPT-friendly PEBS as used by precise VM exits: PEBS_BASELINE = 1 and
-    /// PEBS record format >= 4. See Intel SDM Vol 3B Section 21.9.5.
-    ///
-    /// Note: EPT-friendly PEBS itself has no separate CPUID/MSR enumeration
-    /// bit; it is implicit on parts that satisfy these constraints (Ice Lake-SP
-    /// / 12th-gen Core and later).
+    /// Prerequisites for EPT-friendly PEBS (precise VM exits): PEBS_BASELINE and
+    /// format >= 4 (SDM Vol 3B §21.9.5). EPT-friendly PEBS has no enumeration bit
+    /// of its own; it is implied on such parts (Ice Lake-SP / 12th-gen and later).
     pub fn supports_precise_pebs_exits(&self) -> bool {
         self.pebs_baseline && self.pebs_format >= 4
     }

@@ -79,16 +79,12 @@ fn sched_bash_fires_at_scheduled_time() {
 
     let mut branch = ready.branch().expect("fork branch");
 
-    // Unlike `bash`, `sched_bash` returns immediately and the command fires
-    // later, at a fixed virtual time. Queue one a little ahead of now.
     let fire_at = branch.current_time() + vt_dur!(10 ms);
     branch
         .sched_bash(fire_at, BashTarget::host(), "echo scheduled-probe", true)
         .expect("schedule bash");
 
-    // Drive forward: the response surfaces as an ActionResponse once the guest
-    // runs the command, which can't happen before the scheduled time. Stop
-    // well past `fire_at` so a working dispatch always lands first.
+    // The response can't precede `fire_at`; the deadline is a safety net.
     let deadline = fire_at + vt_dur!(1 s);
     let (at, out) = loop {
         let (at, outcome) = branch.run_until(deadline).expect("run_until");

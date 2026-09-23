@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Linux x86-64 boot protocol support.
-//!
-//! This module provides everything needed to boot a Linux kernel in a VM:
-//! - GDT setup for 64-bit mode
-//! - Identity-mapped page tables
-//! - boot_params (zero page) configuration
-//! - MP tables for APIC discovery
-//! - Initial register state
+//! Linux x86-64 boot protocol support: GDT, identity page tables, boot_params,
+//! MP tables and initial registers.
 //!
 //! # Example
 //!

@@ -29,13 +29,8 @@ const IOAPIC_REG_VER: u32 = 0x01;
 const IOAPIC_REG_ARB: u32 = 0x02;
 const IOAPIC_REG_REDTBL_BASE: u32 = 0x10;
 
-/// Handle APIC MMIO access.
-///
-/// This emulates reads/writes to the Local APIC registers by:
-/// 1. Fetching and decoding the instruction at guest RIP
-/// 2. For reads: reading from ApicState and writing to guest register
-/// 3. For writes: reading from guest register and writing to ApicState
-/// 4. Advancing RIP past the instruction
+/// Emulate a Local APIC MMIO access by decoding the faulting instruction and
+/// moving the value between the GPR and `ApicState`, then advancing RIP.
 pub fn handle_apic_access<C: VmContext>(
     ctx: &mut C,
     gpa: u64,
@@ -43,13 +38,11 @@ pub fn handle_apic_access<C: VmContext>(
 ) -> ExitHandlerResult {
     let offset = (gpa - APIC_BASE) as u32;
 
-    // Get guest RIP to fetch the instruction
     let rip = match ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip) {
         Ok(v) => v,
         Err(e) => return ExitHandlerResult::Error(ExitError::VmcsReadError(e)),
     };
 
-    // Translate guest RIP (virtual address) to guest physical address
     let instr_gpa = match translate_gva_to_gpa(ctx, rip) {
         Ok(gpa) => gpa,
         Err(()) => {
@@ -58,7 +51,6 @@ pub fn handle_apic_access<C: VmContext>(
         }
     };
 
-    // Fetch instruction bytes
     let mut instr_bytes = [0u8; 15];
     if ctx.read_guest_memory(instr_gpa, &mut instr_bytes).is_err() {
         log_err!(
@@ -69,7 +61,6 @@ pub fn handle_apic_access<C: VmContext>(
         return ExitHandlerResult::ExitToUserspace(ExitReason::EptViolation);
     }
 
-    // Decode the instruction
     let decoded = match decode_instruction(&instr_bytes) {
         Ok(d) => d,
         Err(e) => {
@@ -82,12 +73,9 @@ pub fn handle_apic_access<C: VmContext>(
         }
     };
 
-    // Handle the access based on direction
     if qual.read {
-        // APIC read - get value from emulated APIC and write to destination register
         let value = read_apic_register(&ctx.state().devices.apic, offset);
 
-        // Write to the destination register (zero-extended, APIC registers are 32-bit)
         let reg_value = u64::from(value);
 
         set_gpr_value(&mut ctx.state_mut().gprs, decoded.register, reg_value);
@@ -99,7 +87,6 @@ pub fn handle_apic_access<C: VmContext>(
             decoded.register
         );
     } else if qual.write {
-        // APIC write - get value from source register and write to emulated APIC
         let reg_value = get_gpr_value(&ctx.state().gprs, decoded.register) as u32;
         let current_tsc = ctx.state().emulated_tsc;
 
@@ -111,7 +98,6 @@ pub fn handle_apic_access<C: VmContext>(
         );
     }
 
-    // Advance RIP past the instruction
     let new_rip = rip + u64::from(decoded.length);
     if ctx
         .state()
@@ -125,9 +111,7 @@ pub fn handle_apic_access<C: VmContext>(
     ExitHandlerResult::Continue
 }
 
-/// Read from an emulated APIC register.
-///
-/// Intel SDM Vol 3A, Table 12-1 defines the register map.
+/// Read an emulated APIC register (map: SDM Vol 3A Table 12-1).
 fn read_apic_register(apic: &ApicState, offset: u32) -> u32 {
     match offset {
         // APIC ID (bits 31:24 contain the ID)
@@ -180,7 +164,6 @@ fn read_apic_register(apic: &ApicState, offset: u32) -> u32 {
         0x390 => 0,
         // Timer Divide Configuration
         0x3E0 => apic.timer_divide,
-        // Reserved/unknown registers return 0
         _ => {
             log_debug!("APIC read: unknown offset {:#x}", offset);
             0
@@ -188,10 +171,8 @@ fn read_apic_register(apic: &ApicState, offset: u32) -> u32 {
     }
 }
 
-/// Write to an emulated APIC register.
-///
-/// Intel SDM Vol 3A, Table 12-1 defines the register map.
-/// `current_tsc` is the emulated TSC value, used for timer deadline calculation.
+/// Write an emulated APIC register (map: SDM Vol 3A Table 12-1). Timer
+/// deadlines are computed from the emulated `current_tsc`.
 fn write_apic_register(apic: &mut ApicState, offset: u32, value: u32, current_tsc: u64) {
     match offset {
         // APIC ID (bits 31:24 are writable in some modes)
@@ -200,7 +181,6 @@ fn write_apic_register(apic: &mut ApicState, offset: u32, value: u32, current_ts
         0x080 => apic.tpr = value & 0xFF,
         // EOI Register - clear highest priority ISR bit
         0x0B0 => {
-            // Find and clear the highest priority bit in ISR
             for i in (0..8).rev() {
                 if apic.isr[i] != 0 {
                     let bit = 31 - apic.isr[i].leading_zeros();
@@ -217,11 +197,9 @@ fn write_apic_register(apic: &mut ApicState, offset: u32, value: u32, current_ts
         0x0F0 => apic.svr = value,
         // Error Status Register - write clears it
         0x280 => apic.esr = 0,
-        // Interrupt Command Register (low) - could trigger IPI (ignored for now)
+        // Interrupt Command Register (low) - IPIs ignored (single vCPU)
         0x300 => {
             apic.icr_lo = value;
-            // In a real implementation, this would trigger an IPI
-            // For single-vCPU, we can mostly ignore this
         }
         // Interrupt Command Register (high)
         0x310 => apic.icr_hi = value,
@@ -241,19 +219,16 @@ fn write_apic_register(apic: &mut ApicState, offset: u32, value: u32, current_ts
         0x380 => {
             apic.timer_initial = value;
             if value != 0 {
-                // Calculate deadline based on divide configuration
                 let divisor = apic_timer_divisor(apic.timer_divide);
                 let ticks = u64::from(value) * u64::from(divisor);
-                // Set deadline using emulated TSC for determinism
                 apic.timer_deadline = current_tsc + ticks;
             } else {
-                // Timer stopped
                 apic.timer_deadline = 0;
             }
         }
         // Timer Divide Configuration
         0x3E0 => apic.timer_divide = value,
-        // Read-only or reserved registers - ignore writes
+        // Read-only or reserved
         _ => {
             log_debug!(
                 "APIC write: ignored offset {:#x} value {:#x}",
@@ -285,11 +260,8 @@ fn apic_timer_divisor(dcr: u32) -> u32 {
 // I/O APIC Emulation
 // =============================================================================
 
-/// Handle I/O APIC MMIO access.
-///
-/// The I/O APIC uses indirect register access:
-/// - IOREGSEL (offset 0x00): Selects which register to access
-/// - IOWIN (offset 0x10): Read/write window for the selected register
+/// Emulate an I/O APIC MMIO access. Registers are indirect: IOREGSEL (0x00)
+/// selects, IOWIN (0x10) is the data window.
 pub fn handle_ioapic_access<C: VmContext>(
     ctx: &mut C,
     gpa: u64,
@@ -297,13 +269,11 @@ pub fn handle_ioapic_access<C: VmContext>(
 ) -> ExitHandlerResult {
     let offset = (gpa - IOAPIC_BASE) as u32;
 
-    // Read the instruction to decode the access
     let rip = match ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip) {
         Ok(v) => v,
         Err(e) => return ExitHandlerResult::Error(ExitError::VmcsReadError(e)),
     };
 
-    // Translate guest virtual address (RIP) to guest physical address
     let instr_gpa = match translate_gva_to_gpa(ctx, rip) {
         Ok(gpa) => gpa,
         Err(()) => {
@@ -313,7 +283,6 @@ pub fn handle_ioapic_access<C: VmContext>(
         }
     };
 
-    // Read instruction bytes from guest memory
     let mut instr_bytes = [0u8; 15];
     if ctx.read_guest_memory(instr_gpa, &mut instr_bytes).is_err() {
         return ExitHandlerResult::Error(ExitError::Fatal("Failed to read I/O APIC instruction"));
@@ -329,14 +298,13 @@ pub fn handle_ioapic_access<C: VmContext>(
     };
 
     if qual.read {
-        // I/O APIC read
         let value = match offset {
             0x00 => {
-                // IOREGSEL - return current register select value
+                // IOREGSEL
                 ctx.state().devices.ioapic.ioregsel
             }
             0x10 => {
-                // IOWIN - read from selected register
+                // IOWIN
                 read_ioapic_register(&ctx.state().devices.ioapic)
             }
             _ => {
@@ -345,23 +313,21 @@ pub fn handle_ioapic_access<C: VmContext>(
             }
         };
 
-        // Write value to destination register
         set_gpr_value(
             &mut ctx.state_mut().gprs,
             decoded.register,
             u64::from(value),
         );
     } else if qual.write {
-        // I/O APIC write - get value from source register
         let value = get_gpr_value(&ctx.state().gprs, decoded.register) as u32;
 
         match offset {
             0x00 => {
-                // IOREGSEL - set register select
+                // IOREGSEL
                 ctx.state_mut().devices.ioapic.ioregsel = value;
             }
             0x10 => {
-                // IOWIN - write to selected register
+                // IOWIN
                 write_ioapic_register(ctx, value);
             }
             _ => {
@@ -374,7 +340,6 @@ pub fn handle_ioapic_access<C: VmContext>(
         }
     }
 
-    // Advance RIP past the instruction
     let new_rip = rip + u64::from(decoded.length);
     if ctx
         .state()
@@ -438,7 +403,6 @@ fn write_ioapic_register<C: VmContext>(ctx: &mut C, value: u32) {
             // Read-only registers
         }
         _ if (IOAPIC_REG_REDTBL_BASE..IOAPIC_REG_REDTBL_BASE + 48).contains(&reg) => {
-            // Redirection table entry
             let entry_idx = ((reg - IOAPIC_REG_REDTBL_BASE) / 2) as usize;
             let is_high = (reg - IOAPIC_REG_REDTBL_BASE) % 2 == 1;
 

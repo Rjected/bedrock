@@ -3,8 +3,7 @@
 // See Intel SDM Vol 3A, Section 2.5 - Control Registers
 // =============================================================================
 
-/// CR0 - Contains system control flags that control operating mode and states.
-/// See Intel SDM Vol 3A, Section 2.5.
+/// CR0 - system control flags (operating mode and states).
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Cr0(u64);
@@ -19,8 +18,7 @@ impl Cr0 {
     }
 }
 
-/// CR2 - Contains the page-fault linear address.
-/// All 64 bits are writable by software.
+/// CR2 - page-fault linear address.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Cr2(pub u64);
@@ -31,8 +29,7 @@ impl Cr2 {
     }
 }
 
-/// CR3 - Contains the physical address of the paging-structure hierarchy base and flags.
-/// See Intel SDM Vol 3A, Section 2.5.
+/// CR3 - paging-structure hierarchy base address and flags.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Cr3(u64);
@@ -47,8 +44,7 @@ impl Cr3 {
     }
 }
 
-/// CR4 - Contains flags that enable architectural extensions.
-/// See Intel SDM Vol 3A, Section 2.5.
+/// CR4 - architectural extension enable flags.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Cr4(u64);
@@ -74,15 +70,13 @@ impl Cr4 {
     }
 }
 
-/// CR8 - Provides read/write access to bits 7:4 of the local APIC's TPR.
-/// Available in 64-bit mode only. Only bits 3:0 are used.
-/// See Intel SDM Vol 3A, Section 2.5.
+/// CR8 - access to local APIC TPR bits 7:4 (64-bit mode only; bits 3:0 used).
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Cr8(u64);
 
 impl Cr8 {
-    /// Mask for valid TPR bits (only bits 3:0 are used).
+    /// Mask for valid TPR bits.
     const TPR_MASK: u64 = 0xF;
 
     pub fn new(value: u64) -> Self {
@@ -106,42 +100,30 @@ pub struct ControlRegisters {
 // See Intel SDM Vol 2B, MOV—Move to/from Control Registers
 // =============================================================================
 
-/// Error returned by control register read/write operations.
-/// See Intel SDM Vol 2B (MOV—Move to/from Control Registers).
+/// Error returned by control register read/write operations (SDM Vol 2B MOV CR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrError {
-    /// Attempted to access an invalid control register (CR1, CR5-CR7, CR9-CR15).
-    /// Results in #UD on hardware.
+    /// Invalid control register (CR1, CR5-CR7, CR9-CR15). #UD.
     InvalidRegister,
-    /// The operation requires CPL 0.
-    /// Results in #GP(0) on hardware.
+    /// Requires CPL 0. #GP(0).
     PrivilegeViolation,
-    /// Invalid bit combination in CR0 (e.g., PG=1 with PE=0, or CD=0 with NW=1).
-    /// Results in #GP(0) on hardware.
+    /// Invalid CR0 combination (PG=1 with PE=0, or CD=0 with NW=1). #GP(0).
     InvalidCr0Combination,
-    /// Attempted to set reserved bits in CR0[63:32].
-    /// Results in #GP(0) on hardware.
+    /// Reserved bits set in CR0[63:32]. #GP(0).
     Cr0ReservedBits,
-    /// Attempted to set reserved bits in CR4.
-    /// Results in #GP(0) on hardware.
+    /// Reserved bits set in CR4. #GP(0).
     Cr4ReservedBits,
-    /// Attempted to set reserved bits in CR8 (bits 63:4).
-    /// Results in #GP(0) on hardware.
+    /// Reserved bits set in CR8[63:4]. #GP(0).
     Cr8ReservedBits,
-    /// Attempted to set reserved bits in CR3[63:MAXPHYADDR].
-    /// Results in #GP(0) on hardware.
+    /// Reserved bits set in CR3[63:MAXPHYADDR]. #GP(0).
     Cr3ReservedBits,
-    /// CR8 access attempted outside of 64-bit mode.
-    /// CR8 is only available in 64-bit mode.
+    /// CR8 access outside 64-bit mode.
     Cr8NotAvailable,
-    /// Attempted to change CR4.PCIDE from 0 to 1 while CR3[11:0] != 0.
-    /// Results in #GP(0) on hardware.
+    /// CR4.PCIDE 0->1 while CR3[11:0] != 0. #GP(0).
     PcidEnableWithNonZeroCr3,
-    /// Attempted to clear CR0.PG in 64-bit mode.
-    /// Results in #GP(0) on hardware.
+    /// Clearing CR0.PG in 64-bit mode. #GP(0).
     CannotDisablePaging64Bit,
-    /// Attempted to clear CR4.PAE in IA-32e mode.
-    /// Results in #GP(0) on hardware.
+    /// Clearing CR4.PAE in IA-32e mode. #GP(0).
     CannotDisablePae,
     /// Platform-specific error.
     PlatformError(u32),
@@ -150,25 +132,10 @@ pub enum CrError {
 /// Result type for control register operations.
 pub type CrResult<T> = Result<T, CrError>;
 
-/// Trait for reading and writing Control Registers (CR0, CR2, CR3, CR4, CR8).
+/// Read/write access to control registers via MOV CRn (0F 20 / 0F 22).
 ///
-/// Control registers are accessed via the MOV instruction:
-/// - MOV r64, CRn (opcode 0F 20): Reads the control register into a GPR
-/// - MOV CRn, r64 (opcode 0F 22): Writes a GPR value to the control register
-///
-/// Both forms require CPL 0 (ring 0). Invalid register access causes #UD,
-/// and invalid values or reserved bit violations cause #GP(0).
-///
-/// MOV CR instructions (except MOV CR8) are serializing instructions.
-///
-/// See Intel SDM Vol 3A, Section 2.5 (Control Registers) and
-/// Intel SDM Vol 2B, MOV - Move to/from Control Registers.
-///
-/// Implementors must ensure:
-/// - Operations are only performed at CPL 0
-/// - Invalid register numbers are rejected
-/// - Reserved bits are properly handled
-/// - Invalid bit combinations are detected for CR0
+/// Requires CPL 0; invalid registers #UD, invalid values #GP(0).
+/// See Intel SDM Vol 3A §2.5 and Vol 2B (MOV CR).
 ///
 /// # Example Implementation
 ///
@@ -193,29 +160,20 @@ pub type CrResult<T> = Result<T, CrError>;
 /// }
 /// ```
 pub trait CrAccess {
-    /// Read CR0 - Contains system control flags that control operating mode and states.
     fn read_cr0(&self) -> CrResult<Cr0>;
 
-    /// Read CR3 - Contains the physical address of the paging-structure hierarchy base.
     fn read_cr3(&self) -> CrResult<Cr3>;
 
-    /// Read CR4 - Contains flags that enable architectural extensions.
     fn read_cr4(&self) -> CrResult<Cr4>;
 
-    /// Write CR4 - Contains flags that enable architectural extensions.
     fn write_cr4(&self, value: &Cr4) -> CrResult<()>;
 
-    /// Set CR4.VMXE (bit 13) to enable VMX operation.
+    /// Set CR4.VMXE (bit 13).
     ///
-    /// On real hardware, this must update the kernel's CR4 shadow (cpu_tlbstate.cr4)
-    /// in addition to the actual CR4 register. A raw MOV to CR4 would desync the
-    /// shadow, causing the kernel to #GP when it later writes CR4 without VMXE
-    /// during context switches.
+    /// Must also update the kernel's CR4 shadow (cpu_tlbstate.cr4); a raw MOV
+    /// would desync it and the kernel would later drop VMXE on context switch.
     fn set_vmxe(&self) -> CrResult<()>;
 
-    /// Clear CR4.VMXE (bit 13) to disable VMX.
-    ///
-    /// Must only be called after VMXOFF (outside VMX operation).
-    /// Like set_vmxe, must update the kernel's CR4 shadow.
+    /// Clear CR4.VMXE. Only after VMXOFF; must also update the CR4 shadow.
     fn clear_vmxe(&self) -> CrResult<()>;
 }

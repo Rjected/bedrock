@@ -2,23 +2,13 @@
 
 //! High-level testing and debugging API for the bedrock hypervisor.
 //!
-//! `bedrock-lab` sits on top of `bedrock-vm` and exposes concepts useful for
-//! exploring, testing, and debugging guest workloads:
+//! - [`VirtTime`] / [`VirtDuration`] — all "when" arguments are virtual time.
+//! - [`Checkpoint`] — an immutable halted VM that branches fork from.
+//! - [`Branch`] — a line of execution; advance with [`Branch::run_until`],
+//!   snapshot with [`Branch::checkpoint`], go back with [`Checkpoint::rewind`].
+//! - [`Tree`] — a read-only view of the checkpoint/branch genealogy.
 //!
-//! - [`VirtTime`] / [`VirtDuration`] — the time currency. All "when" arguments
-//!   are expressed in virtual time, not wall-clock time.
-//! - [`Checkpoint`] — an *immutable moment in time*. A halted VM that can serve
-//!   as a fork source for one or more branches.
-//! - [`Branch`] — a *single line of execution* descending from a checkpoint. A
-//!   branch can be advanced ([`Branch::run_until`]) and snapshotted
-//!   ([`Branch::checkpoint`]). To move backward in time, take a
-//!   [`Checkpoint`] and call [`Checkpoint::rewind`] on it.
-//! - [`Tree`] — a read-only view of the full checkpoint/branch genealogy
-//!   accumulated so far. Reachable from any handle.
-//!
-//! Handles are cheap to clone (internally `Arc`). The execution tree lives as
-//! long as any handle into it is alive and is dropped automatically when all
-//! handles go out of scope.
+//! The tree lives as long as any handle into it.
 //!
 //! # Example
 //!
@@ -26,8 +16,6 @@
 //! use bedrock_lab::{BashTarget, Checkpoint, VirtTime, VirtDuration};
 //! use bedrock_vm::VmBuilder;
 //!
-//! // Caller is responsible for any guest boot setup (kernel loading, etc.)
-//! // before handing the Vm over to the lab.
 //! let vm = VmBuilder::new().memory_mb(64).build()?;
 //! // ... load kernel, setup_linux_boot, etc. ...
 //! let cp0 = Checkpoint::initial_when_ready(

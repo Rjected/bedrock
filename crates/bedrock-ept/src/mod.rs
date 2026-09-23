@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Re-export for use as a submodule in kernel builds.
-//!
-//! Note: `extern crate alloc` must be declared at the kernel crate root
-//! (bedrock_main.rs) for alloc types to be available here.
+//! Re-export for use as a submodule in kernel builds. `extern crate alloc`
+//! must be declared at the kernel crate root (bedrock_main.rs).
 
 #![allow(unreachable_pub, dead_code)]
 

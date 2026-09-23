@@ -58,24 +58,20 @@ pub enum VmcsField16 {
 
 /// 64-bit VMCS fields (encoding pattern: 0010_xxxx_xxxx_xxxA).
 ///
-/// Note: For 64-bit fields, bit 0 indicates full (0) or high (1) access.
-/// These encodings are for full access. Add 1 for high 32-bits only.
+/// Encodings are for full access; add 1 for the high 32 bits only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum VmcsField64 {
     // 64-bit control fields (type 0)
     /// Address of MSR bitmaps.
     MsrBitmapAddr = 0x2004,
-    /// Address of the VM-exit MSR-store area — list of MSRs whose guest
-    /// values the CPU writes to memory on VM-exit.
+    /// Address of the VM-exit MSR-store area (guest MSRs saved on VM-exit).
     VmExitMsrStoreAddr = 0x2006,
-    /// Address of the VM-exit MSR-load area — list of host MSR values the
-    /// CPU reads from memory and loads on VM-exit. Used to atomically disable host-side PEBS
-    /// so any PEBS record that skids past VM-exit is silently dropped instead
-    /// of writing into stale `IA32_DS_AREA` mappings.
+    /// Address of the VM-exit MSR-load area (host MSRs loaded on VM-exit).
+    /// Used to atomically disable PEBS so records that skid past VM-exit are
+    /// dropped instead of hitting stale `IA32_DS_AREA` mappings.
     VmExitMsrLoadAddr = 0x2008,
-    /// Address of the VM-entry MSR-load area — list of guest MSR values the
-    /// CPU reads from memory and loads on VM-entry.
+    /// Address of the VM-entry MSR-load area (guest MSRs loaded on VM-entry).
     VmEntryMsrLoadAddr = 0x200A,
     /// Page-modification log address.
     PmlAddress = 0x200E,

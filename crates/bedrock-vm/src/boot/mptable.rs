@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! MP Table setup for APIC discovery.
-//!
-//! Creates Intel MultiProcessor Specification tables so Linux
-//! can discover the Local APIC and I/O APIC.
+//! Intel MultiProcessor Specification tables for APIC discovery.
 
 use bedrock_vmx::IO_CHANNEL_IRQ;
 
@@ -11,17 +8,14 @@ use super::constants::mptable::{
     BASE_ADDR, IOAPIC_ID, IOAPIC_PADDR, IOAPIC_VERSION, LAPIC_PADDR, LAPIC_VERSION, SPEC_REV,
 };
 
-/// Compute MP table checksum (sum of all bytes must be 0).
+/// Checksum byte making the sum of all bytes 0.
 fn mp_checksum(data: &[u8]) -> u8 {
     let sum: u8 = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
     0u8.wrapping_sub(sum)
 }
 
-/// Set up MP tables for APIC discovery.
-///
-/// Creates Intel MultiProcessor Specification tables at 0xF0000 so Linux
-/// can discover the Local APIC and I/O APIC. Without these tables (or ACPI MADT),
-/// Linux doesn't know the LAPIC timer exists.
+/// Write MP tables at 0xF0000. Without them (or an ACPI MADT) Linux doesn't
+/// know the LAPIC timer exists.
 ///
 /// Table structure:
 /// - MP Floating Pointer Structure (16 bytes) at 0xF0000
@@ -35,11 +29,10 @@ pub fn setup_mptable(memory: &mut [u8]) {
     let mpfp_addr = offset;
 
     // === MP Floating Pointer Structure (16 bytes) ===
-    // Signature "_MP_"
     memory[offset..offset + 4].copy_from_slice(b"_MP_");
     offset += 4;
 
-    // Physical Address Pointer (points to config table, right after this struct)
+    // Config table follows this struct.
     let config_table_addr = (BASE_ADDR + 16) as u32;
     memory[offset..offset + 4].copy_from_slice(&config_table_addr.to_le_bytes());
     offset += 4;
@@ -61,14 +54,12 @@ pub fn setup_mptable(memory: &mut [u8]) {
     memory[offset..offset + 5].copy_from_slice(&[0, 0, 0, 0, 0]);
     offset += 5;
 
-    // Compute and write floating pointer checksum
     let fp_checksum = mp_checksum(&memory[mpfp_addr..mpfp_addr + 16]);
     memory[checksum_offset] = fp_checksum;
 
     // === MP Configuration Table Header (44 bytes) ===
     let config_table_start = offset;
 
-    // Signature "PCMP"
     memory[offset..offset + 4].copy_from_slice(b"PCMP");
     offset += 4;
 
@@ -170,11 +161,8 @@ pub fn setup_mptable(memory: &mut [u8]) {
     entry_count += 1;
 
     // === I/O Interrupt Source Entries (8 bytes each) - Entry type 3 ===
-    // Route ISA IRQs to I/O APIC. The bedrock-emulated platform only needs
-    // two pins: COM1 serial (IRQ 4) and the bedrock-io channel (IRQ
-    // IO_CHANNEL_IRQ — the guest's `bedrock-io.ko` `request_irq()`s this
-    // pin so the kernel programs the IOAPIC redtbl entry; the hypervisor
-    // then calls `ioapic_deliver_irq` on the same pin to inject).
+    // Only COM1 (IRQ 4) and the bedrock-io channel are routed. `bedrock-io.ko`
+    // `request_irq()`s IO_CHANNEL_IRQ so the guest programs its redtbl entry.
     for irq in [4u8, IO_CHANNEL_IRQ] {
         memory[offset] = 3; // Entry type: I/O interrupt source
         offset += 1;
@@ -228,14 +216,11 @@ pub fn setup_mptable(memory: &mut [u8]) {
     offset += 1;
     entry_count += 1;
 
-    // Fill in entry count
     memory[entry_count_offset..entry_count_offset + 2].copy_from_slice(&entry_count.to_le_bytes());
 
-    // Fill in base table length
     let base_table_length = (offset - config_table_start) as u16;
     memory[length_offset..length_offset + 2].copy_from_slice(&base_table_length.to_le_bytes());
 
-    // Compute and write config table checksum
     let config_checksum = mp_checksum(&memory[config_table_start..offset]);
     memory[config_checksum_offset] = config_checksum;
 }

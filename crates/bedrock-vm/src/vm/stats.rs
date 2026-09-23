@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 const TABLE_SEP: &str =
     "─────────────────────────────────────────────────────────────────────────────";
 
-/// Calculate percentage, returning 0.0 if denominator is zero.
 fn pct(num: u64, denom: u64) -> f64 {
     if denom > 0 {
         (num as f64 / denom as f64) * 100.0
@@ -19,7 +18,6 @@ fn pct(num: u64, denom: u64) -> f64 {
     }
 }
 
-/// Format a large number with commas for readability.
 fn format_count(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
@@ -32,7 +30,6 @@ fn format_count(n: u64) -> String {
     result.chars().rev().collect()
 }
 
-/// Format nanoseconds as a human-readable time string.
 fn format_time_ns(ns: u64) -> String {
     if ns >= 1_000_000_000 {
         format!("{:.3} s", ns as f64 / 1_000_000_000.0)
@@ -45,20 +42,17 @@ fn format_time_ns(ns: u64) -> String {
     }
 }
 
-/// Per-exit-type statistics.
-///
-/// Tracks the count and total CPU cycles spent handling each exit type.
+/// Per-exit-type count and handling cycles.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
 pub struct ExitStatEntry {
-    /// Number of exits of this type.
     pub count: u64,
-    /// Total CPU cycles spent handling this exit type (via RDTSC).
+    /// Host cycles spent handling (via RDTSC).
     pub cycles: u64,
 }
 
 impl ExitStatEntry {
-    /// Get the average cycles per exit, or 0 if no exits occurred.
+    /// 0 if no exits occurred.
     #[inline]
     pub fn avg_cycles(&self) -> u64 {
         self.cycles.checked_div(self.count).unwrap_or(0)
@@ -66,9 +60,6 @@ impl ExitStatEntry {
 }
 
 /// Exit handler performance statistics.
-///
-/// This structure tracks performance metrics for each type of VM exit,
-/// allowing identification of which exits cause the most overhead.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
 pub struct ExitStats {
@@ -129,24 +120,21 @@ pub struct ExitStats {
     pub pebs_armed_iter_no_fire: u64,
     /// Timer fires with `emulated_tsc > deadline` (the late-delivery safety net).
     pub apic_timer_late_inject: u64,
-    /// Largest PEBS skid seen this run (`pebs_exit_tsc - armed_target_tsc`).
-    /// The host CPU's PEBS margin must be >= this, so it is the minimum safe
-    /// `margin_for_host_cpu()` value - read it off a run instead of guessing.
+    /// Largest PEBS skid (`pebs_exit_tsc - armed_target_tsc`): the minimum safe
+    /// `margin_for_host_cpu()` for this host.
     pub max_pebs_skid: i64,
 }
 
 impl ExitStats {
-    /// Get total exit count across all types.
     pub fn total_exit_count(&self) -> u64 {
         self.iter().map(|(_, e)| e.count).sum()
     }
 
-    /// Get total exit handling cycles across all types.
     pub fn total_exit_cycles(&self) -> u64 {
         self.iter().map(|(_, e)| e.cycles).sum()
     }
 
-    /// Iterate over all exit types with their names.
+    /// `(name, entry)` for every exit type.
     pub fn iter(&self) -> impl Iterator<Item = (&'static str, &ExitStatEntry)> {
         [
             ("cpuid", &self.cpuid),
@@ -195,12 +183,10 @@ pub struct IoctlStats {
 }
 
 impl IoctlStats {
-    /// Get total time spent in all ioctls (nanoseconds).
     pub fn total_ns(&self) -> u64 {
         self.run_ns + self.get_regs_ns + self.set_regs_ns + self.other_ns
     }
 
-    /// Get total ioctl call count.
     pub fn total_count(&self) -> u64 {
         self.run_count + self.get_regs_count + self.set_regs_count + self.other_count
     }
@@ -253,7 +239,7 @@ impl fmt::Display for IoctlStats {
     }
 }
 
-/// Wraps `ExitStats` with wall clock duration for display.
+/// `ExitStats` plus wall-clock duration, for display.
 pub struct ExitStatsReport<'a> {
     pub stats: &'a ExitStats,
     pub wall_clock: Duration,

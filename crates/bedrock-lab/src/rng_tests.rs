@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Tests for reconstructing an [`InputRecording`] from event-stream records.
-//!
-//! These exercise the pure decode path ([`InputRecording::record_event`]) with
-//! hand-built event bytes, so they need no VM and run under `cargo test`.
+//! [`InputRecording::record_event`] tests over hand-built event bytes (no VM).
 
 use super::{InputRecording, InputSource, IoInput, RandomInput, RecordedInputSource};
 use crate::bash::BashTarget;
@@ -44,9 +41,7 @@ fn random_record(buf: &mut Vec<u8>, seq: u64, tsc: u64, value: u64) {
     push_record(buf, seq, tsc, EventKind::Randomness.as_u16(), p.as_bytes());
 }
 
-/// A `HYPERCALL_GET_RANDOM` reply: same `EventKind::Randomness` record as
-/// `random_record`, but `source = GetRandom` with the served bytes trailing the
-/// header (and the requesting PID in the header).
+/// A `source = GetRandom` randomness record with trailing served bytes.
 fn get_random_record(buf: &mut Vec<u8>, seq: u64, tsc: u64, pid: u32, bytes: &[u8]) {
     let p = RandomPayload {
         pid,
@@ -150,9 +145,7 @@ fn get_random_events_become_random_inputs() {
 
 #[test]
 fn rdrand_and_get_random_share_one_ordered_stream() {
-    // RDRAND and GET_RANDOM events interleave into a single stream and replay
-    // in capture order off one cursor — whichever method the consuming exit
-    // calls.
+    // RDRAND and GET_RANDOM share one stream and replay off one cursor.
     let mut buf = Vec::new();
     random_record(&mut buf, 0, 1_000, 0xAB); // RDRAND value
     get_random_record(&mut buf, 1, 2_000, 9, &[7, 7, 7, 7]); // GET_RANDOM bytes

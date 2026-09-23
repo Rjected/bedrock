@@ -6,18 +6,13 @@ use bedrock_lab::{BashTarget, Checkpoint, EventConfig, ExitCapture};
 
 use crate::common;
 
-/// Fork a fresh branch off `ready`, capture every exit, drive it through a
-/// fixed deterministic workload, and return its normalized exit-record stream
-/// (the per-exit guest state: register and device-state hashes, served
-/// randomness, injected interrupts, I/O transactions). Two sibling branches
-/// that ran this must return byte-identical streams.
+/// Run a fixed workload on a fresh branch and return its normalized record
+/// stream; siblings must return identical streams.
 fn exit_stream(ready: &Checkpoint) -> Vec<serde_json::Value> {
     let sink = common::capture_sink();
     let mut branch = ready.branch().expect("fork branch");
 
-    // Capture a record for every exit. Memory hashing stays off: register and
-    // device-state hashes already pin down divergence, and hashing multi-GB
-    // guest memory on every exit would dominate the test's run time.
+    // No memory hashing: multi-GB hashes per exit would dominate run time.
     branch
         .set_event_config(&EventConfig {
             exits: ExitCapture::AllExits { memory_hash: false },
@@ -26,9 +21,7 @@ fn exit_stream(ready: &Checkpoint) -> Vec<serde_json::Value> {
         .expect("enable exit capture");
     let id = branch.id();
 
-    // Identical deterministic work on both siblings: a bash command (exercises
-    // the deterministic I/O channel and a guest-entropy read) followed by a
-    // fixed idle advance (exercises deterministic timer-interrupt injection).
+    // Exercises the I/O channel, guest entropy, and timer injection.
     branch
         .bash(
             BashTarget::host(),
@@ -76,13 +69,10 @@ fn rewind_lands_earlier_and_reproduces() {
         return common::skip("rewind_lands_earlier_and_reproduces");
     };
 
-    // Advance a branch a full second past ready, then freeze it.
     let mut branch = ready.branch().expect("fork branch");
     branch.run_for(vt_dur!(1 s)).expect("advance 1s");
     let cp = branch.checkpoint().expect("checkpoint");
 
-    // Rewind half a second. The result must sit strictly before the
-    // checkpoint and no earlier than where we started.
     let earlier = cp.rewind(vt_dur!(500 ms)).expect("rewind");
     assert!(
         earlier.time() == cp.time() - vt_dur!(500 ms),
@@ -91,8 +81,7 @@ fn rewind_lands_earlier_and_reproduces() {
         cp.time().as_secs_f64(),
     );
 
-    // A branch off the rewound point still runs — rewinding yields a live,
-    // forkable checkpoint, not a dead handle.
+    // The rewound checkpoint is forkable.
     let mut resumed = earlier.branch().expect("fork rewound branch");
     let out = resumed
         .bash(BashTarget::host(), "echo post-rewind", true)

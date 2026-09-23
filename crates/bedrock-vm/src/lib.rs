@@ -1,19 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Userland API for interacting with bedrock VMs.
-//!
-//! This crate provides a safe Rust interface for userspace programs to interact
-//! with VMs created by the bedrock kernel module. It handles:
-//!
-//! - VM creation (root and forked with copy-on-write)
-//! - Memory mapping of guest physical memory
-//! - Register access via ioctls
-//! - Deterministic execution (RDRAND emulation, TSC control, event capture)
-//! - Proper cleanup on drop
+//! Safe userspace API for VMs created by the bedrock kernel module: root and
+//! CoW-forked VMs, guest memory mapping, registers, and deterministic execution
+//! controls (RDRAND, TSC, event capture).
 //!
 //! # Creating a VM with VmBuilder
-//!
-//! The recommended way to create VMs is using [`VmBuilder`]:
 //!
 //! ```ignore
 //! use bedrock_vm::{VmBuilder, RdrandConfig};
@@ -32,8 +23,6 @@
 //! ```
 //!
 //! # Forking VMs
-//!
-//! Forked VMs share memory with their parent using copy-on-write:
 //!
 //! ```ignore
 //! // Create parent VM and run to a snapshot point
@@ -54,8 +43,6 @@
 //! ```
 //!
 //! # Run Loop with ExitKind
-//!
-//! Use [`ExitKind`] for clean exit handling:
 //!
 //! ```ignore
 //! use bedrock_vm::ExitKind;
@@ -81,8 +68,6 @@
 //!
 //! # Deterministic Execution
 //!
-//! Configure RDRAND for reproducible execution:
-//!
 //! ```ignore
 //! use bedrock_vm::RdrandConfig;
 //!
@@ -95,8 +80,7 @@
 //!
 //! # Capturing exits via the event stream
 //!
-//! `Exit` records are part of the unified event stream. Enable the stream with
-//! the [`EXIT`](EventCategories::EXIT) category and an [`ExitTrigger`]:
+//! Enable the [`EXIT`](EventCategories::EXIT) category and an [`ExitTrigger`]:
 //!
 //! ```ignore
 //! use bedrock_vm::{EventCategories, EventConfig, ExitTrigger};

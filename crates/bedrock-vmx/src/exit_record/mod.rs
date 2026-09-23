@@ -2,11 +2,8 @@
 
 //! Exit-record structure for non-determinism diagnosis.
 //!
-//! [`ExitRecord`] is the payload of an `EventKind::Exit` event: a snapshot of a VM
-//! exit capturing the TSC, exit reason and qualification, guest registers,
-//! per-device state hashes (APIC, serial, IOAPIC, RTC, MTRR, RDRAND) and a full
-//! guest-memory hash. Emitting and draining it is handled by the event stream
-//! (see `crate::events`).
+//! [`ExitRecord`] is the payload of an `EventKind::Exit` event: TSC, exit
+//! reason, guest registers, device state hashes and a guest-memory hash.
 
 mod hash;
 mod record;

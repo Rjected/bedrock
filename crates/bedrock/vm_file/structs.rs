@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! User ABI structures and ioctl definitions for VM file descriptors.
-//!
-//! This module defines the data structures passed between userspace and kernel
-//! via ioctl commands, as well as the ioctl command numbers.
+//! User ABI structures and ioctl numbers for VM file descriptors.
 
 use core::mem::MaybeUninit;
 
@@ -47,8 +44,8 @@ pub(crate) const BEDROCK_VM_SET_STOP_TSC: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 8
 /// Ioctl number for GET_VM_ID command - get the VM's unique identifier.
 pub(crate) const BEDROCK_VM_GET_VM_ID: u32 = _IOR::<u64>(BEDROCK_IOC_MAGIC, 9);
 
-/// Ioctl number for GET_FEEDBACK_BUFFER_INFO command - get feedback buffer registration info.
-/// Takes BedrockFeedbackBufferInfoRequest with index, returns BedrockFeedbackBufferInfo.
+/// Ioctl number for GET_FEEDBACK_BUFFER_INFO command - takes a
+/// BedrockFeedbackBufferInfoRequest, returns BedrockFeedbackBufferInfo.
 pub(crate) const BEDROCK_VM_GET_FEEDBACK_BUFFER_INFO: u32 =
     _IOR::<BedrockFeedbackBufferInfoRequest>(BEDROCK_IOC_MAGIC, 10);
 
@@ -102,10 +99,9 @@ pub(crate) struct BedrockRandomBytes {
 /// Maximum I/O channel payload size (one 4KB page).
 pub(crate) const BEDROCK_IO_CHANNEL_BUF_SIZE: usize = 4096;
 
-/// Header fields of an I/O channel ioctl payload. The full payload is this
-/// header followed by `BEDROCK_IO_CHANNEL_BUF_SIZE` bytes of data;
-/// handlers stage the header through the stack (16 bytes) and copy the
-/// payload directly into / out of VmState to avoid a 4KB stack burst.
+/// I/O channel payload header, followed by `BEDROCK_IO_CHANNEL_BUF_SIZE` data
+/// bytes. Handlers stage only the header on the stack and copy the data
+/// directly to/from VmState to avoid a 4KB stack burst.
 #[repr(C)]
 pub(crate) struct BedrockIoActionHeader {
     /// For QUEUE: number of valid bytes in the payload.
@@ -114,20 +110,14 @@ pub(crate) struct BedrockIoActionHeader {
     pub len: u32,
     /// Reserved for alignment.
     pub _reserved: u32,
-    /// Earliest emulated-TSC value at which the queued request may fire
-    /// (QUEUE only; ignored by DRAIN). Zero means "fire as soon as the
-    /// guest is interruptible". When non-zero, the hypervisor arms PEBS
-    /// so the IRQ lands at the precise instruction count corresponding to
-    /// this TSC.
+    /// Earliest emulated TSC at which the queued request may fire (QUEUE only).
+    /// 0 = as soon as the guest is interruptible; otherwise PEBS is armed so the
+    /// IRQ lands at the matching instruction count.
     pub target_tsc: u64,
 }
 
-/// I/O channel ioctl payload (header + data buffer).
-///
-/// Stored as a single contiguous struct so the userspace ABI is
-/// self-contained. Never instantiated on the kernel stack — the handlers
-/// only read/write the header eagerly and use partial copies for the data
-/// section.
+/// I/O channel ioctl payload (header + data). Never instantiated on the kernel
+/// stack.
 #[repr(C)]
 pub(crate) struct BedrockIoActionPayload {
     pub header: BedrockIoActionHeader,
@@ -135,12 +125,10 @@ pub(crate) struct BedrockIoActionPayload {
 }
 
 /// Request structure for GET_FEEDBACK_BUFFER_INFO ioctl.
-///
-/// Userspace passes this structure to specify which feedback buffer index to query.
 #[repr(C)]
 pub(crate) struct BedrockFeedbackBufferInfoRequest {
-    /// 0-based buffer index to query. The count is unbounded; an unregistered
-    /// or out-of-range index is reported back with `registered = 0`.
+    /// 0-based buffer index; unregistered/out-of-range indices report
+    /// `registered = 0`.
     pub index: u32,
     /// Reserved for alignment.
     pub _reserved: u32,
@@ -150,13 +138,9 @@ pub(crate) struct BedrockFeedbackBufferInfoRequest {
 /// keep in lockstep with the userland `FeedbackBufferInfo` (in `bedrock-vm`).
 pub(crate) const FEEDBACK_BUFFER_ID_MAX_LEN: usize = 128;
 
-/// Feedback buffer info returned to userspace.
-///
-/// This structure tells userspace about a feedback buffer registered by the
-/// guest via the `HYPERCALL_REGISTER_FEEDBACK_BUFFER` hypercall. The
-/// identifier (`id` / `id_len`) is set at registration time by the guest;
-/// duplicate ids across slots represent independent instances of the same
-/// domain.
+/// Info about a feedback buffer registered via
+/// `HYPERCALL_REGISTER_FEEDBACK_BUFFER`. Duplicate ids across slots are
+/// independent instances of the same domain.
 #[repr(C)]
 pub(crate) struct BedrockFeedbackBufferInfo {
     /// Original guest virtual address.
@@ -167,7 +151,7 @@ pub(crate) struct BedrockFeedbackBufferInfo {
     pub num_pages: u64,
     /// Whether a feedback buffer is registered (0 = no, 1 = yes).
     pub registered: u32,
-    /// 0-based slot index (the buffer's position in the unbounded list).
+    /// 0-based slot index.
     pub index: u32,
     /// Length of the identifier in `id`, in bytes (0 if `registered == 0`).
     pub id_len: u32,
@@ -199,15 +183,13 @@ pub(crate) struct BedrockSingleStepConfig {
     pub tsc_end: u64,
 }
 
-/// Unified event-stream configuration passed from userspace
-/// (`BEDROCK_VM_SET_EVENT_CONFIG`). Must match `bedrock_vm::EventConfig`.
-///
-/// One struct configures the whole stream: the buffer enable + category mask,
-/// plus the `Exit`-record trigger policy in the `exit_*` fields.
+/// Event-stream configuration (`BEDROCK_VM_SET_EVENT_CONFIG`): buffer enable,
+/// category mask, and `Exit`-record trigger policy. Must match
+/// `bedrock_vm::EventConfig`.
 #[repr(C)]
 pub(crate) struct BedrockEventConfig {
-    /// Whether the event stream is enabled. The disabled->enabled transition
-    /// allocates the event buffer; enabled->disabled frees it.
+    /// Whether the event stream is enabled; enabling allocates the event
+    /// buffer, disabling frees it.
     pub enabled: u32,
     /// Category include mask (see `bedrock_vmx::events::EventCategories`).
     pub categories: u32,
@@ -218,8 +200,7 @@ pub(crate) struct BedrockEventConfig {
     pub exit_flags: u32,
     /// Mode-specific TSC (AtTsc threshold / Checkpoints interval; 0 otherwise).
     pub exit_target_tsc: u64,
-    /// Universal start threshold — no `Exit` records until TSC reaches this
-    /// value. 0 = capture from the start.
+    /// No `Exit` records until TSC reaches this value (0 = from the start).
     pub exit_start_tsc: u64,
 }
 
@@ -233,9 +214,7 @@ pub(crate) struct BedrockExitStatEntry {
     pub cycles: u64,
 }
 
-/// Exit handler performance statistics passed to userspace.
-///
-/// This struct mirrors AllExitStats from bedrock-vmx for ABI compatibility.
+/// Exit handler performance statistics; mirrors AllExitStats from bedrock-vmx.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct BedrockExitStats {
@@ -299,24 +278,19 @@ pub(crate) struct BedrockExitStats {
     pub max_pebs_skid: i64,
 }
 
-/// VM exit information returned to userspace from RUN ioctl.
-///
-/// All host-visible output (serial console included) is carried by the unified
-/// event buffer, mmap'd separately and drained as `buffer[0..event_len]`.
+/// VM exit information returned from the RUN ioctl. All other output (incl.
+/// serial) is in the separately mmap'd event buffer (`buffer[0..event_len]`).
 #[repr(C)]
 pub(crate) struct BedrockVmExit {
     /// Exit reason (ExitReason as u32).
     pub exit_reason: u32,
-    /// Reserved (formerly the serial buffer length; guest serial output now
-    /// flows through the event stream). Kept so the ioctl struct layout is
-    /// unchanged.
+    /// Reserved.
     pub _reserved: u32,
     /// Exit qualification (interpretation depends on exit reason).
     pub exit_qualification: u64,
     /// Guest physical address (for EPT violations).
     pub guest_physical_addr: u64,
-    /// Number of valid bytes in the event buffer (mmap'd separately). Zero when
-    /// the event stream is disabled.
+    /// Valid bytes in the event buffer (0 when the event stream is disabled).
     pub event_len: u32,
     /// Explicit padding so the following `u64` fields are 8-byte aligned.
     pub _pad: u32,
@@ -326,10 +300,7 @@ pub(crate) struct BedrockVmExit {
     pub tsc_frequency: u64,
 }
 
-/// Complete VM register state for userspace transfer.
-///
-/// This struct combines all register types needed to fully describe guest state.
-/// All component structs are `#[repr(C)]` making this safe for userspace transfer.
+/// Complete VM register state for userspace transfer (all components `#[repr(C)]`).
 #[repr(C)]
 pub(crate) struct BedrockRegs {
     /// General-purpose registers (RAX, RCX, ..., R15).
@@ -350,11 +321,7 @@ pub(crate) struct BedrockRegs {
     pub rflags: u64,
 }
 
-/// Wrapper around file_operations to implement Sync.
-///
-/// The file_operations struct only contains function pointers and
-/// a module owner pointer. The function pointers are safe to share between
-/// threads, and the owner is null (set by kernel).
+/// file_operations wrapper implementing Sync (only function pointers + a null owner).
 pub(crate) struct SyncFileOps(pub bindings::file_operations);
 
 // SAFETY: file_operations with null owner and only function pointers is safe
@@ -362,12 +329,11 @@ pub(crate) struct SyncFileOps(pub bindings::file_operations);
 unsafe impl Sync for SyncFileOps {}
 
 impl SyncFileOps {
-    /// Create a new zeroed file_operations struct.
+    /// Zeroed file_operations.
     ///
     /// # Safety
     ///
-    /// All zeros is valid for file_operations. Caller must set the required
-    /// function pointers before use.
+    /// Caller must set the required function pointers before use.
     pub(crate) const unsafe fn zeroed() -> bindings::file_operations {
         // SAFETY: Caller promises all zeros is valid for file_operations
         unsafe { MaybeUninit::zeroed().assume_init() }

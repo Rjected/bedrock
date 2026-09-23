@@ -5,10 +5,8 @@
 use super::constants::memory::{PAGE_SIZE, PDPT_HIGH_ADDR, PDPT_LOW_ADDR, PD_ADDR, PML4_ADDR};
 use super::constants::pte::{PAGE_SIZE_2MB, PRESENT, WRITABLE};
 
-/// Set up identity-mapped page tables covering all guest memory.
-///
-/// Uses 2MB pages for efficiency. Maps both low addresses (identity)
-/// and high kernel addresses (0xFFFFFFFF80000000+) to the same physical memory.
+/// Map all guest memory with 2MB pages, both identity and at the kernel's
+/// high addresses (0xFFFFFFFF80000000+).
 pub fn setup_page_tables(memory: &mut [u8], memory_size: usize) {
     let write_u64 = |mem: &mut [u8], offset: usize, value: u64| {
         mem[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
@@ -17,11 +15,10 @@ pub fn setup_page_tables(memory: &mut [u8], memory_size: usize) {
     let gb = 1024 * 1024 * 1024usize;
     let mb2 = 2 * 1024 * 1024usize;
 
-    // Use 2MB pages - need one PD per GB
+    // One PD per GB.
     let num_gb = memory_size.div_ceil(gb);
     let num_gb = num_gb.max(4); // Map at least 4GB for kernel
 
-    // Clear page table area (PML4 through all PDs we'll use)
     let pt_end = PD_ADDR as usize + num_gb * PAGE_SIZE;
     for i in PML4_ADDR as usize..pt_end {
         if i < memory.len() {

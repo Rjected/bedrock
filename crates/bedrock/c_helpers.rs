@@ -4,9 +4,7 @@
 
 use kernel::bindings::{page, phys_addr_t, smp_call_func_t};
 
-/// XXH64 streaming state structure.
-///
-/// Matches the kernel's struct xxh64_state from <linux/xxhash.h>.
+/// XXH64 streaming state; matches the kernel's `struct xxh64_state`.
 #[repr(C)]
 pub(crate) struct Xxh64State {
     pub total_len: u64,
@@ -18,16 +16,14 @@ pub(crate) struct Xxh64State {
     pub memsize: u32,
 }
 
-/// Info struct passed to callbacks by bedrock_for_each_cpu.
-/// Matches the C struct bedrock_cpu_call_info.
+/// Info passed to callbacks by bedrock_for_each_cpu (C `bedrock_cpu_call_info`).
 #[repr(C)]
 pub(crate) struct BedrockCpuCallInfo {
     pub(crate) info: *mut core::ffi::c_void,
     pub(crate) error: i32,
 }
 
-/// VMX capabilities structure.
-/// Matches the C struct bedrock_vmx_caps layout.
+/// VMX capabilities; matches the C `struct bedrock_vmx_caps` layout.
 #[repr(C)]
 pub(crate) struct BedrockVmxCaps {
     pub(crate) pin_based_exec_ctrl: u32,
@@ -54,9 +50,8 @@ extern "C" {
     /// Get the kernel virtual address for a page.
     pub(crate) fn bedrock_page_address(page: *mut page) -> *mut core::ffi::c_void;
 
-    /// Execute a function on each online CPU sequentially with per-CPU error handling.
-    /// Returns 0 on success, or the first error encountered.
-    /// If an error occurs, failed_cpu will be set to the CPU that failed.
+    /// Run a function on each online CPU sequentially. Returns 0 or the first
+    /// error, with `failed_cpu` set to the CPU that failed.
     pub(crate) fn bedrock_for_each_cpu(
         func: smp_call_func_t,
         info: *mut core::ffi::c_void,
@@ -75,25 +70,18 @@ extern "C" {
     /// Free memory allocated with bedrock_vmalloc_user.
     pub(crate) fn bedrock_vfree(addr: *mut core::ffi::c_void);
 
-    /// Get the physical address of a page within vmalloc memory.
-    /// Returns 0 if the address is not valid vmalloc memory.
+    /// Physical address of a page within vmalloc memory, or 0 if not vmalloc.
     pub(crate) fn bedrock_vmalloc_to_phys(addr: *mut core::ffi::c_void) -> phys_addr_t;
 
-    /// Convert any kernel virtual address to its physical address.
-    /// Handles both vmalloc and direct-mapped (kmalloc/alloc_page) addresses.
-    /// Returns 0 if the address is invalid.
+    /// Convert any kernel virtual address (vmalloc or direct-mapped) to its
+    /// physical address, or 0 if invalid.
     pub(crate) fn bedrock_kva_to_phys(addr: *mut core::ffi::c_void) -> phys_addr_t;
 
     /// Convert a physical address to a kernel virtual address.
     pub(crate) fn bedrock_phys_to_virt(phys: phys_addr_t) -> *mut core::ffi::c_void;
 
-    /// Create an anonymous inode and return a file descriptor for it.
-    ///
-    /// This creates a new file descriptor pointing to an anonymous inode
-    /// with the given file operations. The priv pointer is stored in
-    /// file->private_data.
-    ///
-    /// Returns: file descriptor on success, negative error code on failure.
+    /// Create an anonymous inode FD with the given fops; `priv_` is stored in
+    /// file->private_data. Returns the FD or a negative error code.
     pub(crate) fn bedrock_anon_inode_getfd(
         name: *const core::ffi::c_char,
         fops: *const kernel::bindings::file_operations,
@@ -101,41 +89,29 @@ extern "C" {
         flags: core::ffi::c_int,
     ) -> core::ffi::c_int;
 
-    /// Copy data from userspace to kernel space.
-    ///
-    /// Returns: Number of bytes that could NOT be copied (0 on success).
+    /// Copy from userspace. Returns the number of bytes NOT copied.
     pub(crate) fn bedrock_copy_from_user(
         to: *mut core::ffi::c_void,
         from: *const core::ffi::c_void,
         n: core::ffi::c_ulong,
     ) -> core::ffi::c_ulong;
 
-    /// Copy data from kernel space to userspace.
-    ///
-    /// Returns: Number of bytes that could NOT be copied (0 on success).
+    /// Copy to userspace. Returns the number of bytes NOT copied.
     pub(crate) fn bedrock_copy_to_user(
         to: *mut core::ffi::c_void,
         from: *const core::ffi::c_void,
         n: core::ffi::c_ulong,
     ) -> core::ffi::c_ulong;
 
-    /// Map vmalloc memory into a userspace VMA.
-    ///
-    /// The vmalloc memory must have been allocated with vmalloc_user().
-    ///
-    /// Returns: 0 on success, negative error code on failure.
+    /// Map vmalloc_user() memory into a userspace VMA. Returns 0 or -errno.
     pub(crate) fn bedrock_remap_vmalloc_range(
         vma: *mut kernel::bindings::vm_area_struct,
         addr: *mut core::ffi::c_void,
         pgoff: core::ffi::c_ulong,
     ) -> core::ffi::c_int;
 
-    /// Map multiple (potentially non-contiguous) physical pages into a userspace VMA.
-    ///
-    /// The hpas array contains page-aligned host physical addresses.
-    /// The VMA size must equal num_pages * PAGE_SIZE.
-    ///
-    /// Returns: 0 on success, negative error code on failure.
+    /// Map page-aligned, possibly non-contiguous HPAs into a userspace VMA whose
+    /// size must equal num_pages * PAGE_SIZE. Returns 0 or -errno.
     pub(crate) fn bedrock_remap_pages(
         vma: *mut kernel::bindings::vm_area_struct,
         hpas: *const u64,
@@ -168,10 +144,7 @@ extern "C" {
     /// Disable local interrupts (clears IF flag in RFLAGS).
     pub(crate) fn bedrock_local_irq_disable();
 
-    /// Check if the current task needs to be rescheduled.
-    ///
-    /// This is a thin wrapper around the kernel's need_resched() check.
-    /// Returns non-zero if TIF_NEED_RESCHED is set.
+    /// Non-zero if TIF_NEED_RESCHED is set (wraps need_resched()).
     pub(crate) fn bedrock_need_resched() -> core::ffi::c_int;
 
     /// One-shot XXH64 hash.
@@ -225,27 +198,20 @@ extern "C" {
     /// Must be called with preemption disabled.
     pub(crate) fn bedrock_vcpu_set_vmxon_region(phys: u64, virt: u64);
 
-    /// Set CR4.VMXE using cr4_set_bits() to properly update the kernel's CR4 shadow.
+    /// Set CR4.VMXE via cr4_set_bits() so the kernel's CR4 shadow stays in sync.
     pub(crate) fn bedrock_cr4_set_vmxe();
 
-    /// Clear CR4.VMXE using cr4_clear_bits() to properly update the kernel's CR4 shadow.
-    /// Must only be called after VMXOFF (outside VMX operation).
+    /// Clear CR4.VMXE via cr4_clear_bits(). Only call after VMXOFF.
     pub(crate) fn bedrock_cr4_clear_vmxe();
 }
 
-/// RAII guard that disables preemption while held.
-///
-/// Preemption is disabled when the guard is created and re-enabled when dropped.
-/// This ensures the current thread stays on the same CPU for the duration.
+/// RAII guard that keeps the current thread on this CPU by disabling preemption.
 pub(crate) struct PreemptionGuard {
-    // Zero-sized marker to prevent Send/Sync and construction outside this module
     _marker: core::marker::PhantomData<*mut ()>,
 }
 
 impl PreemptionGuard {
-    /// Disable preemption and return a guard.
-    ///
-    /// Preemption will be re-enabled when the guard is dropped.
+    /// Disable preemption until the guard is dropped.
     #[inline]
     pub(crate) fn new() -> Self {
         // SAFETY: This is a valid kernel call that disables preemption.

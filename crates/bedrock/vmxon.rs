@@ -11,10 +11,8 @@ use super::page::KernelPage;
 use super::vmx::traits::{Page as PageTrait, VmxCpu, VmxOnRegion};
 use super::vmx::{InveptError, InvvpidError, Vmx, VmxCapabilities, VmxoffError, VmxonError};
 
-/// VMXON region for a CPU.
-/// Note: We store the physical and virtual addresses directly since we take ownership
-/// from the generic Page trait which doesn't give us access to the underlying Page object.
-/// The original page is leaked (not freed) since the VMXON region must persist.
+/// VMXON region for a CPU. The page is intentionally leaked: the region must
+/// persist for the whole VMX operation lifetime.
 #[allow(dead_code)] // Fields are used via trait methods
 pub(crate) struct RealVmxOnRegion {
     phys: HostPhysAddr,
@@ -27,20 +25,14 @@ impl VmxOnRegion for RealVmxOnRegion {
     fn from_page(page: KernelPage) -> Self {
         let phys = page.physical_address();
         let virt = page.virtual_address();
-        // Note: The page is consumed but we don't free it - the VMXON region
-        // must remain valid for the entire VMX operation lifetime.
-        // We intentionally leak the page memory here.
         core::mem::forget(page);
         Self { phys, virt }
     }
 }
 
-/// Per-CPU VMX state.
-///
-/// This is a zero-sized type that delegates all operations to C helper functions
-/// which properly access per-CPU data using the kernel's `this_cpu_ptr()` macro.
-/// This is necessary because Rust's `#[link_section = ".data..percpu"]` doesn't
-/// generate proper per-CPU relocations like C's `DEFINE_PER_CPU()` does.
+/// Per-CPU VMX state (zero-sized). All access goes through C helpers using
+/// `this_cpu_ptr()`, because Rust's `#[link_section = ".data..percpu"]` doesn't
+/// generate proper per-CPU relocations like `DEFINE_PER_CPU()`.
 pub(crate) struct RealVmxCpu;
 
 // SAFETY: Only accessed from the owning CPU via C helpers.
@@ -53,9 +45,8 @@ impl VmxCpu for RealVmxCpu {
     type R = RealVmxOnRegion;
 
     fn capabilities(&self) -> &VmxCapabilities {
-        // SAFETY: Called with preemption disabled, returns pointer valid for current CPU.
-        // We transmute the C struct pointer to Rust VmxCapabilities reference since they
-        // have the same layout.
+        // SAFETY: Called with preemption disabled; the pointer is valid for the
+        // current CPU and the C struct has the same layout as VmxCapabilities.
         unsafe {
             let caps_ptr = c_helpers::bedrock_vcpu_get_capabilities();
             &*(caps_ptr.cast::<VmxCapabilities>())
@@ -102,9 +93,6 @@ impl VmxCpu for RealVmxCpu {
     }
 }
 
-/// Static instance of RealVmxCpu.
-/// Since RealVmxCpu is a zero-sized type that delegates to C per-CPU helpers,
-/// we only need one static instance that all CPUs can reference.
 static VCPU: RealVmxCpu = RealVmxCpu;
 
 pub(crate) static mut BASIC_INFO: super::vmx::traits::VmxBasic = super::vmx::traits::VmxBasic {
@@ -122,17 +110,15 @@ impl Vmx for RealVmx {
     type M = LinuxMachine;
 
     fn is_supported() -> bool {
-        // Check CPUID.1:ECX.VMX[bit 5]
-        // Note: We need to preserve rbx as LLVM uses it internally.
-        // Save/restore it through a temporary register around CPUID.
+        // CPUID.1:ECX.VMX[bit 5]. rbx is reserved by LLVM, so save/restore it.
         let ecx: u32;
         let rbx_save: u64;
         // SAFETY: CPUID is a read-only instruction; we save/restore rbx around it.
         unsafe {
             asm!(
-                "mov {0}, rbx",  // Save rbx to temp register
+                "mov {0}, rbx",
                 "cpuid",
-                "mov rbx, {0}",  // Restore rbx from temp register
+                "mov rbx, {0}",
                 out(reg) rbx_save,
                 inout("eax") 1u32 => _,
                 lateout("ecx") ecx,
@@ -140,13 +126,11 @@ impl Vmx for RealVmx {
                 options(nomem, nostack)
             );
         }
-        let _ = rbx_save; // Silence unused warning
+        let _ = rbx_save;
         (ecx & (1 << 5)) != 0
     }
 
     fn current_vcpu() -> &'static <Self::M as super::vmx::traits::Machine>::Vcpu {
-        // RealVmxCpu is a zero-sized type that delegates to C per-CPU helpers,
-        // so we can return a reference to the static instance.
         &VCPU
     }
 
@@ -180,7 +164,6 @@ impl Vmx for RealVmx {
             );
         }
 
-        // Check for errors via RFLAGS
         let cf = rflags & 1;
         let zf = (rflags >> 6) & 1;
 
@@ -206,7 +189,6 @@ impl Vmx for RealVmx {
             );
         }
 
-        // Check for errors via RFLAGS
         let zf = (rflags >> 6) & 1;
 
         if zf == 1 {
@@ -217,9 +199,7 @@ impl Vmx for RealVmx {
     }
 
     fn invept_single_context(eptp: u64) -> Result<(), InveptError> {
-        // INVEPT descriptor: 128 bits
-        // Bits 0-63: EPTP (specifies which EPT context to invalidate)
-        // Bits 64-127: Reserved (must be 0)
+        // Bits 0-63: EPTP; bits 64-127 reserved (must be 0).
         #[repr(C, align(16))]
         struct InveptDescriptor {
             eptp: u64,
@@ -228,7 +208,6 @@ impl Vmx for RealVmx {
 
         let descriptor = InveptDescriptor { eptp, reserved: 0 };
 
-        // INVEPT type 1 = single-context invalidation (invalidates only the specified EPTP)
         const INVEPT_TYPE_SINGLE_CONTEXT: u64 = 1;
 
         let rflags: u64;
@@ -245,7 +224,6 @@ impl Vmx for RealVmx {
             );
         }
 
-        // Check for errors via RFLAGS
         let cf = rflags & 1;
         let zf = (rflags >> 6) & 1;
 
@@ -259,13 +237,11 @@ impl Vmx for RealVmx {
     }
 
     fn invvpid_single_context(vpid: u16) -> Result<(), InvvpidError> {
-        // INVVPID descriptor: 128 bits
-        // Bits 0-15: VPID
-        // Bits 16-63: Reserved (must be 0)
-        // Bits 64-127: Linear address (for type 0 individual-address only, otherwise reserved)
+        // Bits 0-15: VPID (rest of the qword reserved); bits 64-127: linear
+        // address (type 0 only).
         #[repr(C, align(16))]
         struct InvvpidDescriptor {
-            vpid: u64, // Only low 16 bits used, rest must be 0
+            vpid: u64,
             linear_address: u64,
         }
 
@@ -274,7 +250,7 @@ impl Vmx for RealVmx {
             linear_address: 0,
         };
 
-        // INVVPID type 1 = single-context invalidation (all entries for specified VPID)
+        // Type 1: all entries for the specified VPID.
         const INVVPID_TYPE_SINGLE_CONTEXT: u64 = 1;
 
         let rflags: u64;
@@ -291,7 +267,6 @@ impl Vmx for RealVmx {
             );
         }
 
-        // Check for errors via RFLAGS
         let cf = rflags & 1;
         let zf = (rflags >> 6) & 1;
 
@@ -305,7 +280,7 @@ impl Vmx for RealVmx {
     }
 
     fn invvpid_all_context() -> Result<(), InvvpidError> {
-        // INVVPID descriptor: 128 bits (ignored for type 2)
+        // Descriptor is ignored for type 2.
         #[repr(C, align(16))]
         struct InvvpidDescriptor {
             vpid: u64,
@@ -317,7 +292,7 @@ impl Vmx for RealVmx {
             linear_address: 0,
         };
 
-        // INVVPID type 2 = all-context invalidation (all entries for all VPIDs except 0)
+        // Type 2: all VPIDs except 0.
         const INVVPID_TYPE_ALL_CONTEXT: u64 = 2;
 
         let rflags: u64;
@@ -334,7 +309,6 @@ impl Vmx for RealVmx {
             );
         }
 
-        // Check for errors via RFLAGS
         let cf = rflags & 1;
         let zf = (rflags >> 6) & 1;
 

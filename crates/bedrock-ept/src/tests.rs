@@ -71,9 +71,7 @@ impl Drop for TestAllocator {
     }
 }
 
-// =============================================================================
 // EptEntry tests
-// =============================================================================
 
 #[test]
 fn ept_entry_table_entry() {
@@ -111,15 +109,12 @@ fn ept_entry_addr_mask() {
     assert_eq!(entry2.addr().as_u64(), 0x000F_FFFF_FFFF_F000);
 }
 
-// =============================================================================
 // EptPageTable tests
-// =============================================================================
 
 #[test]
 fn ept_page_table_new() {
     let mut allocator = TestAllocator::new();
     let _ept: EptPageTable<TestFrame> = EptPageTable::new(&mut allocator).unwrap();
-    // Verify allocation succeeded
 }
 
 #[test]
@@ -214,7 +209,6 @@ fn ept_page_table_lookup() {
     // Before mapping, lookup should return None
     assert!(ept.lookup(&allocator, guest_phys).is_none());
 
-    // Map the page
     ept.map_4k(
         &mut allocator,
         guest_phys,
@@ -316,7 +310,6 @@ fn ept_page_table_clone_for_fork() {
     )
     .unwrap();
 
-    // Clone for fork
     let forked_ept = ept.clone_for_fork(&mut allocator).unwrap();
 
     // Verify forked EPT has R+X (no W) for all pages

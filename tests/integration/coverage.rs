@@ -1,17 +1,11 @@
-//! Coverage feedback, end to end: an instrumented guest binary records edge
-//! coverage into a libfeedback buffer and the lab reads it back out of guest
-//! physical memory. Two frontends over `guest/libfeedback.c` are exercised, one
-//! per container:
+//! Coverage feedback end to end: instrumented guest binaries record edges into
+//! a libfeedback buffer that the lab reads back. One container per frontend:
 //!   - `coverage-pcguard` — LLVM `-fsanitize-coverage=trace-pc-guard` via
 //!     `guest/libpcguard.c`.
 //!   - `coverage-go` — the Antithesis Go SDK via `guest/libvoidstar.c`.
 //!
-//! libfeedback keys the buffer id on a per-build identifier as "cov-<build>";
-//! the tests locate the buffer by matching that expected format (which doubles
-//! as an assertion on the id shape), then assert the buffer came back with
-//! nonzero edge counts. One test goes further and asserts a coverage *increase*
-//! is observable when more of the target's code runs (the signal
-//! coverage-guided fuzzing is built on).
+//! Buffers are found by their "cov-<build>" id shape and must contain nonzero
+//! edge counts; one test also checks that running more code adds coverage.
 
 use bedrock_lab::{BashTarget, Branch};
 
@@ -22,15 +16,12 @@ const PCGUARD_DRIVER: &str = "/opt/bedrock/drivers/cov_pcguard";
 const GO_CONTAINER: &str = "coverage-go";
 const GO_DRIVER: &str = "/opt/bedrock/drivers/cov_go";
 
-/// Sentinels the pcguard driver coordinates the two coverage phases on (kept in
-/// sync with `coverage-pcguard/cov_target.c`): it touches READY once the shallow
-/// baseline is recorded, and waits for MORE before running the deeper stages.
+/// Phase sentinels (sync with `coverage-pcguard/cov_target.c`): the driver
+/// touches READY after its baseline and waits for MORE before going deeper.
 const READY_PATH: &str = "/tmp/cov-ready";
 const MORE_PATH: &str = "/tmp/cov-more";
 
-/// trace-pc-guard coverage round-trips: launching the instrumented C driver
-/// registers a buffer keyed by the GNU build-id ("cov-<hex>"), and it comes back
-/// with nonzero edge counts.
+/// trace-pc-guard coverage round-trips under "cov-<build-id>".
 #[test]
 fn pcguard_coverage_round_trips_from_guest() {
     let Some(ready) = common::ready_checkpoint() else {
@@ -50,14 +41,8 @@ fn pcguard_coverage_round_trips_from_guest() {
     advance_until_coverage(&mut branch, &id);
 }
 
-/// Coverage-guided fuzzing's core signal: running *more* of the target's code
-/// shows up as *more* covered edges in the buffer the host reads back. The
-/// driver records a shallow baseline, signals READY, then waits for the test to
-/// create MORE before running its deeper stages — all against the one buffer
-/// libfeedback registers for this build. We snapshot the baseline, release the
-/// deeper work, and assert the buffer then lit edges it hadn't before. It's the
-/// same buffer at two times, so "a newly covered edge" is exactly a byte that
-/// was zero and is now nonzero.
+/// Running more of the target lights edges (bytes zero → nonzero) that the
+/// baseline snapshot of the same buffer didn't have.
 #[test]
 fn pcguard_running_more_code_increases_observed_coverage() {
     let Some(ready) = common::ready_checkpoint() else {
@@ -75,14 +60,11 @@ fn pcguard_running_more_code_increases_observed_coverage() {
         "cov-<gnu-build-id-hex>",
     );
 
-    // Wait for the shallow baseline to be fully recorded (driver touches READY),
-    // then snapshot it.
     wait_for_file(&mut branch, PCGUARD_CONTAINER, READY_PATH);
     let baseline = read_buffer(&mut branch, &id);
     let baseline_hits = baseline.iter().filter(|&&b| b != 0).count();
     assert!(baseline_hits > 0, "shallow baseline recorded no coverage");
 
-    // Release the deeper stages and advance until the buffer grows.
     create_file(&mut branch, PCGUARD_CONTAINER, MORE_PATH);
     let deadline = branch.current_time() + vt_dur!(10 s);
     let deeper = loop {
@@ -99,8 +81,6 @@ fn pcguard_running_more_code_increases_observed_coverage() {
         branch.run_for(vt_dur!(50 ms)).expect("advance guest");
     };
 
-    // The newly nonzero bytes are exactly the edges the deeper stages added:
-    // precisely the "new coverage" a fuzzer latches onto.
     assert_eq!(
         baseline.len(),
         deeper.len(),
@@ -118,9 +98,7 @@ fn pcguard_running_more_code_increases_observed_coverage() {
     );
 }
 
-/// Go SDK coverage round-trips: launching the Antithesis-instrumented driver
-/// registers a buffer keyed by the instrumentor's symbol-table name
-/// ("cov-go-<hex>.sym.tsv"), and it comes back with nonzero edge counts.
+/// Go SDK coverage round-trips under "cov-go-<hex>.sym.tsv".
 #[test]
 fn go_coverage_round_trips_from_guest() {
     let Some(ready) = common::ready_checkpoint() else {
@@ -140,14 +118,12 @@ fn go_coverage_round_trips_from_guest() {
     advance_until_coverage(&mut branch, &id);
 }
 
-/// The pcguard buffer id: "cov-" followed by the binary's GNU build-id, in
-/// lowercase hex.
+/// "cov-" + lowercase-hex GNU build-id.
 fn is_pcguard_id(id: &[u8]) -> bool {
     matches!(id.strip_prefix(b"cov-"), Some(rest) if is_lower_hex(rest))
 }
 
-/// The go buffer id: "cov-" + the instrumentor's symbol-table name, which is
-/// "go-<content-hash>.sym.tsv" with the hash in lowercase hex.
+/// "cov-go-<lowercase-hex>.sym.tsv".
 fn is_go_id(id: &[u8]) -> bool {
     let Some(rest) = id.strip_prefix(b"cov-go-") else {
         return false;
@@ -155,15 +131,12 @@ fn is_go_id(id: &[u8]) -> bool {
     matches!(rest.strip_suffix(b".sym.tsv"), Some(hash) if is_lower_hex(hash))
 }
 
-/// Whether `bytes` is a non-empty run of lowercase hex digits.
 fn is_lower_hex(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Launch `cmd` in `container` and return the registered feedback-buffer id that
-/// matches `expected` — advancing the guest until it appears, which doubles as
-/// the assertion that an id of the documented `shape` is registered. `shape` is
-/// only used in the failure message.
+/// Launch `cmd` and advance until an id matching `expected` registers.
+/// `shape` is only for the failure message.
 fn launch_and_find_id(
     branch: &mut Branch,
     container: &str,
@@ -203,9 +176,7 @@ fn read_buffer(branch: &mut Branch, id: &[u8]) -> Vec<u8> {
     bufs.pop().unwrap()
 }
 
-/// Advance the guest until the buffer under `id` has recorded coverage, then
-/// return it. (Registration happens at load, before any edge runs, so the buffer
-/// is momentarily all-zero.)
+/// Advance until the buffer has coverage (it is all-zero right after load).
 fn advance_until_coverage(branch: &mut Branch, id: &[u8]) -> Vec<u8> {
     let deadline = branch.current_time() + vt_dur!(10 s);
     loop {
@@ -222,10 +193,7 @@ fn advance_until_coverage(branch: &mut Branch, id: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Poll until `driver` is present and executable in `container`. The coverage
-/// containers come up around the same time as the ready signal, so a freshly
-/// forked branch may need to advance the guest a little first. Fails with a
-/// rebuild hint if it never appears.
+/// Poll until `driver` is executable (containers may start around ready).
 fn wait_for_driver(branch: &mut Branch, container: &str, driver: &str) {
     let deadline = branch.current_time() + vt_dur!(20 s);
     loop {

@@ -2,54 +2,28 @@
 
 //! Guest console log format — the host's view of one serial-console line.
 //!
-//! During the guest's runtime phase the console is a single stream of compact
-//! journald JSON records, one per line: `{"SYSLOG_IDENTIFIER":…,"MESSAGE":…}`.
-//! `journalctl -o json | jq -c '{SYSLOG_IDENTIFIER, MESSAGE}'` (see `guest/init`)
-//! funnels container output, the `systemd-cat -t …` tags (assertions,
-//! workload-monitor, …) and kernel printk (journald imports `/dev/kmsg`) all
-//! through this one projection. Before that `journalctl` tail starts — the
-//! early-boot window — the console instead carries raw kernel printk text.
-//!
-//! [`ConsoleLine::parse`] is the single host-side definition of how to read one
-//! reassembled console line, shared by every consumer (the CLI's line printer,
-//! `bedrock-lab`-driven tests' assertion reader). It classifies a line into a
-//! [`Journal`](ConsoleLine::Journal) record or, when the line isn't one of those
-//! JSON objects, [`Raw`](ConsoleLine::Raw) text.
-//!
-//! Keep the projected field names in sync with the `jq` filter in `guest/init`.
+//! At runtime the console is one compact journald JSON record per line
+//! (`{"SYSLOG_IDENTIFIER":…,"MESSAGE":…}`, via `jq` in `guest/init` — keep the
+//! field names in sync). Early boot carries raw printk instead.
 
 use serde::Deserialize;
 
-/// One reassembled console line, classified by source format.
-///
-/// Obtain it from the bytes of a complete console line (the CLI reassembles its
-/// own; `bedrock-lab` delivers them as
-/// [`Event::SerialLine`](crate::events::Event::SerialLine)) via
-/// [`ConsoleLine::parse`].
+/// One complete console line, classified by source format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsoleLine {
-    /// A journald record. `source` is `SYSLOG_IDENTIFIER` — the container name
-    /// for container output, the `systemd-cat -t` tag for tagged host sources
-    /// (`assertions`, `workload-monitor`, `init`, …), or `kernel` for kmsg
-    /// records — and `message` is the `MESSAGE` payload.
+    /// `source` is `SYSLOG_IDENTIFIER`: a container name, a `systemd-cat -t`
+    /// tag, or `kernel`.
     Journal { source: String, message: String },
-    /// A line that is not a journald JSON record — early-boot kernel printk, or
-    /// any line that fails to parse — kept verbatim.
+    /// Anything else, verbatim.
     Raw(String),
 }
 
 impl ConsoleLine {
-    /// Default source label for a record whose `SYSLOG_IDENTIFIER` is absent or
-    /// null. journald tags kmsg records `kernel`, so a record that reaches us
-    /// without an identifier is almost certainly one.
+    /// For a null `SYSLOG_IDENTIFIER`: such records are almost always kmsg.
     const DEFAULT_SOURCE: &'static str = "kernel";
 
-    /// Classify one complete console line.
-    ///
-    /// A line that parses as a JSON object carrying a `MESSAGE` field is a
-    /// [`Journal`](ConsoleLine::Journal) record; everything else — raw printk, a
-    /// not-yet-complete partial, unrelated JSON — is returned as
-    /// [`Raw`](ConsoleLine::Raw) without modification.
+    /// A JSON object with a `MESSAGE` field is a journal record; anything else
+    /// is [`Raw`](ConsoleLine::Raw).
     pub fn parse(line: &str) -> Self {
         match serde_json::from_str::<JournalRecord>(line.trim()) {
             Ok(rec) if rec.message.is_some() => ConsoleLine::Journal {
@@ -63,9 +37,7 @@ impl ConsoleLine {
     }
 }
 
-/// The guest's runtime console projection: `{SYSLOG_IDENTIFIER, MESSAGE}`. `jq`
-/// always emits both keys (even when their journal value is null), so a record
-/// missing `MESSAGE` is not one of ours and parses back as [`ConsoleLine::Raw`].
+/// `jq` always emits both keys, so a record without `MESSAGE` isn't ours.
 #[derive(Deserialize)]
 struct JournalRecord {
     #[serde(rename = "SYSLOG_IDENTIFIER")]
@@ -74,9 +46,7 @@ struct JournalRecord {
     message: Option<JournalMessage>,
 }
 
-/// A journal `MESSAGE` value. journald renders it as a string normally, but as
-/// an array of byte values when the message isn't a clean UTF-8 line (e.g. it
-/// embeds a newline). Accept both.
+/// journald renders `MESSAGE` as a byte array when it isn't a clean UTF-8 line.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum JournalMessage {

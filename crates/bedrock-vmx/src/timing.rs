@@ -1,21 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! CPU timing utilities for performance measurement.
-//!
-//! This module provides low-level access to CPU timing features like RDTSC
-//! (Read Time Stamp Counter). In kernel builds, this uses inline assembly
-//! to read the TSC. In cargo builds (tests), it returns 0 to avoid depending
-//! on x86-specific features.
+//! Host TSC access for performance measurement (returns 0 in cargo builds).
 
-/// Read the CPU timestamp counter (TSC).
-///
-/// Returns the current value of the processor's time stamp counter,
-/// which increments at a constant rate (typically the base CPU frequency).
-///
-/// # Note
-///
-/// In cargo builds (tests), this always returns 0 to avoid platform-specific
-/// assembly. Performance statistics will show 0 cycles in tests.
+/// Read the host TSC.
 #[cfg(not(feature = "cargo"))]
 #[inline]
 pub fn rdtsc() -> u64 {
@@ -33,10 +20,7 @@ pub fn rdtsc() -> u64 {
     (u64::from(hi) << 32) | u64::from(lo)
 }
 
-/// Read the CPU timestamp counter (TSC) - stub version for tests.
-///
-/// In cargo builds, this returns 0 since we can't use inline assembly
-/// and don't want to depend on platform-specific features in tests.
+/// Test stub: always 0, so perf stats show 0 cycles in tests.
 #[cfg(feature = "cargo")]
 #[inline]
 pub fn rdtsc() -> u64 {

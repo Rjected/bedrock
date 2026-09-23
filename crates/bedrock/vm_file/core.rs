@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Core VM file structures.
-//!
-//! This module defines the per-VM state stored in file descriptors.
+//! Per-VM state stored in file descriptors.
 
 use core::sync::atomic::AtomicBool;
 
@@ -13,10 +11,8 @@ use super::super::page::{EventBuffer, KernelGuestMemory, KernelPage, PagePool};
 use super::super::vmcs::RealVmcs;
 use super::super::vmx::{ForkedVm, RootVm};
 
-/// Type discriminant for VM file structs.
-///
-/// This must be the first field of both BedrockVmFile and BedrockForkedVmFile,
-/// allowing safe type identification through a raw pointer.
+/// Type discriminant; must be the first field of both BedrockVmFile and
+/// BedrockForkedVmFile so the type can be identified through a raw pointer.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum VmFileType {
@@ -26,33 +22,22 @@ pub(crate) enum VmFileType {
     Forked = 1,
 }
 
-/// Per-VM state owned by the file descriptor.
-///
-/// This struct is stored in `file->private_data` for bedrock-vm anonymous inodes.
-/// When the file descriptor is closed, this struct is dropped, freeing all VM
-/// resources.
+/// Per-VM state in `file->private_data`; dropped (freeing the VM) on close.
 #[repr(C)]
 pub(crate) struct BedrockVmFile {
     /// Type discriminant - MUST be first field for safe type identification.
     pub vm_file_type: VmFileType,
-    /// The actual VM with VMCS, guest memory, EPT, etc.
     pub vm: RootVm<RealVmcs, KernelGuestMemory, LinuxInstructionCounter>,
-    /// Unique identifier for this VM.
     pub vm_id: u64,
-    /// Flag to detect concurrent access to RUN ioctl.
-    /// Set to true when RUN is in progress, false otherwise.
+    /// Set while a RUN ioctl is in progress, to detect concurrent RUN.
     pub running: AtomicBool,
-    /// Optional unified event-stream buffer. Allocated when the event stream is
-    /// enabled (SET_EVENT_CONFIG), freed on disable or file close. Carries all
-    /// event records, including `Exit` records.
+    /// Event-stream buffer; present while SET_EVENT_CONFIG has it enabled.
     pub event_buffer: Option<EventBuffer>,
-    /// Pre-allocated page pool for COW allocation during run loop.
-    /// Root VMs don't do COW, so target=0.
+    /// COW page pool for the run loop. Root VMs don't COW, so target=0.
     pub page_pool: PagePool,
 }
 
 impl BedrockVmFile {
-    /// Create a new BedrockVmFile wrapping a RootVm.
     pub(crate) fn new(
         vm: RootVm<RealVmcs, KernelGuestMemory, LinuxInstructionCounter>,
         vm_id: u64,
@@ -105,22 +90,17 @@ impl ParentVmArc {
     }
 }
 
-// SAFETY: VM file handles are shared across file operations and fork creation.
-// Interior concurrency is controlled by the existing VM state atomics, per-file
-// operation serialization, and the global handler mutex. The Arc is used here
-// only to keep the allocation alive across those externally synchronized paths.
+// SAFETY: Concurrency on the VM files is controlled by the VM state atomics,
+// per-file operation serialization, and the global handler mutex; the Arc only
+// keeps the allocation alive across those externally synchronized paths.
 unsafe impl Send for ParentVmArc {}
 
-// SAFETY: Shared access through ParentVmArc is used for parent reads during fork
-// and for lifetime management. Mutable VM operations still go through the file
-// callbacks' existing synchronization and run-state checks.
+// SAFETY: Shared access is only for parent reads during fork and lifetime
+// management; mutation goes through the file callbacks' synchronization.
 unsafe impl Sync for ParentVmArc {}
 
-/// Per-forked-VM state owned by the file descriptor.
-///
-/// This struct is stored in `file->private_data` for bedrock forked-vm anonymous inodes.
-/// When the file descriptor is closed, this struct is dropped, freeing all VM
-/// resources and decrementing the parent's children count.
+/// Per-forked-VM state in `file->private_data`. Dropping it frees the VM and
+/// decrements the parent's children count.
 #[repr(C)]
 pub(crate) struct BedrockForkedVmFile {
     /// Type discriminant - MUST be first field for safe type identification.
@@ -129,22 +109,19 @@ pub(crate) struct BedrockForkedVmFile {
     pub vm: ForkedVm<RealVmcs, KernelPage, LinuxInstructionCounter>,
     /// Strong parent reference that keeps inherited memory alive.
     _parent: ParentVmArc,
-    /// Unique identifier for this VM.
     pub vm_id: u64,
     /// Flag to detect concurrent access to RUN ioctl.
     pub running: AtomicBool,
     /// Optional unified event-stream buffer (see [`BedrockVmFile::event_buffer`]).
     pub event_buffer: Option<EventBuffer>,
-    /// Pre-allocated page pool for COW allocation during run loop.
+    /// Pre-allocated page pool for COW during the run loop.
     pub page_pool: PagePool,
 }
 
-/// Number of pages to pre-allocate in the COW page pool for forked VMs.
-/// 512 pages = 2MB. The pool is refilled when it drops below 5% of target.
+/// COW pool target for forked VMs (512 pages = 2MB); refilled below 5%.
 pub(crate) const COW_POOL_SIZE: usize = 512;
 
 impl BedrockForkedVmFile {
-    /// Create a new BedrockForkedVmFile wrapping a ForkedVm.
     pub(crate) fn new(
         vm: ForkedVm<RealVmcs, KernelPage, LinuxInstructionCounter>,
         parent: ParentVmArc,

@@ -37,7 +37,6 @@ impl SegmentAccessRights {
 pub struct SegmentRegister {
     /// Visible part - the segment selector.
     pub selector: SegmentSelector,
-    /// Padding to align access_rights.
     _pad: u16,
     /// Hidden part - access rights from descriptor.
     pub access_rights: SegmentAccessRights,

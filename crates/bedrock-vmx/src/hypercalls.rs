@@ -8,8 +8,7 @@
 /// Shutdown the VM cleanly.
 pub const HYPERCALL_SHUTDOWN: u64 = 0;
 
-/// Trigger a snapshot.
-/// Exits to userspace and logs VM state if logging is enabled.
+/// Trigger a snapshot: exits to userspace and logs VM state if logging is enabled.
 pub const HYPERCALL_SNAPSHOT: u64 = 1;
 
 /// Register a feedback buffer for fuzzing.
@@ -24,10 +23,8 @@ pub const HYPERCALL_SNAPSHOT: u64 = 1;
 /// - RAX: the assigned slot index on success, or one of the `FB_ERR_*`
 ///   sentinels (near `u64::MAX`) on failure.
 ///
-/// The buffer's GVA is translated to GPAs and appended to a heap-growable
-/// list in VmState; the returned slot index (its position in that list) is
-/// used by host userspace to map it. The number of feedback buffers a VM may
-/// register is unbounded — each registration appends a new slot.
+/// The GVA is translated to GPAs and appended to an unbounded list in VmState;
+/// host userspace maps the buffer by the returned slot index.
 pub const HYPERCALL_REGISTER_FEEDBACK_BUFFER: u64 = 2;
 
 /// Register the guest's 4KB shared I/O channel page.
@@ -38,25 +35,20 @@ pub const HYPERCALL_REGISTER_FEEDBACK_BUFFER: u64 = 2;
 /// Outputs:
 /// - RAX: 0 on success, !0 (-1) on failure (unaligned or GVA translation failed).
 ///
-/// The page is owned by a guest kernel module (`bedrock-io.ko`) and is the
-/// rendezvous buffer for the deterministic I/O channel. Hypervisor → guest
-/// communication is delivered as an external interrupt on IOAPIC pin
-/// `IO_CHANNEL_IRQ`; the guest handler then issues
-/// `HYPERCALL_IO_GET_REQUEST` to receive the request bytes the hypervisor
-/// has written into this page, performs the action, writes the response
-/// back into the same page, and issues `HYPERCALL_IO_PUT_RESPONSE` to hand
-/// it back to the host.
+/// The page is owned by the guest module `bedrock-io.ko` and is the rendezvous
+/// buffer for the deterministic I/O channel. The hypervisor signals via IOAPIC
+/// pin `IO_CHANNEL_IRQ`; the guest then issues `HYPERCALL_IO_GET_REQUEST`,
+/// performs the action, writes the response into the page, and issues
+/// `HYPERCALL_IO_PUT_RESPONSE`.
 ///
 /// Re-registration is allowed and overwrites the previous registration.
 pub const HYPERCALL_IO_REGISTER_PAGE: u64 = 4;
 
 /// Fetch the pending I/O request into the registered shared page.
 ///
-/// Issued by the guest from its IRQ workqueue after the I/O channel IRQ
-/// fires. The hypervisor writes the queued request bytes into the
-/// previously-registered shared page (offset 0) and returns the request
-/// length in RAX. RAX == 0 means there was no pending request (spurious or
-/// already-consumed IRQ); RAX == !0 indicates an error (no page registered).
+/// Issued from the guest's IRQ workqueue. The hypervisor writes the queued
+/// request to offset 0 of the shared page and returns its length in RAX.
+/// RAX == 0: no pending request (spurious IRQ); RAX == !0: no page registered.
 pub const HYPERCALL_IO_GET_REQUEST: u64 = 5;
 
 /// Deliver the I/O response back to the host.
@@ -68,10 +60,8 @@ pub const HYPERCALL_IO_GET_REQUEST: u64 = 5;
 /// Outputs:
 /// - RAX: 0 on success, !0 on failure.
 ///
-/// After this hypercall the hypervisor reads the response bytes out of the
-/// shared page into VmState, clears the in-flight request, and exits to
-/// userspace with `VmcallIoResponse` so the host driver can drain the
-/// response and queue the next request.
+/// The hypervisor copies the response into VmState, clears the in-flight
+/// request, and exits to userspace with `VmcallIoResponse`.
 pub const HYPERCALL_IO_PUT_RESPONSE: u64 = 6;
 
 /// Signal that the guest has finished its boot/initialization and is ready
@@ -80,9 +70,8 @@ pub const HYPERCALL_IO_PUT_RESPONSE: u64 = 6;
 /// Inputs: none.
 /// Outputs: none — RAX is left untouched.
 ///
-/// Surfaces to userspace as `ExitReason::VmcallReady` / `ExitKind::VmcallReady`
-/// and, in the lab API, as `RunOutcome::Ready`. The hypervisor does not change
-/// any internal state on this exit; it is purely a synchronization point.
+/// Surfaces as `ExitReason::VmcallReady` / `ExitKind::VmcallReady` (lab API:
+/// `RunOutcome::Ready`). Purely a synchronization point; no state changes.
 pub const HYPERCALL_READY: u64 = 7;
 
 /// Register the guest's 4KB shared paravirtual-console page.
@@ -93,13 +82,10 @@ pub const HYPERCALL_READY: u64 = 7;
 /// Outputs:
 /// - RAX: 0 on success, !0 (-1) on failure (unaligned or GVA translation failed).
 ///
-/// Mirrors `HYPERCALL_IO_REGISTER_PAGE`: the GVA is translated to a GPA once
-/// and stored in `VmState`. The page is owned by the guest console module
-/// (`bedrock-console.ko`), which registers both a `struct console` (kernel
-/// printk) and a tty driver backing `/dev/console` (userspace output) and
-/// copies each write buffer into this page before issuing
-/// `HYPERCALL_SERIAL_WRITE`. The host only ever *reads* this page, so (unlike
-/// the I/O channel) no pre-CoW is needed.
+/// The GVA is translated to a GPA once and stored in `VmState`. The page is
+/// owned by `bedrock-console.ko` (printk console + `/dev/console` tty), which
+/// copies each write into it before `HYPERCALL_SERIAL_WRITE`. The host only
+/// reads this page, so unlike the I/O channel no pre-CoW is needed.
 ///
 /// Re-registration is allowed and overwrites the previous registration.
 pub const HYPERCALL_SERIAL_REGISTER_PAGE: u64 = 8;
@@ -114,10 +100,8 @@ pub const HYPERCALL_SERIAL_REGISTER_PAGE: u64 = 8;
 /// - RAX: 0 on success, !0 on failure (no page registered or guest memory
 ///   access failed).
 ///
-/// The hypervisor copies those bytes and emits them as one `Serial` event
-/// record (stamped with the line-start emulated TSC). This batches one whole
-/// printk record into a single VM exit instead of one exit per byte through the
-/// emulated 8250 UART.
+/// Emitted as one `Serial` event (stamped with the line-start emulated TSC):
+/// one exit per printk record instead of one per byte via the 8250 UART.
 pub const HYPERCALL_SERIAL_WRITE: u64 = 9;
 
 /// Register a single 4KB page as the PEBS scratch page for precise VM exits.
@@ -172,22 +156,16 @@ pub const HYPERCALL_REGISTER_PEBS_PAGE: u64 = 3;
 /// - bytes `[8..16)`: reserved (zero).
 /// - bytes `[16..16+result)`: the file data chunk.
 ///
-/// The guest reads the result word back out of the buffer after the hypercall
-/// returns and loops, advancing `offset`, until it sees `0` (EOF). Because the
-/// served bytes are a pure function of the (fixed) host file and the chunk
-/// boundaries are fixed by the buffer size, the transfer is deterministic; it
-/// runs entirely during the root VM's boot, before `HYPERCALL_READY`, so forked
-/// VMs inherit the already-populated filesystem and never re-fetch.
+/// The guest loops, advancing `offset`, until it sees `0` (EOF). Deterministic
+/// since the bytes depend only on the fixed host file and buffer size; runs
+/// during root VM boot before `HYPERCALL_READY`, so forks never re-fetch.
 pub const HYPERCALL_FILE_FETCH: u64 = 10;
 
 /// Fetch fuzzer-controlled random bytes for the guest.
 ///
-/// Issued by the patched guest `get_random_bytes_user()` — the single
-/// chokepoint behind `/dev/urandom`, `/dev/random` and the `getrandom()`
-/// syscall — once per (chunked) read instead of trapping RDRAND. It hands the
-/// hypervisor the *size* of the request and the *PID* of the requesting
-/// process, both of which surface to the fuzzer, which a bare RDRAND trap
-/// cannot communicate.
+/// Issued by the patched guest `get_random_bytes_user()` (behind
+/// `/dev/urandom`, `/dev/random`, `getrandom()`) once per chunked read. Unlike
+/// a RDRAND trap, it exposes the request size and PID to the fuzzer.
 ///
 /// Inputs:
 /// - RBX: Guest virtual address of the destination buffer.
@@ -206,11 +184,7 @@ pub const HYPERCALL_FILE_FETCH: u64 = 10;
 /// - **ExitToUserspace**: the hypervisor records the request (buffer, length,
 ///   PID) and exits to userspace as `ExitReason::VmcallGetRandom`. Userspace
 ///   stages the reply bytes via `SET_RANDOM_BYTES` and re-runs; the handler then
-///   writes them into the guest buffer and resumes. Mirrors the RDRAND
-///   exit-to-userspace flow.
-///
-/// (Numbers 8/9 are the paravirtual console and 10 is `HYPERCALL_FILE_FETCH` on
-/// this branch, so this is 11.)
+///   writes them into the guest buffer and resumes.
 pub const HYPERCALL_GET_RANDOM: u64 = 11;
 
 /// Read the next chunk of a guest-side file from the feedback buffer into
@@ -218,9 +192,8 @@ pub const HYPERCALL_GET_RANDOM: u64 = 11;
 ///
 /// Inputs: none in registers - the request and the response are framed inside
 /// the shared buffer the guest registered (via `HYPERCALL_REGISTER_FEEDBACK_BUFFER`
-/// under the id `bedrock-file-store`). The terms request and response are a bit
-/// backwards as the guest is not "requesting" anything. Before invoking the
-/// hypercall, the guest writes the following into the start of the buffer:
+/// under the id `bedrock-file-store`). Before invoking the hypercall, the guest
+/// writes the following into the start of the buffer:
 /// - bytes `[0..4)`:   `u32` little-endian file name length.
 /// - bytes `[4..8)`:   `u32` little-endian chunk length.
 /// - bytes `[8..16)`:  reserved (zero).

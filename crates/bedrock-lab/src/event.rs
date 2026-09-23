@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Event sink — how lab consumers observe what's happening inside the tree.
-//!
-//! Every tree owns a single [`EventSink`]. Branches forward serial output
-//! (one event per complete line), branch creation, and checkpoint creation
-//! to the sink so the consumer can persist, stream, or discard the data
-//! however it likes (BigQuery, a local database, stdout, or `/dev/null`).
+//! Event sink: how consumers observe the tree. Each tree owns one [`EventSink`].
 
 use bedrock_vm::events::EventKind;
 use bedrock_vm::{EventRecord, EventStream, Vm};
@@ -15,26 +10,15 @@ use crate::checkpoint::CheckpointId;
 use crate::error::Result;
 use crate::time::VirtTime;
 
-/// An observable event in the lab's execution tree.
-///
-/// `#[non_exhaustive]` so new variants can be added without breaking sinks.
+/// An observable event in the lab's execution tree. Borrowed fields are only
+/// valid during `on_event`; copy them out to retain them.
+/// [`BranchId(0)`](crate::BranchId) is reserved for pre-ready root boot.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Event<'a> {
-    /// One complete line of serial output from a branch's guest.
-    ///
-    /// `line` is the bytes between line starts (trailing `\n` stripped) and
-    /// borrows from a per-branch buffer for the duration of the `on_event`
-    /// call — copy out if the sink needs to retain it. `at` is the emulated
-    /// TSC at which the *first* byte of this line was written (carried
-    /// across `vm.run()` drains and across `Checkpoint::branch` so a line
-    /// continued from a parent checkpoint keeps its original start time).
-    ///
-    /// Partial lines pending at branch drop are silently discarded;
-    /// partial lines pending at `Branch::checkpoint` are propagated into
-    /// the new checkpoint so descendant branches glue onto the same line.
-    /// [`BranchId(0)`](crate::BranchId) is reserved for root-VM boot/setup
-    /// output emitted before the ready checkpoint exists.
+    /// One complete serial line (`\n` stripped). `at` is the TSC of its first
+    /// byte, preserved across drains and checkpoints. Partial lines are
+    /// carried into checkpoints but dropped with a branch.
     SerialLine {
         branch: BranchId,
         at: VirtTime,
@@ -46,27 +30,17 @@ pub enum Event<'a> {
         origin: CheckpointId,
         at: VirtTime,
     },
-    /// A checkpoint was created. `from_branch` is `None` for the root
-    /// checkpoint; `parent` is `None` for the root.
+    /// `from_branch` and `parent` are `None` for the root.
     CheckpointCreated {
         checkpoint: CheckpointId,
         from_branch: Option<BranchId>,
         parent: Option<CheckpointId>,
         at: VirtTime,
     },
-    /// The guest registered a feedback buffer with identifier `id` of `size`
-    /// bytes, assigned to host slot `slot`. Fires once per successful
-    /// `HYPERCALL_REGISTER_FEEDBACK_BUFFER` call.
-    ///
-    /// `id` borrows from a kernel-mapped struct for the duration of the
-    /// `on_event` call; copy out if the sink needs to retain it. IDs are
-    /// not unique — two registrations with the same `id` represent two
-    /// instances of the same domain (e.g. two processes running the same
-    /// binary). Read the buffers on the originating branch via
-    /// [`Branch::feedback_buffers`](crate::Branch::feedback_buffers);
-    /// descendant branches inherit the registration through CoW.
-    /// [`BranchId(0)`](crate::BranchId) is reserved for registrations that
-    /// occur during root-VM boot/setup before the ready checkpoint exists.
+    /// A successful `HYPERCALL_REGISTER_FEEDBACK_BUFFER`. IDs are not unique
+    /// (e.g. two processes running the same binary). Descendant branches
+    /// inherit the registration; read it via
+    /// [`Branch::feedback_buffers`](crate::Branch::feedback_buffers).
     FeedbackBufferRegistered {
         branch: BranchId,
         at: VirtTime,
@@ -74,61 +48,41 @@ pub enum Event<'a> {
         slot: usize,
         size: u64,
     },
-    /// One record drained from the branch's unified event stream — an exit
-    /// snapshot, served randomness, an injected interrupt, an I/O-channel
-    /// transaction, etc. Fires once per record for branches that have enabled
-    /// the stream via [`Branch::set_event_config`](crate::Branch::set_event_config).
-    ///
-    /// Inspect the kind/payload with [`record.event()`](bedrock_vm::EventRecord::event)
-    /// or serialize it with [`record.to_json()`](bedrock_vm::EventRecord::to_json).
-    /// `record` borrows from the kernel-mapped event buffer for the duration of
-    /// the `on_event` call — copy out if the sink needs to retain it.
+    /// One non-serial record from the branch's event stream (see
+    /// [`Branch::set_event_config`](crate::Branch::set_event_config)).
     Record {
         branch: BranchId,
         record: EventRecord<'a>,
     },
 }
 
-/// Receives every [`Event`] produced by the tree.
+/// Receives every [`Event`] produced by the tree. `on_event` runs on the thread
+/// driving the branch, so it must be cheap and non-blocking.
 ///
-/// Implementations must be cheap and non-blocking; `on_event` runs on the
-/// thread driving the branch and any long wait stalls guest execution.
-/// Offload heavy work (DB writes, network) to a background worker.
-///
-/// Internal scratch branches created by
-/// [`Checkpoint::rewind`](crate::Checkpoint::rewind) emit events like any
-/// other branch — filter on `BranchId` if you only want user-visible work.
+/// Scratch branches created by [`Checkpoint::rewind`](crate::Checkpoint::rewind)
+/// emit events too.
 pub trait EventSink: Send + Sync {
     fn on_event(&self, event: Event<'_>);
 }
 
-/// Default sink used when the caller doesn't supply one — discards everything.
+/// Default sink; discards everything.
 pub(crate) struct Discard;
 
 impl EventSink for Discard {
     fn on_event(&self, _event: Event<'_>) {}
 }
 
-/// Per-branch partial-line state. A line that doesn't see its trailing
-/// `\n` within one `vm.run()` drain (or within one branch's lifetime
-/// before checkpointing) survives here until completion.
+/// A serial line not yet terminated by `\n`.
 #[derive(Default, Clone, Debug)]
 pub(crate) struct PartialLine {
     pub(crate) bytes: Vec<u8>,
-    /// Emulated TSC at which the first byte of `bytes` was written.
-    /// Meaningful only when `bytes.is_empty() == false`.
+    /// TSC of the first byte; meaningful only when `bytes` is non-empty.
     pub(crate) start_tsc: u64,
 }
 
-/// Feed one `Serial` event record's bytes through the per-branch line
-/// reassembler, emitting one [`Event::SerialLine`] per `\n`-terminated line.
-///
-/// The kernel accumulates a console line and emits it as one `Serial` record
-/// stamped with the emulated TSC of its *first* byte, so a fresh line takes the
-/// record's TSC as its start time; a line continued from an earlier record (a
-/// line longer than the kernel's accumulator, split across records) keeps the
-/// earlier start TSC. Bytes not yet terminated by `\n` stay in `partial` until
-/// a later record completes them.
+/// Emit one [`Event::SerialLine`] per `\n` in a `Serial` record. Records are
+/// stamped with their first byte's TSC, so a fresh line takes `record_tsc`
+/// while a line continued across records keeps its earlier start.
 pub(crate) fn serial_record_into_sink(
     bytes: &[u8],
     record_tsc: u64,
@@ -155,10 +109,7 @@ pub(crate) fn serial_record_into_sink(
     }
 }
 
-/// Feed every `Serial` record in a drained event buffer through
-/// [`serial_record_into_sink`]. Used by the root-boot loop, which has no other
-/// per-record handling; a live [`Branch`](crate::Branch) inlines the same call
-/// into its single event drain so it can also forward non-serial records.
+/// [`serial_record_into_sink`] over every `Serial` record (root-boot loop).
 pub(crate) fn drain_serial_events(
     drained: &[u8],
     freq: u64,
@@ -173,14 +124,8 @@ pub(crate) fn drain_serial_events(
     }
 }
 
-/// Read the guest GPRs after a successful `HYPERCALL_REGISTER_FEEDBACK_BUFFER`
-/// exit, look up the assigned slot's identifier via the kernel module, and
-/// emit an [`Event::FeedbackBufferRegistered`].
-///
-/// Returns `(slot, size)` for callers that need the registration in their
-/// own bookkeeping; `None` if the slot lookup didn't find a registered
-/// buffer (only possible if the hypercall actually failed, in which case
-/// RAX would be `u64::MAX` and we treat it as "nothing was registered").
+/// After a registration exit, read slot/size from RAX/RCX, look up the id and
+/// emit [`Event::FeedbackBufferRegistered`]. `None` if registration failed.
 pub(crate) fn emit_feedback_buffer_registered(
     vm: &Vm,
     at: VirtTime,
@@ -190,12 +135,10 @@ pub(crate) fn emit_feedback_buffer_registered(
     let regs = vm.get_regs()?;
     let rax = regs.gprs.rax;
     if rax == u64::MAX {
-        // The hypercall reported failure. No slot to look up.
         return Ok(None);
     }
     let slot = rax as usize;
     let size = regs.gprs.rcx;
-    // Pull the id from the slot the hypercall just populated.
     let info = vm.get_feedback_buffer_info_at(slot)?;
     if let Some(info) = info {
         sink.on_event(Event::FeedbackBufferRegistered {

@@ -1,19 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! VMX context structure for guest/host register switching.
-//!
-//! This structure is shared between Rust and assembly code, so its layout
-//! must match the assembly code exactly.
+//! VMX context for guest/host register switching, shared with assembly.
 
-/// VMX context for guest/host register switching.
+/// Guest/host GPRs saved/restored around VM entry/exit. Layout must match
+/// vmx_support.S exactly.
 ///
-/// This structure holds the guest and host general-purpose registers
-/// that are saved/restored during VM entry and exit. The layout must
-/// match the assembly code in vmx_support.S.
-///
-/// Note: RSP is not included because:
-/// - Guest RSP is in the VMCS (loaded/saved automatically)
-/// - Host RSP points to this structure during VM operation
+/// No RSP: guest RSP lives in the VMCS and host RSP points at this struct.
 #[repr(C)]
 pub struct VmxContext {
     // Guest GPRs (offsets 0-112)
@@ -50,34 +42,24 @@ pub struct VmxContext {
     pub host_r14: u64,
     pub host_r15: u64,
 
-    // Launch state: 0 = use VMLAUNCH, 1 = use VMRESUME (offset 240)
+    // 0 = VMLAUNCH, 1 = VMRESUME (offset 240)
     pub launched: u32,
 
-    // Padding for alignment (offset 244)
+    // offset 244
     pub _pad: u32,
 
-    // XSAVE state pointers (offset 248, 256)
-    // These point to 64-byte aligned XsaveArea structures for extended state
-    // (FPU/SSE/AVX) save/restore during VM entry/exit.
-    // Set to null (0) to skip XSAVE operations.
+    // 64-byte aligned XsaveArea pointers (offsets 248, 256); 0 skips XSAVE.
     pub guest_xsave_ptr: u64,
     pub host_xsave_ptr: u64,
 
-    // XCR0 mask for XSAVE/XRSTOR (offset 264)
-    // Specifies which state components to save/restore.
-    // Common values: 0x7 (X87|SSE|AVX), 0xE7 (with AVX-512)
-    // This is also the value that will be set in the hardware XCR0 register
-    // during guest execution (so XGETBV returns this value).
+    // XSAVE/XRSTOR component mask, also loaded into XCR0 while the guest runs
+    // so XGETBV returns it (offset 264).
     pub xcr0_mask: u64,
 
-    // Host XCR0 value (offset 272)
-    // Saved on VM entry, restored on VM exit.
-    // This allows us to set a different XCR0 for the guest.
+    // Saved on VM entry, restored on VM exit (offset 272).
     pub host_xcr0: u64,
 
-    // Guest CR2 value (offset 280)
-    // CR2 is not part of the VMCS, so we must manually save/restore it.
-    // This holds the guest's page-fault linear address.
+    // CR2 is not in the VMCS, so it's swapped manually (offset 280).
     pub guest_cr2: u64,
 }
 
@@ -88,7 +70,6 @@ impl Default for VmxContext {
 }
 
 impl VmxContext {
-    /// Create a new VmxContext with all registers zeroed.
     pub const fn new() -> Self {
         Self {
             guest_rax: 0,

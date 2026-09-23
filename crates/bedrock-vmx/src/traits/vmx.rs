@@ -64,14 +64,12 @@ pub trait Vmx {
     {
         log_info!("starting initialization\n");
 
-        // Check if VMX is supported
         if !Self::is_supported() {
             log_err!("not supported on this CPU\n");
             return Err(VmxInitError::Unsupported);
         }
         log_debug!("CPU support verified\n");
 
-        // Load and store basic VMX information
         let basic_info = vmx_load_basic_info(machine.msr_access()).map_err(|e| {
             log_err!("failed to read basic info MSR: {:?}\n", e);
             VmxInitError::FailedToReadBasicInfo(e)
@@ -79,7 +77,6 @@ pub trait Vmx {
         log_info!("{:?}\n", basic_info);
         Self::set_basic_info(basic_info);
 
-        // Initialize VMX on all processors
         log_info!("initializing on all CPUs\n");
         let kernel = machine.kernel();
         kernel.call_on_all_cpus_with_data(
@@ -104,123 +101,40 @@ pub trait Vmx {
         Ok(())
     }
 
-    /// Get the Vcpu for the current processor.
-    ///
-    /// Note: In production these are allocated as global per-cpu variables, hence the 'static
-    /// lifetime.
+    /// Get the Vcpu for the current processor ('static: per-cpu globals in production).
     fn current_vcpu() -> &'static <Self::M as Machine>::Vcpu;
 
     /// Get basic VMX information.
     fn basic_info() -> &'static VmxBasic;
     fn set_basic_info(basic: VmxBasic);
 
-    /// Execute VMXON instruction.
-    ///
-    /// Puts the logical processor in VMX operation with no current VMCS.
-    ///
-    /// # Arguments
-    ///
-    /// * `phys_addr` - Physical address of the VMXON region (must be 4KB aligned)
-    ///
-    /// # Errors
-    ///
-    /// Returns `VmxonError::InvalidPointer` if the VMXON pointer is invalid
-    /// (not 4KB aligned, sets bits beyond physical-address width, or revision ID mismatch).
-    ///
-    /// Returns `VmxonError::AlreadyInVmxOperation` if already in VMX root operation.
-    ///
-    /// See Intel SDM Vol 3C, "VMXON—Enter VMX Operation".
+    /// Execute VMXON with the (4KB-aligned) VMXON region at `phys_addr`.
+    /// Enters VMX operation with no current VMCS. SDM Vol 3C, "VMXON".
     fn vmxon(phys_addr: HostPhysAddr) -> Result<(), VmxonError>;
 
-    /// Execute VMXOFF instruction.
-    ///
-    /// Takes the logical processor out of VMX operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns `VmxoffError::DualMonitorTreatmentActive` if dual-monitor treatment
-    /// of SMIs and SMM is active.
-    ///
-    /// See Intel SDM Vol 3C, "VMXOFF—Leave VMX Operation".
+    /// Execute VMXOFF (leave VMX operation). SDM Vol 3C, "VMXOFF".
     fn vmxoff() -> Result<(), VmxoffError>;
 
-    /// Execute INVEPT instruction with single-context invalidation (type 1).
-    ///
-    /// Invalidates all EPT-derived cached translations for the specified EPTP.
-    /// Only entries matching the given EPT pointer are invalidated, leaving
-    /// other EPT contexts (other VMs) unaffected.
-    ///
-    /// This should be called when creating a forked VM to ensure the new EPT
-    /// doesn't inherit stale TLB entries from the parent.
-    ///
-    /// # Arguments
-    ///
-    /// * `eptp` - The EPT pointer (EPTP) whose translations should be invalidated
-    ///
-    /// # Errors
-    ///
-    /// Returns `InveptError::InvalidOperand` if not in VMX operation.
-    /// Returns `InveptError::NotSupported` if single-context INVEPT is not supported.
-    ///
-    /// See Intel SDM Vol 3C, "INVEPT—Invalidate Translations Derived from EPT".
+    /// INVEPT single-context (type 1): invalidate EPT-derived translations for
+    /// `eptp` only. Used e.g. for forks so they don't inherit the parent's stale
+    /// TLB entries. SDM Vol 3C, "INVEPT".
     fn invept_single_context(eptp: u64) -> Result<(), InveptError>;
 
-    /// Execute INVVPID instruction with single-context invalidation (type 1).
-    ///
-    /// Invalidates all linear-address translations and combined translations
-    /// for the specified VPID. This flushes all TLB entries tagged with this VPID.
-    ///
-    /// This should be called when creating a new VM to ensure no stale TLB entries
-    /// from previous VMs or the host affect the new VM.
-    ///
-    /// # Arguments
-    ///
-    /// * `vpid` - The Virtual Processor Identifier whose translations should be invalidated
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvvpidError::InvalidOperand` if not in VMX operation or VPID is 0.
-    /// Returns `InvvpidError::NotSupported` if single-context INVVPID is not supported.
-    ///
-    /// See Intel SDM Vol 3C, "INVVPID—Invalidate Translations Based on VPID".
+    /// INVVPID single-context (type 1): flush linear and combined translations
+    /// tagged with `vpid` (must be nonzero). SDM Vol 3C, "INVVPID".
     fn invvpid_single_context(vpid: u16) -> Result<(), InvvpidError>;
 
-    /// Execute INVVPID instruction with all-context invalidation (type 2).
-    ///
-    /// Invalidates all linear-address translations and combined translations
-    /// for all VPIDs except VPID 0. This is a global TLB flush for all VMs.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvvpidError::InvalidOperand` if not in VMX operation.
-    /// Returns `InvvpidError::NotSupported` if all-context INVVPID is not supported.
-    ///
-    /// See Intel SDM Vol 3C, "INVVPID—Invalidate Translations Based on VPID".
+    /// INVVPID all-context (type 2): flush translations for every VPID except 0.
+    /// SDM Vol 3C, "INVVPID".
     fn invvpid_all_context() -> Result<(), InvvpidError>;
 
-    /// Fix CR0 value to meet VMX requirements.
-    ///
-    /// Per Intel SDM Vol 3C, Appendix A.7:
-    /// - If bit X is 1 in IA32_VMX_CR0_FIXED0, that bit must be 1 in CR0
-    /// - If bit X is 0 in IA32_VMX_CR0_FIXED1, that bit must be 0 in CR0
-    ///
-    /// Formula: result = (input | FIXED0) & FIXED1
+    /// Force CR0 to satisfy IA32_VMX_CR0_FIXED0/1 (SDM Vol 3C, Appendix A.7).
     fn fix_cr0(cr0: &Cr0, cap: &VmxCapabilities) -> Cr0 {
-        // OR with FIXED0 to set bits that must be 1
-        // AND with FIXED1 to clear bits that must be 0
         Cr0::new((cr0.bits() | cap.cr0_fixed0) & cap.cr0_fixed1)
     }
 
-    /// Fix CR4 value to meet VMX requirements.
-    ///
-    /// Per Intel SDM Vol 3C, Appendix A.8:
-    /// - If bit X is 1 in IA32_VMX_CR4_FIXED0, that bit must be 1 in CR4
-    /// - If bit X is 0 in IA32_VMX_CR4_FIXED1, that bit must be 0 in CR4
-    ///
-    /// Formula: result = (input | FIXED0) & FIXED1
+    /// Force CR4 to satisfy IA32_VMX_CR4_FIXED0/1 (SDM Vol 3C, Appendix A.8).
     fn fix_cr4(cr4: &Cr4, cap: &VmxCapabilities) -> Cr4 {
-        // OR with FIXED0 to set bits that must be 1
-        // AND with FIXED1 to clear bits that must be 0
         Cr4::new((cr4.bits() | cap.cr4_fixed0) & cap.cr4_fixed1)
     }
 }
@@ -251,21 +165,18 @@ pub trait VmxCpu {
     fn set_capabilities(&self, caps: VmxCapabilities);
     fn set_vmxon_region(&self, region: Self::R);
 
-    /// Create a new instance of the VmxCpu.
+    /// Enable VMX on this CPU: feature control, CR4.VMXE, VMXON, capabilities.
     fn init(&self, machine: &Self::M) -> Result<(), VmxCpuInitError> {
         assert!(!self.is_vmxon(), "VmxCpu is already initialized");
 
-        // Step 1: Configure IA32_FEATURE_CONTROL MSR
         log_debug!("configuring IA32_FEATURE_CONTROL MSR\n");
         Self::configure_feature_control(machine).map_err(|e| {
             log_err!("failed to configure feature control: {:?}\n", e);
             VmxCpuInitError::FeatureControlConfigFailed(e)
         })?;
 
-        // Step 2: Enable VMX in CR4 (bit 13)
-        // Uses set_vmxe() which updates the kernel's CR4 shadow (cpu_tlbstate.cr4)
-        // in addition to the actual CR4. A raw MOV to CR4 would desync the shadow,
-        // causing #GP when the kernel writes CR4 without VMXE during context switches.
+        // set_vmxe() also updates the kernel's CR4 shadow (cpu_tlbstate.cr4). A raw
+        // MOV to CR4 would desync it, and a later kernel CR4 write without VMXE #GPs.
         log_debug!("enabling VMXE in CR4\n");
         let cr = machine.cr_access();
         cr.set_vmxe().map_err(|e| {
@@ -273,14 +184,12 @@ pub trait VmxCpu {
             VmxCpuInitError::FailedToEnableVMX(e)
         })?;
 
-        // Step 3: Allocate VMXON region and execute VMXON instruction
         log_debug!("allocating VMXON region\n");
         let vmxon_region = VmxOnRegion::new(machine).map_err(|e| {
             log_err!("failed to allocate VMXON region: {:?}\n", e);
             VmxCpuInitError::VmxonAllocFailed(e)
         })?;
 
-        // Step 4: Read VMX capabilities
         log_debug!("reading capabilities\n");
         let caps = Self::read_capabilities(machine);
         log_info!("{:?}\n", caps);
@@ -292,69 +201,41 @@ pub trait VmxCpu {
         Ok(())
     }
 
-    /// Adjust control field using allowed-0 and allowed-1 bits
-    ///
-    /// Intel SDM Vol 3C, Appendix A.3:
-    /// - Bits set to 1 in allowed-0 MSR *must* be 1
-    /// - Bits set to 0 in allowed-1 MSR *must* be 0
+    /// Adjust a control value by the capability MSR's allowed-0 (low, must be 1)
+    /// and allowed-1 (high, may be 1) bits. SDM Vol 3C, Appendix A.3.
     fn adjust_controls(msr_value: u64, requested: u32) -> u32 {
-        let allowed0 = msr_value as u32; // Bits that must be 1
-        let allowed1 = (msr_value >> 32) as u32; // Bits that can be 1
+        let allowed0 = msr_value as u32;
+        let allowed1 = (msr_value >> 32) as u32;
 
-        // Set all bits that must be 1
         let mut adjusted = requested | allowed0;
 
-        // Clear all bits that must be 0
         adjusted &= allowed1;
 
         adjusted
     }
 
-    /// Read VMX capabilities from MSRs.
-    ///
-    /// This function reads the VMX capability MSRs and returns the adjusted
-    /// control values that can be used when configuring VMCS control fields.
-    ///
-    /// The requested controls are:
-    /// - Pin-based: NMI exiting
-    /// - CPU-based: HLT exiting, MSR bitmaps, secondary controls, unconditional I/O,
-    ///   CR3 load/store exiting, CR8 load/store exiting
-    /// - Secondary: EPT, unrestricted guest
-    /// - VM-exit: 64-bit host, save/load EFER
-    /// - VM-entry: IA-32e mode, load EFER
-    ///
-    /// # Arguments
-    ///
-    /// * `msr` - An implementation of the `MsrAccess` trait for reading MSRs
-    ///
-    /// # Returns
-    ///
-    /// A `VmxCapabilities` struct containing the adjusted control values.
-    /// If any MSR read fails, the corresponding field will use default values.
-    ///
-    /// See Intel SDM Vol 3C, Appendix A.
+    /// Read the VMX capability MSRs and compute the adjusted VMCS control values
+    /// for the controls bedrock requests. A failed MSR read leaves that field at
+    /// its default. SDM Vol 3C, Appendix A.
     fn read_capabilities<M: Machine>(machine: &M) -> VmxCapabilities {
         let msr = machine.msr_access();
         let mut cap = VmxCapabilities::default();
 
-        // Read pin-based controls
-        // - EXT_INTR_EXITING: Exit on external interrupts so host can service them
-        // - NMI_EXITING: Exit on NMIs
-        // - PREEMPTION_TIMER: Guarantee periodic exits even if guest is in tight loop
+        // External interrupts exit so the host can service them; the preemption
+        // timer guarantees periodic exits even if the guest spins.
         let requested =
             pin_based::EXT_INTR_EXITING | pin_based::NMI_EXITING | pin_based::PREEMPTION_TIMER;
         if let Ok(msr_value) = msr.read_msr(msr::IA32_VMX_PINBASED_CTLS) {
             cap.pin_based_exec_ctrl = Self::adjust_controls(msr_value, requested);
         }
 
-        // Read primary processor-based controls
-        // CR3_LOAD/STORE_EXITING are enabled for determinism. The CR3 handler calls
-        // INVVPID to maintain TLB coherency when the guest changes page tables.
+        // CR3 load/store exiting is for determinism; the CR3 handler issues
+        // INVVPID to keep the TLB coherent when the guest switches page tables.
         let requested = cpu_based::HLT_EXITING
-            | cpu_based::MWAIT_EXITING   // Exit on MWAIT (idle instruction)
-            | cpu_based::MONITOR_EXITING // Exit on MONITOR (so address-range monitoring is never armed)
-            | cpu_based::RDPMC_EXITING   // Exit on RDPMC (performance counter reads)
-            | cpu_based::RDTSC_EXITING   // Exit on RDTSC/RDTSCP (for deterministic time)
+            | cpu_based::MWAIT_EXITING
+            | cpu_based::MONITOR_EXITING // so address-range monitoring is never armed
+            | cpu_based::RDPMC_EXITING
+            | cpu_based::RDTSC_EXITING   // also RDTSCP; deterministic time
             | cpu_based::USE_MSR_BITMAPS
             | cpu_based::ACTIVATE_SECONDARY_CONTROLS
             | cpu_based::UNCOND_IO_EXITING
@@ -366,15 +247,14 @@ pub trait VmxCpu {
             cap.cpu_based_exec_ctrl = Self::adjust_controls(msr_value, requested);
         }
 
-        // Read secondary processor-based controls (if supported)
         if cap.cpu_based_exec_ctrl & cpu_based::ACTIVATE_SECONDARY_CONTROLS != 0 {
             let requested = secondary_exec::ENABLE_EPT
                 | secondary_exec::ENABLE_VPID
                 | secondary_exec::UNRESTRICTED_GUEST
                 | secondary_exec::ENABLE_RDTSCP
-                | secondary_exec::ENABLE_INVPCID // Allow native INVPCID execution
-                | secondary_exec::RDRAND_EXITING  // Intercept RDRAND for emulation
-                | secondary_exec::RDSEED_EXITING; // Intercept RDSEED for emulation
+                | secondary_exec::ENABLE_INVPCID
+                | secondary_exec::RDRAND_EXITING
+                | secondary_exec::RDSEED_EXITING;
 
             if let Ok(msr_value) = msr.read_msr(msr::IA32_VMX_PROCBASED_CTLS2) {
                 cap.cpu_based_exec_ctrl2 = Self::adjust_controls(msr_value, requested);
@@ -388,23 +268,19 @@ pub trait VmxCpu {
             cap.has_vpid = false;
         }
 
-        // Read VM-exit controls
-        // Note: We do NOT use ACK_INTR_ON_EXIT. Instead, on external interrupt exit,
-        // we briefly enable interrupts to let the CPU deliver the interrupt naturally
-        // through the IDT (similar to AMD SVM approach in KVM).
+        // No ACK_INTR_ON_EXIT: on external-interrupt exits we briefly enable
+        // interrupts and let the CPU deliver through the IDT (like KVM on SVM).
         let requested =
             vm_exit::HOST_ADDR_SPACE_SIZE | vm_exit::SAVE_IA32_EFER | vm_exit::LOAD_IA32_EFER;
         if let Ok(msr_value) = msr.read_msr(msr::IA32_VMX_EXIT_CTLS) {
             cap.vmexit_ctrl = Self::adjust_controls(msr_value, requested);
         }
 
-        // Read VM-entry controls
         let requested = vm_entry::IA32E_MODE | vm_entry::LOAD_IA32_EFER;
         if let Ok(msr_value) = msr.read_msr(msr::IA32_VMX_ENTRY_CTLS) {
             cap.vmentry_ctrl = Self::adjust_controls(msr_value, requested);
         }
 
-        // Read CR0 and CR4 fixed bits
         if let Ok(value) = msr.read_msr(msr::IA32_VMX_CR0_FIXED0) {
             cap.cr0_fixed0 = value;
         }
@@ -418,10 +294,8 @@ pub trait VmxCpu {
             cap.cr4_fixed1 = value;
         }
 
-        // Read PEBS-related capability bits from IA32_PERF_CAPABILITIES.
-        // Absent on processors without PMU architectural enumeration; treat
-        // a read failure as "no PEBS support".
-        // See Intel SDM Vol 3B Section 21.8 / Figure 21-67.
+        // PEBS bits from IA32_PERF_CAPABILITIES; a read failure (no PMU
+        // enumeration) means no PEBS. SDM Vol 3B §21.8 / Figure 21-67.
         if let Ok(value) = msr.read_msr(msr::IA32_PERF_CAPABILITIES) {
             cap.pebs_trap = (value >> 6) & 1 != 0;
             cap.pebs_format = ((value >> 8) & 0xF) as u8;
@@ -431,11 +305,7 @@ pub trait VmxCpu {
         cap
     }
 
-    /// Configure IA32_FEATURE_CONTROL MSR
-    ///
-    /// This MSR controls VMX enablement. We need:
-    /// - Bit 0 (lock bit) set to 1
-    /// - Bit 2 (enable VMX outside SMX) set to 1
+    /// Ensure IA32_FEATURE_CONTROL has lock (bit 0) and VMX-outside-SMX (bit 2) set.
     fn configure_feature_control<M: Machine>(
         machine: &M,
     ) -> Result<(), VmxConfigureFeatureControlError> {
@@ -447,19 +317,16 @@ pub trait VmxCpu {
         const FEAT_CTL_LOCKED: u64 = 1 << 0;
         const FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX: u64 = 1 << 2;
 
-        // Check if already locked and configured correctly - this is fine, VMX is enabled
         if (feature_control & FEAT_CTL_LOCKED) != 0
             && (feature_control & FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX) != 0
         {
             return Ok(());
         }
 
-        // If locked but not configured, we can't change it
         if (feature_control & FEAT_CTL_LOCKED) != 0 {
             return Err(VmxConfigureFeatureControlError::Locked);
         }
 
-        // Enable VMX outside SMX and lock
         feature_control |= FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX;
         feature_control |= FEAT_CTL_LOCKED;
 
@@ -474,12 +341,11 @@ pub trait VmxCpu {
     fn deinitialize<M: Machine>(&self, machine: &M) -> Result<(), VmxoffError> {
         if self.is_vmxon() {
             log_debug!("executing VMXOFF\n");
-            // Execute VMXOFF instruction
             M::V::vmxoff().inspect_err(|&e| {
                 log_err!("VMXOFF failed: {:?}\n", e);
             })?;
 
-            // Disable VMX in CR4 (updates kernel's CR4 shadow too)
+            // clear_vmxe() also updates the kernel's CR4 shadow.
             log_debug!("disabling VMXE in CR4\n");
             let cr = machine.cr_access();
             let _ = cr.clear_vmxe();

@@ -1,16 +1,10 @@
-//! File-transmission hypercall: the generic podman initrd downloads its
-//! workload files (`compose.yaml` / `images.tar`) from the host at boot over
-//! `HYPERCALL_FILE_FETCH`.
-//!
-//! Rather than trust the boot log, this injects a command into the booted guest
-//! that re-hashes the downloaded files and compares the digests against the
-//! original host files — proving the transfer landed byte-for-byte.
+//! `HYPERCALL_FILE_FETCH`: the workload files the initrd downloads at boot must
+//! hash identically to the host originals.
 
 use crate::common;
 
-/// The two files the guest downloads at boot, as `(host_original, guest_path)`.
-/// The host paths are set by the `integration-tests` nix app (and required by
-/// `ready_checkpoint`, so they're present whenever a checkpoint is).
+/// `(host_original, guest_path)` pairs; the host paths are guaranteed set
+/// whenever `ready_checkpoint` succeeds.
 fn workload_files() -> [(String, &'static str); 2] {
     let compose = std::env::var("BEDROCK_COMPOSE").expect("BEDROCK_COMPOSE set");
     let images = std::env::var("BEDROCK_IMAGES").expect("BEDROCK_IMAGES set");

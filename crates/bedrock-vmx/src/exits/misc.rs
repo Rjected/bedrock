@@ -13,7 +13,6 @@ use crate::prelude::*;
 
 /// Handle exception/NMI exit.
 pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
-    // Read interruption info to get exception details
     let info_raw = match ctx.state().vmcs.read32(VmcsField32::VmExitInterruptionInfo) {
         Ok(v) => v,
         Err(e) => return ExitHandlerResult::Error(ExitError::VmcsReadError(e)),
@@ -21,28 +20,20 @@ pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
 
     let info = InterruptionInfo::from(info_raw);
 
-    // Check if this is a host NMI that arrived during guest execution.
-    // NMIs are for the host, not the guest - we must invoke the host's NMI handler.
-    // This is critical: KVM and bhyve both do this immediately after VM exit.
-    // Failure to handle host NMIs can cause watchdog timeouts and system instability.
+    // An NMI exit is a host NMI: service it with the host handler right away
+    // (as KVM and bhyve do), or host watchdogs can fire. No-op in cargo builds.
     if matches!(info.interruption_type, InterruptionType::Nmi) {
-        // Invoke the host's NMI handler via software interrupt.
-        // In kernel builds, this calls the actual NMI handler.
-        // In cargo builds (tests), this is a no-op since NMIs won't actually occur.
         // SAFETY: INT 2 invokes the host NMI handler to service the NMI that
-        // triggered a VM exit. This is necessary for host watchdog and system stability.
+        // caused this VM exit.
         #[cfg(all(target_arch = "x86_64", not(feature = "cargo")))]
         unsafe {
             core::arch::asm!("int $2", options(nomem, nostack));
         }
 
-        // After handling the host NMI, resume the guest.
-        // The NMI was for the host, not the guest.
         return ExitHandlerResult::Continue;
     }
 
-    // Intercept guest #PF: reinject so the guest handles it normally.
-    // #PF is a fault — RIP already points to the faulting instruction (no advance needed).
+    // Intercepted guest #PF: reinject it. It's a fault, so RIP is not advanced.
     if info.vector == 14 && ctx.state().intercept_pf {
         let error_code = ctx
             .state()
@@ -50,11 +41,9 @@ pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
             .read32(VmcsField32::VmExitInterruptionErrorCode)
             .unwrap_or(0);
 
-        // The faulting linear address is in exit qualification (SDM Vol 3C, Section 29.2.1).
-        // The CPU may not update the physical CR2 register before a VM exit caused by the
-        // exception bitmap — the SDM only guarantees exit qualification. Explicitly copy it
-        // to guest_cr2 so vmx_support.S restores the correct value on VM entry.
-        // (KVM does the same: vmx_get_exit_qual → vcpu->arch.cr2.)
+        // The fault address is only guaranteed in the exit qualification (SDM
+        // Vol 3C 29.2.1), not in CR2, so copy it to guest_cr2 for
+        // vmx_support.S to restore on entry (as KVM does).
         let fault_addr = ctx
             .state()
             .vmcs
@@ -76,14 +65,12 @@ pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         return ExitHandlerResult::Continue;
     }
 
-    // Read RIP for debugging
     let rip = ctx
         .state()
         .vmcs
         .read_natural(VmcsFieldNatural::GuestRip)
         .unwrap_or(0);
 
-    // For page faults, read CR2 (faulting address)
     let cr2 = if info.vector == 14 {
         ctx.state()
             .vmcs
@@ -93,7 +80,6 @@ pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         0
     };
 
-    // Read error code if present
     let error_code = if info.error_code_valid {
         ctx.state()
             .vmcs
@@ -103,7 +89,6 @@ pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         0
     };
 
-    // Log the exception for debugging
     log_err!(
         "Exception #{} ({}) at RIP={:#x}, error_code={:#x}, CR2={:#x}",
         info.vector,
@@ -113,8 +98,6 @@ pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         cr2
     );
 
-    // For now, exit to userspace for all exceptions
-    // A more complete implementation would handle some internally
     ExitHandlerResult::ExitToUserspace(ExitReason::ExceptionNmi)
 }
 
@@ -149,13 +132,10 @@ pub fn exception_name(vector: u8) -> &'static str {
 // Triple Fault Debugging
 // =============================================================================
 
-/// Dump detailed VMCS state when a triple fault occurs.
-///
-/// This helps diagnose what exception is causing the triple fault.
+/// Dump VMCS state on a triple fault to diagnose the causing exception.
 pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
     log_err!("=== TRIPLE FAULT DEBUG INFO ===");
 
-    // Guest RIP and RSP
     if let Ok(rip) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip) {
         log_err!("Guest RIP: {:#018x}", rip);
     }
@@ -166,7 +146,6 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
         log_err!("Guest RFLAGS: {:#018x}", rflags);
     }
 
-    // Control registers
     if let Ok(cr0) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr0) {
         log_err!("Guest CR0: {:#018x}", cr0);
     }
@@ -177,7 +156,6 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
         log_err!("Guest CR4: {:#018x}", cr4);
     }
 
-    // Segment selectors
     if let Ok(cs) = ctx.state().vmcs.read16(VmcsField16::GuestCsSelector) {
         log_err!("Guest CS: {:#06x}", cs);
     }
@@ -185,10 +163,9 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
         log_err!("Guest SS: {:#06x}", ss);
     }
 
-    // IDT vectoring info - shows what exception was being delivered when triple fault occurred
+    // IDT vectoring info: the exception being delivered at the triple fault.
     if let Ok(idt_info) = ctx.state().vmcs.read32(VmcsField32::IdtVectoringInfo) {
         if idt_info & (1 << 31) != 0 {
-            // Valid bit is set - an exception was being delivered
             let vector = idt_info & 0xFF;
             let int_type = (idt_info >> 8) & 0x7;
             let has_error = (idt_info >> 11) & 1 != 0;
@@ -215,7 +192,6 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
         }
     }
 
-    // Exit qualification
     if let Ok(qual) = ctx
         .state()
         .vmcs
@@ -224,7 +200,6 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
         log_err!("Exit Qualification: {:#018x}", qual);
     }
 
-    // Guest linear address (for memory-related faults)
     if let Ok(linear) = ctx
         .state()
         .vmcs
@@ -233,12 +208,10 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
         log_err!("Guest Linear Address: {:#018x}", linear);
     }
 
-    // Guest physical address (for EPT violations)
     if let Ok(phys) = ctx.state().vmcs.read64(VmcsField64::GuestPhysicalAddr) {
         log_err!("Guest Physical Address: {:#018x}", phys);
     }
 
-    // GDTR and IDTR
     if let Ok(gdtr_base) = ctx
         .state()
         .vmcs
@@ -266,7 +239,6 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
         }
     }
 
-    // Guest activity and interruptibility state
     if let Ok(activity) = ctx.state().vmcs.read32(VmcsField32::GuestActivityState) {
         log_err!("Guest Activity State: {}", activity);
     }
@@ -285,27 +257,18 @@ pub fn dump_triple_fault_state<C: VmContext>(ctx: &C) {
 // XSETBV Handler
 // =============================================================================
 
-/// Handle XSETBV exit.
-///
-/// XSETBV sets the extended control register XCR0 which controls which
-/// XSAVE-supported processor state components are enabled.
-///
-/// Intel SDM Vol 2B, XSETBV instruction.
+/// Handle XSETBV exit (sets XCR0; SDM Vol 2B, XSETBV).
 pub fn handle_xsetbv<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
     let gprs = ctx.state().gprs;
     let xcr_num = gprs.rcx as u32;
     let value = (gprs.rdx << 32) | (gprs.rax & 0xFFFFFFFF);
 
-    // Only XCR0 is currently defined
     if xcr_num != 0 {
         log_err!("XSETBV: invalid XCR number {}", xcr_num);
         // Should inject #GP(0)
         return ExitHandlerResult::ExitToUserspace(ExitReason::Xsetbv);
     }
 
-    // Validate XCR0 value:
-    // - Bit 0 (x87 FPU) must be 1
-    // - If AVX (bit 2) is set, SSE (bit 1) must also be set
     if value & 1 == 0 {
         log_err!("XSETBV: XCR0 bit 0 (x87) must be 1, got {:#x}", value);
         return ExitHandlerResult::ExitToUserspace(ExitReason::Xsetbv);
@@ -316,13 +279,11 @@ pub fn handle_xsetbv<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         return ExitHandlerResult::ExitToUserspace(ExitReason::Xsetbv);
     }
 
-    // Update the xcr0_mask used for XSAVE/XRSTOR
-    // This ensures the correct state components are saved/restored
+    // Used for the host's XSAVE/XRSTOR of guest state.
     ctx.state_mut().xcr0_mask = value;
 
     log_debug!("XSETBV: setting XCR0 to {:#x}", value);
 
-    // Advance RIP
     if let Err(e) = advance_rip(ctx) {
         return ExitHandlerResult::Error(e);
     }

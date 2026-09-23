@@ -1,20 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Copy-on-write page tracking for forked VMs.
-//!
-//! This module provides the `CowPageMap` structure for tracking pages that have
-//! been copied during copy-on-write handling in forked VMs.
-//!
-//! In cargo builds, uses `alloc::collections::BTreeMap`.
-//! In kernel builds, uses `kernel::rbtree::RBTree`.
+//! Copy-on-write page tracking for forked VMs (BTreeMap in cargo builds,
+//! kernel RBTree in kernel builds).
 
 /// Error returned when inserting a COW page fails (e.g., allocation failure).
 #[derive(Debug, Clone, Copy)]
 pub struct CowInsertError;
 
-// ============================================================================
 // Cargo build: Use alloc::collections::BTreeMap
-// ============================================================================
 
 #[cfg(feature = "cargo")]
 mod cargo_impl {
@@ -27,18 +20,15 @@ mod cargo_impl {
 
     /// Tracks copy-on-write pages for a forked VM.
     ///
-    /// Only stores pages that THIS VM has modified - ancestor pages are
-    /// accessed via EPT lookup (the EPT already points to the correct
-    /// host physical addresses from parent/grandparent/etc).
+    /// Only stores pages THIS VM has modified; ancestor pages are reached via
+    /// the EPT, which already points at the right host frames.
     pub struct CowPageMap<P: Page> {
         /// Maps page-aligned GPAs to owned pages.
         pages: BTreeMap<u64, P>,
-        /// Number of pages in the map.
         count: usize,
     }
 
     impl<P: Page> CowPageMap<P> {
-        /// Create a new empty COW page map.
         pub fn new() -> Self {
             Self {
                 pages: BTreeMap::new(),
@@ -46,23 +36,18 @@ mod cargo_impl {
             }
         }
 
-        /// Get a reference to the COW page at the given GPA, if it exists.
-        ///
-        /// Returns None if the page has not been copied for this VM.
+        /// COW page containing `gpa`, if this VM has copied it.
         pub fn get(&self, gpa: GuestPhysAddr) -> Option<&P> {
             let page_aligned = gpa.as_u64() & !0xFFF;
             self.pages.get(&page_aligned)
         }
 
-        /// Get a mutable reference to the COW page at the given GPA, if it exists.
         pub fn get_mut(&mut self, gpa: GuestPhysAddr) -> Option<&mut P> {
             let page_aligned = gpa.as_u64() & !0xFFF;
             self.pages.get_mut(&page_aligned)
         }
 
-        /// Insert a new COW page for the given GPA.
-        ///
-        /// The GPA will be page-aligned before insertion.
+        /// Insert a COW page for the page containing `gpa`.
         pub fn insert(&mut self, gpa: GuestPhysAddr, page: P) -> Result<(), super::CowInsertError> {
             let page_aligned = gpa.as_u64() & !0xFFF;
             if self.pages.insert(page_aligned, page).is_none() {
@@ -71,25 +56,20 @@ mod cargo_impl {
             Ok(())
         }
 
-        /// Check if a COW page exists for the given GPA.
         pub fn contains(&self, gpa: GuestPhysAddr) -> bool {
             let page_aligned = gpa.as_u64() & !0xFFF;
             self.pages.contains_key(&page_aligned)
         }
 
-        /// Get the number of COW pages.
         pub fn len(&self) -> usize {
             self.count
         }
 
-        /// Check if the map is empty.
         pub fn is_empty(&self) -> bool {
             self.count == 0
         }
 
-        /// Iterate over all COW pages.
-        ///
-        /// Yields (GPA, Page) pairs where GPA is page-aligned.
+        /// Iterate over (page-aligned GPA, page) pairs.
         pub fn iter(&self) -> impl Iterator<Item = (GuestPhysAddr, &P)> {
             self.pages
                 .iter()
@@ -107,9 +87,7 @@ mod cargo_impl {
 #[cfg(feature = "cargo")]
 pub use cargo_impl::CowPageMap;
 
-// ============================================================================
 // Kernel build: Use kernel::rbtree::RBTree
-// ============================================================================
 
 #[cfg(not(feature = "cargo"))]
 mod kernel_impl {
@@ -119,20 +97,14 @@ mod kernel_impl {
     use crate::memory::GuestPhysAddr;
     use crate::vmx::traits::Page;
 
-    /// Tracks copy-on-write pages for a forked VM.
-    ///
-    /// Only stores pages that THIS VM has modified - ancestor pages are
-    /// accessed via EPT lookup (the EPT already points to the correct
-    /// host physical addresses from parent/grandparent/etc).
+    /// Tracks copy-on-write pages for a forked VM. See the cargo impl.
     pub struct CowPageMap<P: Page> {
         /// Maps page-aligned GPAs to owned pages.
         pages: RBTree<u64, P>,
-        /// Number of pages in the map.
         count: usize,
     }
 
     impl<P: Page> CowPageMap<P> {
-        /// Create a new empty COW page map.
         pub fn new() -> Self {
             Self {
                 pages: RBTree::new(),
@@ -140,27 +112,20 @@ mod kernel_impl {
             }
         }
 
-        /// Get a reference to the COW page at the given GPA, if it exists.
-        ///
-        /// Returns None if the page has not been copied for this VM.
+        /// COW page containing `gpa`, if this VM has copied it.
         pub fn get(&self, gpa: GuestPhysAddr) -> Option<&P> {
             let page_aligned = gpa.as_u64() & !0xFFF;
             self.pages.get(&page_aligned)
         }
 
-        /// Get a mutable reference to the COW page at the given GPA, if it exists.
         pub fn get_mut(&mut self, gpa: GuestPhysAddr) -> Option<&mut P> {
             let page_aligned = gpa.as_u64() & !0xFFF;
             self.pages.get_mut(&page_aligned)
         }
 
-        /// Insert a new COW page for the given GPA.
-        ///
-        /// The GPA will be page-aligned before insertion.
-        /// Returns `Err` if allocation fails.
+        /// Insert a COW page for the page containing `gpa`. Fails on allocation failure.
         pub fn insert(&mut self, gpa: GuestPhysAddr, page: P) -> Result<(), super::CowInsertError> {
             let page_aligned = gpa.as_u64() & !0xFFF;
-            // try_create_and_insert allocates a node and inserts it
             match self
                 .pages
                 .try_create_and_insert(page_aligned, page, GFP_ATOMIC)
@@ -173,25 +138,20 @@ mod kernel_impl {
             }
         }
 
-        /// Check if a COW page exists for the given GPA.
         pub fn contains(&self, gpa: GuestPhysAddr) -> bool {
             let page_aligned = gpa.as_u64() & !0xFFF;
             self.pages.get(&page_aligned).is_some()
         }
 
-        /// Get the number of COW pages.
         pub fn len(&self) -> usize {
             self.count
         }
 
-        /// Check if the map is empty.
         pub fn is_empty(&self) -> bool {
             self.count == 0
         }
 
-        /// Iterate over all COW pages.
-        ///
-        /// Yields (GPA, Page) pairs where GPA is page-aligned.
+        /// Iterate over (page-aligned GPA, page) pairs.
         pub fn iter(&self) -> impl Iterator<Item = (GuestPhysAddr, &P)> {
             self.pages
                 .iter()

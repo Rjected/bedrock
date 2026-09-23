@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
 //! Linux boot configuration and setup.
-//!
-//! Provides a convenient API for setting up Linux boot on a VM.
 
 use crate::error::VmError;
 use crate::vm::Vm;
@@ -11,11 +9,8 @@ use super::{
     linux_boot_regs, setup_boot_params, setup_gdt, setup_mptable, setup_page_tables, write_cmdline,
 };
 
-/// Configuration for Linux boot setup.
-///
-/// This struct holds all the information needed to configure a VM for Linux boot.
-/// The kernel should already be loaded into guest memory before calling
-/// [`Vm::setup_linux_boot`].
+/// Configuration for [`Vm::setup_linux_boot`]. The kernel must already be
+/// loaded into guest memory.
 ///
 /// # Example
 ///
@@ -39,23 +34,15 @@ use super::{
 /// ```
 #[derive(Debug, Clone)]
 pub struct LinuxBootConfig<'a> {
-    /// Kernel entry point address (from ELF parsing).
     pub kernel_entry: u64,
     /// Highest address used by the kernel (for initramfs placement).
     pub kernel_end: usize,
-    /// Optional initramfs data (will be placed after kernel, aligned to 2MB).
+    /// Placed after the kernel, 2MB-aligned.
     pub initramfs: Option<&'a [u8]>,
-    /// Kernel command line.
     pub cmdline: &'a str,
 }
 
 impl<'a> LinuxBootConfig<'a> {
-    /// Create a new Linux boot configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `kernel_entry` - Entry point address from the kernel ELF
-    /// * `kernel_end` - Highest address used by the kernel (for initramfs placement)
     pub fn new(kernel_entry: u64, kernel_end: usize) -> Self {
         Self {
             kernel_entry,
@@ -65,60 +52,32 @@ impl<'a> LinuxBootConfig<'a> {
         }
     }
 
-    /// Set the kernel command line.
     pub fn cmdline(mut self, cmdline: &'a str) -> Self {
         self.cmdline = cmdline;
         self
     }
 
-    /// Set the initramfs data.
-    ///
-    /// The initramfs will be placed after the kernel, aligned to a 2MB boundary.
     pub fn initramfs(mut self, data: &'a [u8]) -> Self {
         self.initramfs = Some(data);
         self
     }
 }
 
-/// Information about the Linux boot setup.
-///
-/// Returned by [`Vm::setup_linux_boot`] with details about what was configured.
+/// What [`Vm::setup_linux_boot`] configured.
 #[derive(Debug, Clone)]
 pub struct LinuxBootInfo {
-    /// GDT base address.
     pub gdt_base: u64,
-    /// GDT limit.
     pub gdt_limit: u16,
-    /// Address where initramfs was loaded (if any).
     pub initramfs_addr: Option<u64>,
-    /// Size of the loaded initramfs (if any).
     pub initramfs_size: Option<usize>,
 }
 
-/// 2MB alignment mask for initramfs placement.
 const ALIGN_2MB: usize = 0x1FFFFF;
 
 impl Vm {
-    /// Set up Linux boot structures and registers.
-    ///
-    /// This sets up:
-    /// - GDT for 64-bit mode
-    /// - Identity-mapped page tables covering all guest memory
-    /// - MP tables for APIC discovery
-    /// - boot_params structure (zero page) per Linux boot protocol
-    /// - Command line
-    /// - Initial CPU registers
-    ///
-    /// The kernel should already be loaded into guest memory before calling this.
-    /// If initramfs is provided, it will be copied to guest memory after the kernel,
-    /// aligned to a 2MB boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - This is a forked VM (no direct memory access)
-    /// - The initramfs would exceed guest memory bounds
-    /// - Setting registers fails
+    /// Write the 64-bit GDT, identity page tables, MP tables, boot_params,
+    /// cmdline and optional initramfs into guest memory and set the initial
+    /// registers. Root VMs only; the kernel must already be loaded.
     ///
     /// # Example
     ///
@@ -151,25 +110,19 @@ impl Vm {
 
         let memory_size = self.memory_size();
 
-        // Get mutable memory reference
         let memory = self
             .memory_mut()
             .map_err(|e| VmError::InvalidConfiguration {
                 reason: format!("failed to access guest memory: {}", e),
             })?;
 
-        // Set up GDT
         let (gdt_base, gdt_limit) = setup_gdt(memory);
 
-        // Set up identity-mapped page tables
         setup_page_tables(memory, memory_size);
 
-        // Set up MP tables for APIC discovery
         setup_mptable(memory);
 
-        // Load initramfs if provided
         let (initramfs_addr, initramfs_size) = if let Some(data) = config.initramfs {
-            // Align to 2MB boundary after kernel end
             let addr = (config.kernel_end + ALIGN_2MB) & !ALIGN_2MB;
             let size = data.len();
             let end = addr + size;
@@ -189,7 +142,6 @@ impl Vm {
             (None, None)
         };
 
-        // Set up boot_params structure and write command line
         setup_boot_params(
             memory,
             memory_size,
@@ -199,7 +151,6 @@ impl Vm {
         );
         write_cmdline(memory, config.cmdline);
 
-        // Set up initial registers
         let regs = linux_boot_regs(config.kernel_entry, gdt_base, gdt_limit);
         self.set_regs(&regs).map_err(|e| VmError::Ioctl {
             operation: "SET_REGS",

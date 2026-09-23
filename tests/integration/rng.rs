@@ -1,15 +1,11 @@
-//! RNG determinism. The tree boots with `RngMode::Seeded`, so guest
-//! randomness is a pure function of the seed and the (deterministic)
-//! execution that consumes it. Two sibling branches forked from the same
-//! checkpoint, doing the same work, must observe identical randomness —
-//! right down to what the kernel CRNG hands out through `/dev/urandom`.
+//! RNG determinism under `RngMode::Seeded`: sibling branches doing the same
+//! work see identical randomness, down to `/dev/urandom`.
 
 use bedrock_lab::{BashTarget, EventCategories, EventConfig};
 
 use crate::common;
 
-/// Read a fixed number of bytes from the guest's `/dev/urandom`, hex-encoded
-/// so the captured output is plain ASCII.
+/// Read a fixed number of hex-encoded bytes from the guest's `/dev/urandom`.
 fn read_urandom(ready: &bedrock_lab::Checkpoint) -> Vec<u8> {
     let mut branch = ready.branch().expect("fork branch");
     let out = branch
@@ -48,17 +44,9 @@ fn seeded_rng_makes_urandom_deterministic() {
     );
 }
 
-/// The guest kernel is patched so `/dev/urandom`, `/dev/random` and
-/// `getrandom()` source their bytes from `HYPERCALL_GET_RANDOM` instead of the
-/// in-kernel CRNG. Prove the patch is actually in effect end-to-end: with
-/// `RANDOMNESS` capture on, a guest `/dev/urandom` read must surface as
-/// `Randomness` records carrying `source == GetRandom` on the event stream
-/// (with the in-kernel CRNG, urandom would emit none). This exercises the whole
-/// chain — guest patch → VMCALL → host handler → recorded event.
-///
-/// (Determinism is covered by `seeded_rng_makes_urandom_deterministic`; that
-/// test alone can't distinguish the patch from the CRNG, which is also seeded-
-/// deterministic. This one pins down the channel.)
+/// The guest kernel's urandom/getrandom patch is in effect: a `/dev/urandom`
+/// read surfaces as `GetRandom` randomness records (the seeded CRNG would be
+/// deterministic too, but emit none).
 #[test]
 fn urandom_reads_route_through_get_random_hypercall() {
     let Some(ready) = common::ready_checkpoint() else {
@@ -105,8 +93,7 @@ fn urandom_reads_route_through_get_random_hypercall() {
          guest CRNG through the hypervisor. Captured records: {records:?}",
     );
 
-    // The served bytes cover at least the 64 requested (the guest may chunk a
-    // read into several capped GET_RANDOM requests; other readers may add more).
+    // At least the 64 requested; reads may be chunked and other readers add more.
     let served: u64 = get_random
         .iter()
         .filter_map(|r| r.pointer("/data/len").and_then(|l| l.as_u64()))

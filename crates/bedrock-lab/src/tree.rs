@@ -9,9 +9,7 @@ use crate::checkpoint::{Checkpoint, CheckpointId};
 use crate::inner::{BranchMeta, LabInner};
 use crate::time::VirtTime;
 
-/// Lightweight view of a live branch in the tree. Cheap, by-value, doesn't
-/// pin the underlying [`Branch`](crate::Branch) — it's a snapshot of its
-/// metadata at the moment [`Tree`] was constructed.
+/// By-value snapshot of a live [`Branch`](crate::Branch)'s metadata.
 #[derive(Debug, Clone)]
 pub struct BranchView {
     pub id: BranchId,
@@ -19,11 +17,8 @@ pub struct BranchView {
     pub current_time: VirtTime,
 }
 
-/// A snapshot of every live [`Checkpoint`] and live [`Branch`](crate::Branch)
-/// in the tree at the moment of construction.
-///
-/// `Tree` is purely a read-only view; it doesn't extend the lifetime of its
-/// nodes beyond the handles already held by the user.
+/// A read-only snapshot of every live [`Checkpoint`] and
+/// [`Branch`](crate::Branch); it doesn't extend their lifetimes.
 pub struct Tree {
     pub(crate) checkpoints: Vec<Checkpoint>,
     pub(crate) branches: Vec<BranchView>,
@@ -58,8 +53,7 @@ impl Tree {
         &self.branches
     }
 
-    /// Render the tree as a Graphviz DOT graph. Useful for visualizing
-    /// branching exploration runs.
+    /// Render the tree as a Graphviz DOT graph.
     pub fn dot(&self) -> String {
         let mut s = String::new();
         s.push_str("digraph tree {\n");

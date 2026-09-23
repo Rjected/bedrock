@@ -8,19 +8,10 @@ use super::helpers::{inject_exception, ExitError};
 use super::pebs::arm_for_next_iteration;
 use super::qualifications::InterruptionInfo;
 
-/// IOAPIC pin used for the deterministic hypervisor↔guest I/O channel.
-///
-/// The MP table advertises this pin as a routable ISA interrupt so the
-/// guest's `bedrock-io.ko` can `request_irq()` it through the normal Linux
-/// IRQ subsystem (the kernel then programs the IOAPIC redirection-table
-/// entry with a chosen vector). The hypervisor injects via
-/// [`ioapic_deliver_irq`], reusing the same path the emulated serial port
-/// uses for IRQ 4.
-///
-/// Pin 9 is not used by the emulated platform's other devices (PIT is on
-/// pin 0, serial COM1 on pin 4, RTC would be on pin 8) and corresponds to
-/// ISA IRQ 9, which is conventionally reserved for ACPI on real hardware —
-/// since bedrock guests are ACPI-less, it's free for us to claim.
+/// IOAPIC pin for the hypervisor-guest I/O channel. Advertised in the MP table
+/// so `bedrock-io.ko` can `request_irq()` it; delivered via
+/// [`ioapic_deliver_irq`]. ISA IRQ 9 is normally ACPI, which bedrock guests
+/// lack, and no emulated device uses it.
 pub const IO_CHANNEL_IRQ: u8 = 9;
 
 #[cfg(not(feature = "cargo"))]
@@ -28,8 +19,7 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
-/// Check if APIC timer has expired and set IRR bit if so.
-/// Uses emulated TSC for determinism.
+/// Set the timer vector in IRR if the APIC timer has expired (per emulated TSC).
 pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
     let current_tsc = ctx.state().emulated_tsc;
     let timer_deadline = ctx.state().devices.apic.timer_deadline;
@@ -49,41 +39,31 @@ pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
         return;
     }
 
-    // Diagnostic: count timer firings that arrive past the deadline. The
-    // precise PEBS+MTF boundary lands `current_tsc == timer_deadline`;
-    // anything strictly greater means PEBS didn't fire at the
-    // `target - PEBS_MARGIN` point and the timer is being delivered late
-    // on whatever deterministic exit happened past the deadline.
+    // The precise PEBS+MTF path lands exactly on the deadline; later means
+    // the timer is delivered late on some subsequent deterministic exit.
     if current_tsc > timer_deadline {
         ctx.state_mut().exit_stats.apic_timer_late_inject += 1;
     }
 
     let apic = &mut ctx.state_mut().devices.apic;
 
-    // Get vector from LVT timer (bits 7:0)
     let vector = (apic.lvt_timer & 0xFF) as u8;
 
-    // Set bit in IRR
     let irr_index = (vector / 32) as usize;
     let irr_bit = 1u32 << (vector % 32);
     apic.irr[irr_index] |= irr_bit;
 
-    // Handle periodic vs one-shot mode (bit 17 of lvt_timer)
+    // Bit 17: periodic.
     if (apic.lvt_timer & (1 << 17)) != 0 {
-        // Periodic: reset deadline for next period
         let divisor = apic_timer_divisor(apic.timer_divide);
         let ticks = u64::from(apic.timer_initial) * u64::from(divisor);
         apic.timer_deadline = current_tsc.wrapping_add(ticks);
     } else {
-        // One-shot: stop timer
         apic.timer_deadline = 0;
     }
 
-    // Record the injection on the event stream. `target_tsc` is the deadline
-    // this firing was scheduled for; pairing it with the header's actual emit
-    // tsc (== current_tsc) exposes scheduled-vs-delivered drift — the key
-    // signal for interrupt-timing divergence. Buffer-full is handled centrally
-    // by the exit dispatcher, so the return value is ignored.
+    // `target_tsc` vs the header's emit tsc exposes scheduled-vs-delivered
+    // drift. Buffer-full is handled by the exit dispatcher.
     let payload = InjectPayload {
         vector,
         source: InjectSource::Timer as u8,
@@ -95,21 +75,10 @@ pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
         .event_append(EventKind::Inject, payload.as_bytes());
 }
 
-/// Check whether an I/O channel request is queued and not yet delivered to
-/// the guest, and if so, raise the I/O channel IRQ via the emulated IOAPIC.
-///
-/// The guest module is responsible for two prerequisites before we can
-/// fire:
-///   1. It registered the shared page (sets `io_channel.page_gpa != 0`).
-///   2. It `request_irq`'d the channel IRQ, which causes Linux to write an
-///      unmasked, valid-vector entry into `ioapic.redtbl[IO_CHANNEL_IRQ]`.
-///
-/// Until both are true the request just sits in `VmState`; once they're
-/// both true `ioapic_deliver_irq` flips the APIC IRR bit and the normal
-/// `inject_pending_interrupt` path delivers it on the next interruptible
-/// VM-entry. We set `request_delivered = true` only after we've actually
-/// raised the IRR (i.e. the IOAPIC entry was unmasked) so a request that
-/// arrives before the guest module is ready isn't silently dropped.
+/// Raise the I/O channel IRQ for a queued, undelivered request once the guest
+/// has registered the page and unmasked `redtbl[IO_CHANNEL_IRQ]`. Until then
+/// the request stays pending; `request_delivered` is set only after IRR is
+/// actually raised so early requests aren't dropped.
 pub fn check_io_channel<C: VmContext>(ctx: &mut C) {
     let chan = &ctx.state().io_channel;
     if chan.page_gpa == 0 {
@@ -121,19 +90,14 @@ pub fn check_io_channel<C: VmContext>(ctx: &mut C) {
     if chan.request_delivered {
         return;
     }
-    // When the request was queued with a target TSC, defer until the
-    // emulated TSC has caught up. `arm_for_next_iteration` arms PEBS for
-    // this target so we exit precisely at the requested instruction
-    // count; `check_io_channel` then fires on the boundary MTF step
-    // where `emulated_tsc == request_target_tsc` (and on any later exit
-    // as a safety net for the AlreadyPast / BelowMinDelta cases).
+    // Wait for the target TSC. PEBS+MTF normally lands exactly on it; any
+    // later exit is the fallback when arming wasn't possible.
     if chan.request_target_tsc != 0 && ctx.state().emulated_tsc < chan.request_target_tsc {
         return;
     }
 
     let entry = ctx.state().devices.ioapic.redtbl[IO_CHANNEL_IRQ as usize];
-    // Masked (bit 16) or vector < 16: the guest module hasn't wired up the
-    // IRQ yet. Leave the request pending and try again next iteration.
+    // Masked or vector < 16: guest hasn't wired up the IRQ yet.
     if (entry >> 16) & 1 != 0 || (entry & 0xFF) < 16 {
         return;
     }
@@ -141,11 +105,8 @@ pub fn check_io_channel<C: VmContext>(ctx: &mut C) {
     ioapic_deliver_irq(ctx, IO_CHANNEL_IRQ);
     ctx.state_mut().io_channel.request_delivered = true;
 
-    // Record the request-signal on the event stream. Its own category so the
-    // request firing (a determinism-relevant point) is capturable without the
-    // heavyweight `Exit` capture. The metadata is followed by the actual request
-    // bytes (the injected command); `target_tsc` is the scheduled request target;
-    // `status`/`exit_code` are 0 on a request. Buffer-full handled centrally.
+    // Own event category so request firing is capturable without full `Exit`
+    // capture. Buffer-full is handled centrally.
     let target_tsc = ctx.state().io_channel.request_target_tsc;
     let payload = IoChannelPayload {
         phase: IoChannelPhase::Request as u8,
@@ -171,20 +132,17 @@ fn apic_timer_divisor(dcr: u32) -> u32 {
     }
 }
 
-/// Find the highest priority pending interrupt in the APIC IRR.
-/// Returns the vector number if an interrupt is pending, None otherwise.
+/// Highest-priority vector pending in the APIC IRR.
 fn apic_pending_vector<C: VmContext>(ctx: &C) -> Option<u8> {
     let apic = &ctx.state().devices.apic;
 
-    // Check if APIC is enabled (SVR bit 8)
+    // SVR bit 8: APIC enabled.
     if (apic.svr & (1 << 8)) == 0 {
         return None;
     }
 
-    // Find highest priority pending interrupt (highest vector number)
     for i in (0..8).rev() {
         if apic.irr[i] != 0 {
-            // Find highest bit set in this word
             let bit = 31 - apic.irr[i].leading_zeros();
             return Some((i * 32 + bit as usize) as u8);
         }
@@ -230,14 +188,9 @@ pub fn disable_interrupt_window_exiting<C: VmContext>(ctx: &mut C) -> Result<(),
     Ok(())
 }
 
-/// Check IDT-vectoring information and re-inject if an event was interrupted during delivery.
-///
-/// Per Intel SDM Vol 3C Section 29.2.4: When a VM exit occurs during delivery of an event
-/// through the IDT (e.g., EPT violation while pushing interrupt frame to stack), the event
-/// info is saved in IdtVectoringInfo. The hypervisor must re-inject this event by copying
-/// it to VmEntryInterruptionInfo.
-///
-/// Returns Ok(true) if an event was re-injected, Ok(false) if no event needs re-injection.
+/// Re-inject an event whose IDT delivery was interrupted by the VM exit (e.g.
+/// EPT violation pushing the frame), per SDM Vol 3C 29.2.4. Returns whether
+/// an event was re-injected.
 pub fn reinject_vectored_event<C: VmContext>(ctx: &mut C) -> Result<bool, ExitError> {
     let idt_info = ctx
         .state()
@@ -245,7 +198,6 @@ pub fn reinject_vectored_event<C: VmContext>(ctx: &mut C) -> Result<bool, ExitEr
         .read32(VmcsField32::IdtVectoringInfo)
         .map_err(ExitError::VmcsReadError)?;
 
-    // Check if valid (bit 31) - if not set, no event was interrupted
     if idt_info & (1 << 31) == 0 {
         return Ok(false);
     }
@@ -259,14 +211,13 @@ pub fn reinject_vectored_event<C: VmContext>(ctx: &mut C) -> Result<bool, ExitEr
         int_type
     );
 
-    // Copy IDT-vectoring info to VM-entry interruption-info for re-injection.
-    // The formats are identical per Intel SDM (Table 26-18 and Table 26-21).
+    // Identical formats (SDM Tables 26-18, 26-21).
     ctx.state()
         .vmcs
         .write32(VmcsField32::VmEntryInterruptionInfo, idt_info)
         .map_err(ExitError::VmcsWriteError)?;
 
-    // If error code is valid (bit 11), copy that too
+    // Bit 11: error code valid.
     if idt_info & (1 << 11) != 0 {
         let error_code = ctx
             .state()
@@ -282,37 +233,18 @@ pub fn reinject_vectored_event<C: VmContext>(ctx: &mut C) -> Result<bool, ExitEr
     Ok(true)
 }
 
-/// Inject any pending interrupt into the guest before VM entry.
-/// This should be called before each VMLAUNCH/VMRESUME.
+/// Inject any pending interrupt before VMLAUNCH/VMRESUME, and re-arm PEBS.
 pub fn inject_pending_interrupt<C: VmContext>(ctx: &mut C) -> Result<(), ExitError> {
-    // Decide whether a fresh APIC-timer interrupt is eligible for injection
-    // this iteration. The PEBS re-arm at the end runs unconditionally, so
-    // every branch here is a "what about the pending-interrupt side" decision.
+    // Skip new injection when:
+    //   - an interrupted event was re-injected (SDM Vol 3C 29.2.4; it must
+    //     complete first);
+    //   - the last exit was non-deterministic: setting IRR there happens at a
+    //     host-dependent point (e.g. a host NMI absorbing an interrupt-window
+    //     exit);
+    //   - an event is already pending in `VmEntryInterruptionInfo`.
     //
-    // Three reasons to skip new injection:
-    //
-    //   - `reinject_vectored_event` returned true: an interrupt or exception
-    //     delivery was aborted (e.g. CoW EPT violation while pushing the
-    //     interrupt frame) and must complete first. Per Intel SDM Vol 3C
-    //     §29.2.4, we re-inject before handling new events. Runs
-    //     unconditionally — the event was already in flight.
-    //
-    //   - Last exit was non-deterministic (host NMI, external interrupt, VMX
-    //     preemption timer): we'd risk setting IRR / re-injecting at a
-    //     non-deterministic boundary, e.g. a host NMI landing at the same
-    //     instruction where hardware would have fired an interrupt-window VM
-    //     exit, silently absorbing the IWE exit and shortening the determ log
-    //     by one entry.
-    //
-    //   - `VmEntryInterruptionInfo` already has an exception pending (e.g.
-    //     reinjected #PF): don't overwrite it with an interrupt; it gets
-    //     handled on the next exit.
-    //
-    // For the surviving deterministic path we run `check_apic_timer` to set
-    // IRR and (for periodic timers) auto-reload `apic.timer_deadline`.
-    // The PEBS re-arm below reads that deadline, so the timer-expiry check
-    // must run before re-arming or we'd arm against the already-fired
-    // deadline.
+    // `check_apic_timer` must run before the re-arm below, which reads the
+    // (possibly reloaded) periodic deadline.
     let inject_eligible =
         !reinject_vectored_event(ctx)? && ctx.state().last_exit_deterministic && {
             let pending = ctx
@@ -324,69 +256,51 @@ pub fn inject_pending_interrupt<C: VmContext>(ctx: &mut C) -> Result<(), ExitErr
                 false
             } else {
                 check_apic_timer(ctx);
-                // Raise the I/O channel IRQ if a host-queued request is
-                // pending and the guest module has wired up its IRQ
-                // handler. Sequenced after `check_apic_timer` so that when
-                // both are eligible the timer (typically higher vector,
-                // higher priority) wins selection in `apic_pending_vector`
-                // and ours queues behind it via the sticky IRR bit.
+                // After the timer, so the (usually higher-vector) timer wins
+                // and ours waits in IRR.
                 check_io_channel(ctx);
                 true
             }
         };
 
-    // Re-arm PEBS for the next APIC timer deadline regardless of which branch
-    // above we took. After a non-deterministic exit, the previous iteration's
-    // `counter_reload` no longer matches "instructions remaining to deadline":
-    // the interrupted iter retired some instructions toward the overflow
-    // target, but FIXED_CTR0 resets to the same `counter_reload` on the next
-    // VM-entry, so PEBS would fire `delta - 1` instructions into the *new*
-    // iter — past the original deadline by exactly however many instructions
-    // were burned in the interrupted iter. Re-arming recomputes the remaining
-    // delta from the current `last_instruction_count + tsc_offset` (fresh on
-    // every VM-exit, unlike `emulated_tsc` which only updates on deterministic
-    // exits) and keeps the precise emulated_tsc landing point intact.
+    // Always re-arm: FIXED_CTR0 is reloaded with `counter_reload` on every
+    // entry, so a stale value would overshoot by the instructions retired in
+    // an interrupted iteration.
     arm_for_next_iteration(ctx);
 
     if !inject_eligible {
         return Ok(());
     }
 
-    // Find highest priority pending interrupt
     let vector = match apic_pending_vector(ctx) {
         Some(v) => v,
-        None => return Ok(()), // No pending interrupt
+        None => return Ok(()),
     };
 
-    // Check if guest is interruptible (RFLAGS.IF = 1)
     let rflags = ctx
         .state()
         .vmcs
         .read_natural(VmcsFieldNatural::GuestRflags)
         .map_err(ExitError::VmcsReadError)?;
     if (rflags & (1 << 9)) == 0 {
-        // IF=0, enable interrupt-window exiting to inject later
         enable_interrupt_window_exiting(ctx)?;
         return Ok(());
     }
 
-    // Check interruptibility state (blocking by STI or MOV SS)
     let interruptibility = ctx
         .state()
         .vmcs
         .read32(VmcsField32::GuestInterruptibilityState)
         .map_err(ExitError::VmcsReadError)?;
+    // Blocked by STI or MOV SS.
     if (interruptibility & 0x3) != 0 {
-        // Blocked by STI or MOV SS
         enable_interrupt_window_exiting(ctx)?;
         return Ok(());
     }
 
-    // Guest is interruptible - inject the interrupt
     let info = InterruptionInfo::external_interrupt(vector);
     inject_exception(ctx, info, None)?;
 
-    // Clear IRR bit, set ISR bit (interrupt now in service)
     {
         let apic = &mut ctx.state_mut().devices.apic;
         let irr_index = (vector / 32) as usize;
@@ -395,16 +309,12 @@ pub fn inject_pending_interrupt<C: VmContext>(ctx: &mut C) -> Result<(), ExitErr
         apic.isr[irr_index] |= bit;
     }
 
-    // Disable interrupt-window exiting if it was enabled
     disable_interrupt_window_exiting(ctx)?;
 
     Ok(())
 }
 
-/// Deliver an interrupt through the I/O APIC to the local APIC.
-///
-/// This looks up the redirection table entry for the given IRQ pin,
-/// and if not masked, sets the corresponding bit in the local APIC's IRR.
+/// Deliver an IOAPIC pin to the local APIC IRR unless masked.
 pub fn ioapic_deliver_irq<C: VmContext>(ctx: &mut C, irq: u8) {
     if irq as usize >= IOAPIC_NUM_PINS {
         return;
@@ -412,18 +322,15 @@ pub fn ioapic_deliver_irq<C: VmContext>(ctx: &mut C, irq: u8) {
 
     let entry = ctx.state().devices.ioapic.redtbl[irq as usize];
 
-    // Check if masked (bit 16)
     if (entry >> 16) & 1 != 0 {
         return;
     }
 
     let vector = (entry & 0xFF) as u8;
     if vector < 16 {
-        // Vectors 0-15 are reserved
         return;
     }
 
-    // Set the bit in local APIC's IRR
     let irr_idx = (vector / 32) as usize;
     let irr_bit = 1u32 << (vector % 32);
 
@@ -432,11 +339,8 @@ pub fn ioapic_deliver_irq<C: VmContext>(ctx: &mut C, irq: u8) {
     }
 }
 
-/// Handle external interrupt by briefly enabling interrupts.
-///
-/// This uses the SVM-style approach: enable interrupts to allow the pending
-/// interrupt to be delivered through the IDT, then disable interrupts before
-/// returning to re-enter the guest.
+/// Let a pending host interrupt be delivered through the IDT by briefly
+/// enabling interrupts.
 #[inline]
 pub fn handle_external_interrupt<K: Kernel>(kernel: &K) {
     let _irq_window = ReverseIrqGuard::new(kernel);

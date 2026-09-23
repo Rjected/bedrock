@@ -2,10 +2,8 @@
 
 //! File-transmission channel — the host half of the `HYPERCALL_FILE_FETCH` ABI.
 //!
-//! This is how the guest pulls workload files (its `compose.yaml` and
-//! `images.tar`) from the host at boot. The guest registers one large feedback
-//! buffer (1 MB) under
-//! [`FILE_XFER_BUFFER_ID`] and then drives a chunked transfer:
+//! The guest pulls workload files from the host at boot through one 1 MB
+//! feedback buffer registered under [`FILE_XFER_BUFFER_ID`]:
 //!
 //! 1. The guest writes a request header into the start of the buffer
 //!    (`offset`, `name_len`, then the file name) and issues
@@ -18,16 +16,14 @@
 //! 3. The guest reads `result` back out of the buffer, writes the bytes to its
 //!    local file, advances `offset`, and loops until `result == 0` (EOF).
 //!
-//! The hypervisor treats the buffer as opaque — it only advances RIP and exits
-//! to userspace — so this module is the single host-side definition of the
-//! framing. Keep it in sync with `guest/file-fetch.c`.
+//! The hypervisor treats the buffer as opaque; keep this framing in sync with
+//! `guest/file-fetch.c`.
 //!
 //! ## Determinism
 //!
-//! The bytes served are a pure function of the (fixed) host file, and the chunk
-//! boundaries are fixed by the buffer size, so the transfer is fully
-//! deterministic. It runs during the root VM's boot, before `HYPERCALL_READY`,
-//! so forked VMs inherit the already-populated filesystem and never re-fetch.
+//! Served bytes depend only on the host file and chunk boundaries only on the
+//! buffer size. Transfers happen before `HYPERCALL_READY`, so forks never
+//! re-fetch.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -36,44 +32,33 @@ use std::path::{Path, PathBuf};
 
 use crate::Vm;
 
-/// Identifier the guest registers its file-transfer buffer under
-/// (`HYPERCALL_REGISTER_FEEDBACK_BUFFER`). The host finds the buffer by this id.
+/// Feedback-buffer id of the guest's file-transfer buffer.
 pub const FILE_XFER_BUFFER_ID: &[u8] = b"bedrock-file-xfer";
 
-/// Bytes reserved at the start of the shared buffer for the request/response
-/// header. Data begins at this offset. The request header is
-/// `u64 offset | u32 name_len | u32 reserved`; the response header is
-/// `i64 result | u64 reserved`. Both are 16 bytes, and the file name (request)
-/// and data (response) follow it — the host fully consumes the request before
-/// writing the response, so the overlap is fine.
+/// Header size. Request: `u64 offset | u32 name_len | u32 reserved` + name;
+/// response: `i64 result | u64 reserved` + data. The response overwrites the
+/// request only after it is fully consumed.
 pub const FILE_XFER_HEADER_LEN: usize = 16;
 
 /// Response `result` sentinel: the requested file is unknown or unreadable.
 pub const FILE_XFER_RESULT_NOT_FOUND: i64 = -1;
 
-/// Serves host files into a guest's file-transfer buffer on demand.
-///
-/// Construct it with the set of files to expose (the name the guest asks for
-/// mapped to a host path), then call [`serve`](Self::serve) every time a
-/// [`ExitKind::FileFetch`](crate::ExitKind::FileFetch) exit occurs. Open file
-/// handles are cached across chunks so a multi-chunk transfer doesn't reopen
-/// the file each time.
+/// Serves host files into a guest's file-transfer buffer; call
+/// [`serve`](Self::serve) on every [`ExitKind::FileFetch`](crate::ExitKind::FileFetch).
 pub struct FileServer {
     files: HashMap<String, FileEntry>,
-    /// Cached feedback-buffer slot the guest registered the transfer buffer
-    /// under, resolved on first use (the registration happens during boot,
-    /// before the first fetch).
+    /// Resolved on first fetch.
     slot: Option<usize>,
 }
 
 struct FileEntry {
     path: PathBuf,
-    /// Lazily opened on first request and kept open for subsequent chunks.
+    /// Opened lazily, kept open across chunks.
     handle: Option<File>,
 }
 
 impl FileServer {
-    /// Build a server exposing `files` as `(guest_name, host_path)` pairs.
+    /// `files` are `(guest_name, host_path)` pairs.
     pub fn new<I, S, P>(files: I) -> Self
     where
         I: IntoIterator<Item = (S, P)>,
@@ -95,36 +80,22 @@ impl FileServer {
         Self { files, slot: None }
     }
 
-    /// Whether any files are exposed. An empty server still answers fetches —
-    /// every request is reported as not-found — which lets a caller wire the
-    /// handler unconditionally.
+    /// An empty server still answers every fetch with not-found.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
 
-    /// The guest names this server can satisfy.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
     }
 
-    /// Serve one [`ExitKind::FileFetch`](crate::ExitKind::FileFetch): read the
-    /// request framed in the guest's transfer buffer and overwrite it with the
-    /// next chunk of the requested file.
-    ///
-    /// Returns the number of data bytes written (0 at EOF). A request for an
-    /// unknown file writes the [`FILE_XFER_RESULT_NOT_FOUND`] sentinel into the
-    /// buffer and returns `Ok(0)` — the guest decides whether that is fatal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only for host-side failures that aren't expressible in
-    /// the buffer (no buffer registered, mapping failure, or a read error on a
-    /// file that *was* found). A missing file is not an error here.
+    /// Answer one fetch with the next chunk, returning its size (0 at EOF). An
+    /// unknown or unopenable file gets [`FILE_XFER_RESULT_NOT_FOUND`] and
+    /// `Ok(0)`; only host-side failures are errors.
     pub fn serve(&mut self, vm: &mut Vm) -> io::Result<usize> {
         let slot = self.resolve_slot(vm)?;
 
-        // Ensure the buffer is mapped read-write so the response lands in the
-        // guest's pages. Map it once; subsequent fetches reuse the mapping.
+        // Read-write so the response lands in the guest's pages.
         if vm.feedback_buffer_mut_at(slot).is_none() {
             vm.map_feedback_buffer_mut_at(slot)?;
         }
@@ -139,7 +110,6 @@ impl FileServer {
             ));
         }
 
-        // Parse the request header the guest wrote.
         let offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let name_len = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
         let data_cap = buf.len() - FILE_XFER_HEADER_LEN;
@@ -153,7 +123,6 @@ impl FileServer {
             String::from_utf8_lossy(&buf[FILE_XFER_HEADER_LEN..FILE_XFER_HEADER_LEN + name_len])
                 .into_owned();
 
-        // Look up the file. Unknown name → not-found sentinel, not an error.
         let Some(entry) = self.files.get_mut(&name) else {
             write_result(buf, FILE_XFER_RESULT_NOT_FOUND);
             return Ok(0);
@@ -179,8 +148,6 @@ impl FileServer {
         Ok(n)
     }
 
-    /// Resolve (and cache) the feedback-buffer slot the guest registered the
-    /// transfer buffer under.
     fn resolve_slot(&mut self, vm: &Vm) -> io::Result<usize> {
         if let Some(slot) = self.slot {
             return Ok(slot);
@@ -197,17 +164,14 @@ impl FileServer {
     }
 }
 
-/// Write the response `result` word into the buffer header and zero the rest of
-/// the header.
+/// Write the response header.
 fn write_result(buf: &mut [u8], result: i64) {
     buf[0..8].copy_from_slice(&result.to_le_bytes());
     buf[8..16].fill(0);
 }
 
-/// Read until `dst` is full or EOF, returning the number of bytes read. Unlike
-/// `Read::read`, this keeps reading across short reads so a chunk is filled to
-/// the buffer capacity whenever the file has that many bytes left — which keeps
-/// the chunk boundaries (and therefore the transfer) deterministic.
+/// Read until `dst` is full or EOF. Retrying short reads keeps chunk
+/// boundaries deterministic.
 fn read_up_to<R: Read>(r: &mut R, dst: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
     while filled < dst.len() {

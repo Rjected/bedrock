@@ -7,22 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::Condition;
 
-/// Source location of an assertion macro invocation, captured via
-/// [`file!`]/[`line!`]/[`column!`] at the call site.
+/// Call-site location of an assertion macro.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Location {
-    /// Source file path, as reported by [`file!`].
     pub file: String,
-    /// 1-based line number.
+    /// 1-based.
     pub line: u32,
-    /// 1-based column number.
+    /// 1-based.
     pub column: u32,
 }
 
 impl Location {
-    /// Build a [`Location`]. The macros pass [`file!`]/[`line!`]/[`column!`];
-    /// taking `impl Into<String>` keeps the `&'static str` → `String`
-    /// conversion inside this crate, so callers need nothing extra in scope.
     pub fn new(file: impl Into<String>, line: u32, column: u32) -> Self {
         Location {
             file: file.into(),
@@ -32,19 +27,14 @@ impl Location {
     }
 }
 
-/// The payload common to both [`Assertion`] variants: the condition, its
-/// evaluated result, the obligatory operator message, and the source location.
+/// The payload common to both [`Assertion`] variants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssertionData {
-    /// The condition that was evaluated.
     pub condition: Condition,
-    /// The boolean result of evaluating [`condition`](Self::condition),
-    /// computed once at construction time.
+    /// Evaluated once at construction.
     pub result: bool,
-    /// Operator-supplied message describing the asserted property. Required by
-    /// every construction macro.
+    /// Describes the asserted property.
     pub message: String,
-    /// Where the assertion macro was invoked.
     pub location: Location,
 }
 
@@ -59,19 +49,9 @@ impl AssertionData {
     }
 }
 
-/// A property checked about guest execution: a [`Condition`] plus its evaluated
-/// result, an obligatory message, and the source [`Location`] it was asserted
-/// at (all carried in [`AssertionData`]).
-///
-/// The variant determines how the result is interpreted across the (many) times
-/// an assertion of this kind is recorded:
-///
-/// - [`Assertion::Always`] — must hold on *every* evaluation; a single `false`
-///   result is a violation.
-/// - [`Assertion::Sometimes`] — must hold on *at least one* evaluation.
-///
-/// That per-variant semantic is resolved by a collector aggregating the records;
-/// a single record only carries its own [`result`](AssertionData::result).
+/// A property checked about guest execution. The variant says how a collector
+/// aggregates many records; each record only carries its own
+/// [`result`](AssertionData::result).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Assertion {
     /// The condition must hold every time the assertion is evaluated.
@@ -81,32 +61,25 @@ pub enum Assertion {
 }
 
 impl Assertion {
-    /// Create an [`Assertion::Always`] for `condition`, recording `message`,
-    /// `location`, and the evaluated result.
     pub fn always(condition: Condition, message: impl Into<String>, location: Location) -> Self {
         Assertion::Always(AssertionData::new(condition, message, location))
     }
 
-    /// Create an [`Assertion::Sometimes`] for `condition`, recording `message`,
-    /// `location`, and the evaluated result.
     pub fn sometimes(condition: Condition, message: impl Into<String>, location: Location) -> Self {
         Assertion::Sometimes(AssertionData::new(condition, message, location))
     }
 
-    /// The shared payload (condition, result, message, location).
     pub fn data(&self) -> &AssertionData {
         match self {
             Assertion::Always(data) | Assertion::Sometimes(data) => data,
         }
     }
 
-    /// The [`Condition`] recorded on this assertion.
     pub fn condition(&self) -> Condition {
         self.data().condition
     }
 
-    /// Whether the condition was satisfied for this evaluation — the stored
-    /// [`result`](AssertionData::result).
+    /// The stored [`result`](AssertionData::result).
     pub fn holds(&self) -> bool {
         self.data().result
     }

@@ -14,29 +14,22 @@ pub enum EptRemapError {
     NotMapped,
 }
 
-/// EPT page table structure.
-///
-/// Manages a 4-level EPT hierarchy (PML4 -> PDPT -> PD -> PT).
-/// Generic over the frame type to support different allocators.
-/// Frames are stored and freed automatically when EPT is dropped.
+/// 4-level EPT hierarchy (PML4 -> PDPT -> PD -> PT). Owns its frames, which
+/// are freed on drop.
 pub struct EptPageTable<Frame> {
     /// Host physical address of the PML4 table (used for EPTP).
     pml4_phys: HostPhysAddr,
-    /// All allocated EPT frames. Freed automatically on drop.
-    /// Uses vmalloc-backed allocation in kernel builds so the backing allocation
-    /// can fall back to vmalloc when kmalloc fails for large contiguous allocations.
+    /// All allocated EPT frames. vmalloc-backed in kernel builds since the list
+    /// can outgrow contiguous kmalloc.
     frames: EptVec<Frame>,
 }
 
 impl<Frame> EptPageTable<Frame> {
-    /// Create a new EPT page table structure.
-    ///
-    /// Allocates and zeroes the PML4 table.
+    /// Create an EPT with a zeroed PML4.
     pub fn new<A: FrameAllocator<Frame = Frame>>(allocator: &mut A) -> Result<Self, A::Error> {
         let pml4_frame = allocator.allocate_frame()?;
         let pml4_phys = A::frame_phys_addr(&pml4_frame);
 
-        // Zero out the PML4 table
         let pml4_virt = allocator.phys_to_virt(pml4_phys);
         // SAFETY: pml4_virt points to a freshly allocated 4KB-aligned frame, and we
         // zero the entire page to initialize the PML4 table entries.
@@ -49,22 +42,16 @@ impl<Frame> EptPageTable<Frame> {
         Ok(Self { pml4_phys, frames })
     }
 
-    /// Construct the EPTP value for use in VMCS.
-    ///
-    /// Uses write-back memory type and 4-level page walk.
+    /// EPTP value for the VMCS (write-back, 4-level walk).
     pub fn eptp(&self) -> u64 {
         let mem_type = 6u64; // WB
         let page_walk_len = 3u64; // 4 levels - 1
         self.pml4_phys.as_u64() | (page_walk_len << 3) | mem_type
     }
 
-    /// Look up the mapping for a guest physical address.
+    /// Host physical address and permissions for `gpa`, if mapped.
     ///
-    /// Returns the host physical address and permissions if the page is mapped,
-    /// or None if the page is not mapped.
-    ///
-    /// Note: This method only uses `phys_to_virt` from the allocator, so any
-    /// FrameAllocator that provides the same address translation will work.
+    /// Only uses the allocator's `phys_to_virt`.
     pub fn lookup<A: FrameAllocator>(
         &self,
         allocator: &A,
@@ -72,7 +59,6 @@ impl<Frame> EptPageTable<Frame> {
     ) -> Option<(HostPhysAddr, EptPermissions)> {
         let guest_virt = VirtAddr::new(guest_phys.as_u64());
 
-        // Walk the page table hierarchy
         let pml4 = allocator
             .phys_to_virt(self.pml4_phys)
             .cast::<EptEntry>()
@@ -131,7 +117,6 @@ impl<Frame> EptPageTable<Frame> {
     ) -> Result<(), A::Error> {
         let guest_virt = VirtAddr::new(guest_phys.as_u64());
 
-        // Walk/create the page table hierarchy
         let pml4_entry =
             self.get_or_create_entry(allocator, self.pml4_phys, guest_virt.pml4_index())?;
         let pdpt_phys = self.ensure_table(allocator, pml4_entry, perms)?;
@@ -142,7 +127,6 @@ impl<Frame> EptPageTable<Frame> {
         let pd_entry = self.get_or_create_entry(allocator, pd_phys, guest_virt.pd_index())?;
         let pt_phys = self.ensure_table(allocator, pd_entry, perms)?;
 
-        // Set the final PT entry
         let pt_entry = self.get_entry_mut(allocator, pt_phys, guest_virt.pt_index());
         // SAFETY: pt_entry points to a valid, aligned EptEntry within an allocated PT
         // page, obtained via get_entry_mut which ensures the pointer is in bounds.
@@ -153,15 +137,9 @@ impl<Frame> EptPageTable<Frame> {
         Ok(())
     }
 
-    /// Remap an existing 4KB page with new host physical address and/or permissions.
-    ///
-    /// This is used for copy-on-write: after copying a page, we remap the GPA
-    /// to point to the new page with RWX permissions.
-    ///
-    /// Returns an error if the page is not already mapped.
-    ///
-    /// Note: This method only uses `phys_to_virt` from the allocator, so any
-    /// FrameAllocator that provides the same address translation will work.
+    /// Change the HPA and/or permissions of an already-mapped 4KB page (used for
+    /// COW). Fails if the page is not mapped. Only uses the allocator's
+    /// `phys_to_virt`.
     pub fn remap_4k<A: FrameAllocator>(
         &mut self,
         allocator: &A,
@@ -172,7 +150,6 @@ impl<Frame> EptPageTable<Frame> {
     ) -> Result<(), EptRemapError> {
         let guest_virt = VirtAddr::new(guest_phys.as_u64());
 
-        // Walk the page table hierarchy (all levels must exist)
         let pml4 = allocator
             .phys_to_virt(self.pml4_phys)
             .cast::<EptEntry>()
@@ -214,12 +191,11 @@ impl<Frame> EptPageTable<Frame> {
             return Err(EptRemapError::NotMapped);
         }
 
-        // Update the leaf entry with new host physical and permissions
         *pte = EptEntry::page_entry_4k(new_host_phys, perms, mem_type);
         Ok(())
     }
 
-    // Helper: Get a mutable pointer to an entry
+    // Pointer to entry `index` of the table at `table_phys`.
     fn get_entry_mut<A: FrameAllocator<Frame = Frame>>(
         &self,
         allocator: &A,
@@ -232,7 +208,6 @@ impl<Frame> EptPageTable<Frame> {
         unsafe { table_virt.add(index) }
     }
 
-    // Helper: Get or create an entry, returning a mutable pointer
     fn get_or_create_entry<A: FrameAllocator<Frame = Frame>>(
         &self,
         allocator: &A,
@@ -242,7 +217,7 @@ impl<Frame> EptPageTable<Frame> {
         Ok(self.get_entry_mut(allocator, table_phys, index))
     }
 
-    // Helper: Ensure an entry points to a valid table, allocating if needed
+    // Return the table `entry` points to, allocating a zeroed one if absent.
     fn ensure_table<A: FrameAllocator<Frame = Frame>>(
         &mut self,
         allocator: &mut A,
@@ -256,11 +231,9 @@ impl<Frame> EptPageTable<Frame> {
         if current.is_present() {
             Ok(current.addr())
         } else {
-            // Allocate a new table
             let new_frame = allocator.allocate_frame()?;
             let new_phys = A::frame_phys_addr(&new_frame);
 
-            // Zero it out
             let table_virt = allocator.phys_to_virt(new_phys);
             // SAFETY: table_virt points to a freshly allocated 4KB-aligned frame, and
             // we zero the entire page to initialize all table entries.
@@ -268,14 +241,12 @@ impl<Frame> EptPageTable<Frame> {
                 core::ptr::write_bytes(table_virt, 0, 4096);
             }
 
-            // Set the entry to point to the new table
             // SAFETY: entry is a valid, aligned, writable pointer to an EptEntry
             // obtained from get_entry_mut. Writing the new table entry is safe.
             unsafe {
                 *entry = EptEntry::table_entry(new_phys, perms);
             }
 
-            // Store the frame so it gets freed when EPT is dropped
             ept_vec_push(&mut self.frames, new_frame);
 
             Ok(new_phys)
@@ -287,21 +258,14 @@ impl<Frame> EptPageTable<Frame> {
         self.frames.len()
     }
 
-    /// Clone this EPT for forking, changing all leaf permissions to READ_EXECUTE.
-    ///
-    /// This creates a deep copy of the EPT structure where:
-    /// - All intermediate tables (PML4, PDPT, PD) are newly allocated
-    /// - All leaf entries (PT) keep their host physical addresses but get R+X (no W)
-    ///
-    /// This enables copy-on-write: the forked VM can read all pages but writes
-    /// will cause EPT violations that trigger page copying.
+    /// Deep-copy this EPT for forking: new intermediate tables, leaves keep
+    /// their HPAs but become R+X so writes fault into COW handling.
     pub fn clone_for_fork<A: FrameAllocator<Frame = Frame>>(
         &self,
         allocator: &mut A,
     ) -> Result<Self, A::Error> {
         let mut frames = ept_vec_with_capacity(self.frames.len());
 
-        // Allocate new PML4
         let new_pml4_frame = allocator.allocate_frame()?;
         let new_pml4_phys = A::frame_phys_addr(&new_pml4_frame);
         let new_pml4_virt = allocator.phys_to_virt(new_pml4_phys);
@@ -319,7 +283,6 @@ impl<Frame> EptPageTable<Frame> {
             .cast_const();
         let dst_pml4 = new_pml4_virt.cast::<EptEntry>();
 
-        // Walk source PML4
         for pml4_idx in 0..512 {
             // SAFETY: src_pml4 points to a valid PML4 table and pml4_idx is in 0..511,
             // so the resulting pointer is within the 4KB page.
@@ -328,7 +291,6 @@ impl<Frame> EptPageTable<Frame> {
                 continue;
             }
 
-            // Allocate new PDPT
             let new_pdpt_frame = allocator.allocate_frame()?;
             let new_pdpt_phys = A::frame_phys_addr(&new_pdpt_frame);
             let new_pdpt_virt = allocator.phys_to_virt(new_pdpt_phys);
@@ -340,7 +302,7 @@ impl<Frame> EptPageTable<Frame> {
 
             ept_vec_push(&mut frames, new_pdpt_frame);
 
-            // Set PML4 entry pointing to new PDPT (same permissions as source)
+            // Same permissions as source.
             // SAFETY: dst_pml4 points to a valid PML4 table and pml4_idx is in 0..511,
             // so the write target is within the allocated page.
             unsafe {
@@ -354,7 +316,6 @@ impl<Frame> EptPageTable<Frame> {
                 .cast_const();
             let dst_pdpt = new_pdpt_virt.cast::<EptEntry>();
 
-            // Walk source PDPT
             for pdpt_idx in 0..512 {
                 // SAFETY: src_pdpt points to a valid PDPT table and pdpt_idx is in 0..511,
                 // so the resulting pointer is within the 4KB page.
@@ -363,7 +324,6 @@ impl<Frame> EptPageTable<Frame> {
                     continue;
                 }
 
-                // Allocate new PD
                 let new_pd_frame = allocator.allocate_frame()?;
                 let new_pd_phys = A::frame_phys_addr(&new_pd_frame);
                 let new_pd_virt = allocator.phys_to_virt(new_pd_phys);
@@ -375,7 +335,6 @@ impl<Frame> EptPageTable<Frame> {
 
                 ept_vec_push(&mut frames, new_pd_frame);
 
-                // Set PDPT entry pointing to new PD
                 // SAFETY: dst_pdpt points to a valid PDPT table and pdpt_idx is in
                 // 0..511, so the write target is within the allocated page.
                 unsafe {
@@ -389,7 +348,6 @@ impl<Frame> EptPageTable<Frame> {
                     .cast_const();
                 let dst_pd = new_pd_virt.cast::<EptEntry>();
 
-                // Walk source PD
                 for pd_idx in 0..512 {
                     // SAFETY: src_pd points to a valid PD table and pd_idx is in 0..511,
                     // so the resulting pointer is within the 4KB page.
@@ -398,7 +356,6 @@ impl<Frame> EptPageTable<Frame> {
                         continue;
                     }
 
-                    // Allocate new PT
                     let new_pt_frame = allocator.allocate_frame()?;
                     let new_pt_phys = A::frame_phys_addr(&new_pt_frame);
                     let new_pt_virt = allocator.phys_to_virt(new_pt_phys);
@@ -410,7 +367,6 @@ impl<Frame> EptPageTable<Frame> {
 
                     ept_vec_push(&mut frames, new_pt_frame);
 
-                    // Set PD entry pointing to new PT
                     // SAFETY: dst_pd points to a valid PD table and pd_idx is in 0..511,
                     // so the write target is within the allocated page.
                     unsafe {
@@ -424,7 +380,6 @@ impl<Frame> EptPageTable<Frame> {
                         .cast_const();
                     let dst_pt = new_pt_virt.cast::<EptEntry>();
 
-                    // Copy PT entries, changing permissions to READ_EXECUTE
                     for pt_idx in 0..512 {
                         // SAFETY: src_pt points to a valid PT table and pt_idx is in 0..511,
                         // so the resulting pointer is within the 4KB page.
@@ -433,9 +388,7 @@ impl<Frame> EptPageTable<Frame> {
                             continue;
                         }
 
-                        // Create new entry with same host physical but R+X (no W)
                         let host_phys = src_pte.addr();
-                        // Use WriteBack - the only memory type we currently support
                         let new_entry = EptEntry::page_entry_4k(
                             host_phys,
                             EptPermissions::READ_EXECUTE,

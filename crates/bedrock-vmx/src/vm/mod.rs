@@ -1,17 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! VM implementations for the hypervisor.
-//!
-//! This module provides concrete VM implementations:
-//!
-//! - [`RootVm`] - A root VM that owns guest memory directly
-//! - [`ForkedVm`] - A forked VM using copy-on-write memory sharing
-//!
-//! Both implement the [`VmContext`] trait for running guests and handling exits.
-//!
-//! # Fork Hierarchy
-//!
-//! VMs can be forked to create child VMs that share memory via copy-on-write:
+//! VM implementations: [`RootVm`] owns guest memory, [`ForkedVm`] shares its
+//! parent's memory copy-on-write. Both implement [`VmContext`].
 //!
 //! ```text
 //! RootVm (owns memory)
@@ -47,8 +37,7 @@ mod tests {
 
     const PAGE_SIZE: usize = 4096;
 
-    /// Mock guest memory for testing.
-    /// Uses contiguous virtual memory but simulates physical pages.
+    /// Mock guest memory: contiguous virtual memory posing as physical pages.
     struct MockGuestMemory {
         data: Vec<u8>,
     }
@@ -105,8 +94,6 @@ mod tests {
             let addr = page.physical_address().as_u64();
             *self.next_addr.borrow_mut() = addr + PAGE_SIZE as u64;
 
-            // We don't need to track frames here - MockPage's physical_address()
-            // returns its data pointer, so phys_to_virt can just cast back.
             Ok(page)
         }
 
@@ -115,8 +102,7 @@ mod tests {
         }
 
         fn phys_to_virt(&self, phys: HostPhysAddr) -> *mut u8 {
-            // MockPage's physical_address() returns the virtual address of its data,
-            // so we can just cast it back to a pointer.
+            // MockPage's physical_address() is its data pointer.
             phys.as_u64() as *mut u8
         }
     }
@@ -133,7 +119,6 @@ mod tests {
         let memory = MockGuestMemory::new(0x10000);
         let machine = MockMachine;
         let mut allocator = MockFrameAllocator::new();
-        // Use dummy exit handler address for tests
         let exit_handler_rip = 0xDEAD_BEEF_0000;
         let vm = RootVm::new(
             vmcs,
@@ -146,13 +131,10 @@ mod tests {
         )
         .expect("VM creation should succeed");
 
-        // GPRs should be zeroed
         assert_eq!(vm.state.gprs.rax, 0);
         assert_eq!(vm.state.gprs.rcx, 0);
         assert_eq!(vm.memory.size(), 0x10000);
-        // MSR bitmap should have a valid address
         assert_ne!(vm.state.msr_bitmap.physical_address().as_u64(), 0);
-        // Instruction count should be 0 for null counter
         assert_eq!(vm.state.last_instruction_count, 0);
     }
 
@@ -199,7 +181,6 @@ mod tests {
         )
         .expect("VM creation should succeed");
 
-        // Should be able to access VMCS through state
         let vmcs_ref = &vm.state.vmcs;
         vmcs_ref.set_field32(crate::VmcsField32::VmExitReason, 10);
         assert_eq!(
@@ -226,12 +207,10 @@ mod tests {
         )
         .expect("VM creation should succeed");
 
-        // Write some data
         let data = [0xDE, 0xAD, 0xBE, 0xEF];
         let result = vm.write_guest_memory(GuestPhysAddr::new(0x1000), &data);
         assert!(result.is_ok());
 
-        // Read it back
         let mut buf = [0u8; 4];
         let result = vm.read_guest_memory(GuestPhysAddr::new(0x1000), &mut buf);
         assert!(result.is_ok());
@@ -256,12 +235,10 @@ mod tests {
         )
         .expect("VM creation should succeed");
 
-        // Try to write past the end
         let data = [0u8; 4];
         let result = vm.write_guest_memory(GuestPhysAddr::new(0x1000), &data);
         assert!(matches!(result, Err(MemoryError::OutOfRange)));
 
-        // Try to read past the end
         let mut buf = [0u8; 4];
         let result = vm.read_guest_memory(GuestPhysAddr::new(0xFFF), &mut buf);
         assert!(matches!(result, Err(MemoryError::OutOfRange)));
@@ -285,12 +262,10 @@ mod tests {
         )
         .expect("VM creation should succeed");
 
-        // Write at the very end (last 4 bytes)
         let data = [0x11, 0x22, 0x33, 0x44];
         let result = vm.write_guest_memory(GuestPhysAddr::new(0xFFC), &data);
         assert!(result.is_ok());
 
-        // Read it back
         let mut buf = [0u8; 4];
         let result = vm.read_guest_memory(GuestPhysAddr::new(0xFFC), &mut buf);
         assert!(result.is_ok());
@@ -361,7 +336,6 @@ mod tests {
         let machine = MockMachine;
         let exit_handler_rip = 0xDEAD_BEEF_0000;
 
-        // Fork from root
         let forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -371,13 +345,10 @@ mod tests {
         )
         .expect("ForkedVm creation should succeed");
 
-        // ForkedVm should have no children
         assert_eq!(forked.children_count(), 0);
 
-        // ForkedVm should have empty COW pages
         assert!(forked.cow_pages.is_empty());
 
-        // Root should have 1 child
         assert_eq!(root.children_count(), 1);
     }
 
@@ -387,12 +358,10 @@ mod tests {
         let machine = MockMachine;
         let exit_handler_rip = 0xDEAD_BEEF_0000;
 
-        // Write data to root's memory
         let test_data = [0xDE, 0xAD, 0xBE, 0xEF];
         root.write_guest_memory(GuestPhysAddr::new(0x1000), &test_data)
             .expect("Write to root should succeed");
 
-        // Fork from root
         let forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -416,12 +385,10 @@ mod tests {
         let machine = MockMachine;
         let exit_handler_rip = 0xDEAD_BEEF_0000;
 
-        // Write data to root's memory
         let original_data = [0x11, 0x22, 0x33, 0x44];
         root.write_guest_memory(GuestPhysAddr::new(0x1000), &original_data)
             .expect("Write to root should succeed");
 
-        // Fork from root
         let mut forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -431,14 +398,11 @@ mod tests {
         )
         .expect("ForkedVm creation should succeed");
 
-        // No COW pages yet
         assert!(forked.cow_pages.is_empty());
 
-        // Trigger COW fault at page containing 0x1000
         let result = forked.handle_cow_fault(GuestPhysAddr::new(0x1000), &mut allocator);
         assert!(result.is_some());
 
-        // Now should have a COW page
         assert_eq!(forked.cow_pages.len(), 1);
 
         // Should be able to read the data (copied from parent)
@@ -455,12 +419,10 @@ mod tests {
         let machine = MockMachine;
         let exit_handler_rip = 0xDEAD_BEEF_0000;
 
-        // Write data to root's memory
         let original_data = [0xAA, 0xBB, 0xCC, 0xDD];
         root.write_guest_memory(GuestPhysAddr::new(0x2000), &original_data)
             .expect("Write to root should succeed");
 
-        // Fork from root
         let mut forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -500,12 +462,10 @@ mod tests {
         let machine = MockMachine;
         let exit_handler_rip = 0xDEAD_BEEF_0000;
 
-        // Write data to root
         let root_data = [0x10, 0x20, 0x30, 0x40];
         root.write_guest_memory(GuestPhysAddr::new(0x3000), &root_data)
             .expect("Write to root should succeed");
 
-        // First fork
         let mut fork1 = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -515,7 +475,6 @@ mod tests {
         )
         .expect("First fork should succeed");
 
-        // Modify page in fork1
         fork1
             .handle_cow_fault(GuestPhysAddr::new(0x3000), &mut allocator)
             .expect("COW fault in fork1 should succeed");
@@ -541,10 +500,8 @@ mod tests {
             .expect("Read from fork2 should succeed");
         assert_eq!(fork2_buf, fork1_data);
 
-        // fork1 should have 1 child
         assert_eq!(fork1.children_count(), 1);
 
-        // root should have 1 child (fork1)
         assert_eq!(root.children_count(), 1);
     }
 
@@ -580,7 +537,6 @@ mod tests {
             .write_guest_memory(GuestPhysAddr::new(0x0000), &modified)
             .expect("Write to fork1");
 
-        // Nested fork
         let fork2 = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &fork1,
             &machine,
@@ -612,7 +568,6 @@ mod tests {
 
         assert_eq!(root.children_count(), 0);
 
-        // Create first fork
         let fork1 = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -623,7 +578,6 @@ mod tests {
         .expect("Fork should succeed");
         assert_eq!(root.children_count(), 1);
 
-        // Create second fork
         let fork2 = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -634,11 +588,9 @@ mod tests {
         .expect("Fork should succeed");
         assert_eq!(root.children_count(), 2);
 
-        // Drop first fork
         drop(fork1);
         assert_eq!(root.children_count(), 1);
 
-        // Drop second fork
         drop(fork2);
         assert_eq!(root.children_count(), 0);
     }
@@ -649,12 +601,10 @@ mod tests {
         let machine = MockMachine;
         let exit_handler_rip = 0xDEAD_BEEF_0000;
 
-        // Set some state in root
         root.state.gprs.rax = 0x1234567890ABCDEF;
         root.state.gprs.rbx = 0xFEDCBA0987654321;
         root.state.emulated_tsc = 12345678;
 
-        // Fork
         let forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -664,7 +614,6 @@ mod tests {
         )
         .expect("Fork should succeed");
 
-        // Verify state was copied
         assert_eq!(forked.state.gprs.rax, 0x1234567890ABCDEF);
         assert_eq!(forked.state.gprs.rbx, 0xFEDCBA0987654321);
         assert_eq!(forked.state.emulated_tsc, 12345678);
@@ -678,7 +627,6 @@ mod tests {
 
         root.state.gprs.rax = 100;
 
-        // Fork
         let mut forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
             &root,
             &machine,
@@ -688,10 +636,8 @@ mod tests {
         )
         .expect("Fork should succeed");
 
-        // Modify forked state
         forked.state.gprs.rax = 200;
 
-        // Root should be unchanged
         assert_eq!(root.state.gprs.rax, 100);
         assert_eq!(forked.state.gprs.rax, 200);
     }

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Shared test mocks for bedrock crates.
-//!
-//! This module provides mock implementations of core traits for testing in userland.
-//! Available when the `test-utils` feature is enabled.
+//! Shared userland test mocks for bedrock crates (`test-utils` feature).
 
 extern crate std;
 
@@ -23,10 +20,6 @@ use crate::traits::{
     VmxBasic, VmxCapabilities, VmxCpu, VmxOnRegion, VmxoffError, VmxonError,
 };
 use crate::Vmx;
-
-// =============================================================================
-// Page Mock
-// =============================================================================
 
 /// A page backed by real memory for testing.
 pub struct MockPage {
@@ -69,10 +62,6 @@ impl Page for MockPage {
     }
 }
 
-// =============================================================================
-// Guest Memory Mock
-// =============================================================================
-
 /// Mock guest memory for testing - always fails allocation.
 pub struct MockGuestMemory;
 
@@ -89,10 +78,6 @@ impl GuestMemory for MockGuestMemory {
         None
     }
 }
-
-// =============================================================================
-// Kernel Mock
-// =============================================================================
 
 /// Mock Kernel for testing.
 pub struct MockKernel;
@@ -139,10 +124,6 @@ impl Kernel for MockKernel {
     }
 }
 
-// =============================================================================
-// MSR Access Mock
-// =============================================================================
-
 /// Mock MSR access for testing.
 pub struct MockMsrAccess;
 
@@ -155,10 +136,6 @@ impl MsrAccess for MockMsrAccess {
         Ok(())
     }
 }
-
-// =============================================================================
-// CR Access Mock
-// =============================================================================
 
 /// Mock CR access for testing.
 pub struct MockCrAccess;
@@ -188,10 +165,6 @@ impl CrAccess for MockCrAccess {
         Ok(())
     }
 }
-
-// =============================================================================
-// Descriptor Table Access Mock
-// =============================================================================
 
 /// Mock descriptor table access for testing.
 pub struct MockDescriptorTableAccess;
@@ -229,10 +202,6 @@ impl DescriptorTableAccess for MockDescriptorTableAccess {
     }
 }
 
-// =============================================================================
-// VMXON Region Mock
-// =============================================================================
-
 /// Mock VMXON region for testing.
 pub struct MockVmxOnRegion;
 
@@ -243,10 +212,6 @@ impl VmxOnRegion for MockVmxOnRegion {
         MockVmxOnRegion
     }
 }
-
-// =============================================================================
-// VmxCpu Mock
-// =============================================================================
 
 /// Mock VmxCpu for testing.
 pub struct MockVmxCpu {
@@ -304,10 +269,6 @@ impl VmxCpu for MockVmxCpu {
     fn set_vmxon_region(&self, _: Self::R) {}
 }
 
-// =============================================================================
-// VMX Mock
-// =============================================================================
-
 static MOCK_VCPU: MockVmxCpu = MockVmxCpu::new();
 
 static MOCK_BASIC_INFO: VmxBasic = VmxBasic {
@@ -359,10 +320,6 @@ impl Vmx for MockVmx {
     }
 }
 
-// =============================================================================
-// Machine Mock
-// =============================================================================
-
 /// Mock Machine for testing.
 pub struct MockMachine;
 
@@ -395,12 +352,7 @@ impl Machine for MockMachine {
     }
 }
 
-// =============================================================================
-// VMCS Mock
-// =============================================================================
-
-/// Mock VMCS implementation using HashMaps for field storage.
-/// Uses RefCell for interior mutability since the trait uses &self for writes.
+/// Mock VMCS backed by HashMaps; RefCell because the trait writes via &self.
 pub struct MockVmcs {
     fields16: RefCell<HashMap<u32, u16>>,
     fields32: RefCell<HashMap<u32, u32>>,
@@ -409,7 +361,6 @@ pub struct MockVmcs {
 }
 
 impl MockVmcs {
-    /// Create a new MockVmcs for testing.
     pub fn new() -> Self {
         Self {
             fields16: RefCell::new(HashMap::new()),
@@ -524,10 +475,6 @@ impl VirtualMachineControlStructure for MockVmcs {
         Self::new()
     }
 }
-
-// =============================================================================
-// Frame Allocator Mock
-// =============================================================================
 
 use crate::traits::CowAllocator;
 use bedrock_ept::FrameAllocator;

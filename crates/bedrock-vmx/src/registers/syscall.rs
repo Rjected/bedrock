@@ -47,9 +47,7 @@ impl Star {
     }
 }
 
-/// IA32_LSTAR - IA-32e Mode System Call Target Address.
-/// Contains the target RIP for SYSCALL in 64-bit mode.
-/// See Intel SDM Vol 4, page 2-86.
+/// IA32_LSTAR - SYSCALL target RIP in 64-bit mode (SDM Vol 4, p. 2-86).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Lstar(u64);
@@ -64,9 +62,7 @@ impl Lstar {
     }
 }
 
-/// IA32_CSTAR - Compatibility Mode System Call Target Address.
-/// Not used as SYSCALL is not recognized in compatibility mode.
-/// See Intel SDM Vol 4, page 2-87.
+/// IA32_CSTAR - compatibility-mode SYSCALL target; unused on Intel (SDM Vol 4, p. 2-87).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Cstar(u64);
@@ -81,15 +77,8 @@ impl Cstar {
     }
 }
 
-/// IA32_FMASK - System Call Flag Mask.
-/// On SYSCALL, RFLAGS is ANDed with the complement of this value:
-/// `RFLAGS := RFLAGS AND NOT(IA32_FMASK)`
-///
-/// This allows the kernel to automatically clear specific RFLAGS bits on
-/// system call entry. Common bits to mask include IF (interrupts), TF (tracing),
-/// DF (direction), and AC (alignment checking).
-///
-/// See Intel SDM Vol 4, page 2-87 and Vol 2B (SYSCALL instruction).
+/// IA32_FMASK - SYSCALL flag mask: `RFLAGS := RFLAGS AND NOT(IA32_FMASK)`.
+/// See Intel SDM Vol 4, page 2-87 and Vol 2B (SYSCALL).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Fmask(u64);
@@ -104,9 +93,7 @@ impl Fmask {
     }
 }
 
-/// IA32_MISC_ENABLE - Miscellaneous Enable Bits.
-/// Controls various processor features.
-/// See Intel SDM Vol 4, Table 2-2.
+/// IA32_MISC_ENABLE - Miscellaneous Enable Bits (SDM Vol 4, Table 2-2).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug)]
 pub struct MiscEnable(u64);
@@ -131,8 +118,7 @@ impl MiscEnable {
         self.0 &= !flag;
     }
 
-    /// Create a guest-safe value from host value.
-    /// Sets BTS/PEBS unavailable, clears MWAIT.
+    /// Guest-safe value from the host value: BTS/PEBS unavailable, MWAIT cleared.
     pub fn for_guest(host_value: u64) -> Self {
         let mut val = Self(host_value);
         val.set(Self::BTS_UNAVAILABLE | Self::PEBS_UNAVAILABLE);

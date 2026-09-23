@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Extended Page Tables (EPT) implementation for x86-64 virtualization.
-//!
-//! This crate provides a platform-agnostic EPT implementation using traits
-//! for memory allocation and physical address translation.
+//! Platform-agnostic Extended Page Tables (EPT), abstracted over frame
+//! allocation and address translation.
 
 #![no_std]
 

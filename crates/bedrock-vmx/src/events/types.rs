@@ -2,14 +2,11 @@
 
 //! Wire format for the unified event stream.
 //!
-//! The event buffer is fundamentally an append-only `[u8]` with a write cursor
-//! (`event_len`). The `repr(C)` types here are typed *lenses* over those bytes,
-//! not a separate encoded representation — the struct layout **is** the byte
-//! layout, so there is no serialize/decode step on the producer side.
+//! The event buffer is an append-only `[u8]` with a write cursor (`event_len`).
+//! The `repr(C)` types here are the byte layout; there is no encode step.
 //!
-//! Each record is a TLV (type-length-value): a fixed [`EventHeader`] immediately
-//! followed by `header.len` payload bytes, with the whole record padded up to an
-//! 8-byte boundary so the next header is naturally aligned.
+//! Each record is a fixed [`EventHeader`] followed by `header.len` payload
+//! bytes, padded to an 8-byte boundary so the next header is aligned.
 //!
 //! ```text
 //! offset O:            O + 32:                   O + 32 + len, padded to 8:
@@ -20,10 +17,8 @@
 //!
 //! # `repr(C)` discipline
 //!
-//! `repr(C)` does the right thing **only if implicit padding is eliminated**,
-//! because padding bytes are uninitialized — they would leak host memory to
-//! userspace and, worse, differ run-to-run, breaking the determinism comparison
-//! the feature exists for. The rules (mirroring `ExitRecord`):
+//! Implicit padding bytes are uninitialized: they would leak host memory and
+//! differ run-to-run, breaking determinism comparison. Rules (as `ExitRecord`):
 //!
 //! - Order fields large->small (`u64`s first) so no implicit padding is inserted.
 //! - Name every remaining gap as an explicit `_pad: [u8; N]` that is zeroed.
@@ -31,10 +26,8 @@
 //!   accidental padding at compile time.
 //! - Pad each *record* to an 8-byte boundary (`align_up(len, 8)`).
 //!
-//! These types compile under both the kernel-module build and the `cargo` build.
 //! The `zerocopy`/`serde` derives are `cfg`-gated to `cargo` so the kernel build
-//! (Rust-for-Linux Kbuild, `core`/`alloc`/`kernel` only) never sees a crates.io
-//! dependency.
+//! never sees a crates.io dependency.
 
 /// Size of the event buffer (1 MB).
 pub const EVENT_BUFFER_SIZE: usize = 1024 * 1024;
@@ -56,8 +49,7 @@ pub const fn align_up(n: usize, align: usize) -> usize {
     (n + align - 1) & !(align - 1)
 }
 
-/// Fixed prefix on every record. Generic time/order/filter fields live here;
-/// everything kind-specific lives in the payload. 32 bytes, no implicit padding.
+/// Fixed 32-byte prefix on every record; kind-specific data lives in the payload.
 #[cfg_attr(
     feature = "cargo",
     derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::KnownLayout)
@@ -68,13 +60,10 @@ pub struct EventHeader {
     /// Monotonic sequence number. Deterministic; breaks ties between records
     /// sharing a TSC and lets userspace detect a gap after a drain.
     pub seq: u64,
-    /// Emulated TSC at emit time — the stream's primary, DETERMINISTIC time axis
-    /// (advances at a fixed frequency from exit counts, not wall-clock time).
+    /// Emulated TSC at emit time — the stream's deterministic time axis.
     pub tsc: u64,
-    /// Host TSC (raw RDTSC) at emit time. NON-deterministic — for wall-clock and
-    /// performance correlation only. Excluded from run-vs-run comparison; never
-    /// order or key the stream on it. Kept last among the `u64`s so a comparator
-    /// can simply ignore the trailing 8 bytes of the fixed header region.
+    /// Host TSC at emit time. NON-deterministic; never order or key on it. Last
+    /// among the `u64`s so a comparator can skip it.
     pub real_tsc: u64,
     /// [`EventKind`] as `u16`.
     pub kind: u16,
@@ -85,33 +74,24 @@ pub struct EventHeader {
 }
 const _: () = assert!(core::mem::size_of::<EventHeader>() == EVENT_HEADER_SIZE);
 
-/// The kind of an event record. Stored in [`EventHeader::kind`] as a raw `u16`
-/// (so an unknown value read from the buffer never becomes an invalid enum
-/// discriminant — the reader matches on the `u16`).
+/// Kind of an event record. Stored in [`EventHeader::kind`] as a raw `u16` so
+/// an unknown value never becomes an invalid enum discriminant.
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EventKind {
-    /// A full VM-exit snapshot. Payload = the `ExitRecord` body,
-    /// sub-typed by `exit_reason`. Heavyweight; usually off except when
-    /// debugging.
+    /// Full VM-exit snapshot. Payload = the `ExitRecord` body. Heavyweight.
     Exit = 0,
     /// One guest console line (`HYPERCALL_SERIAL_WRITE`, or one accumulated
     /// early-boot line from `OUT 0x3F8`). Payload = raw bytes.
     Serial = 1,
-    /// An interrupt injected into the guest. Payload = [`InjectPayload`]. Timer
-    /// now; extensible to other emulated lines (serial THRE IRQ, etc.).
+    /// An interrupt injected into the guest. Payload = [`InjectPayload`].
     Inject = 2,
     /// A controlled-randomness value served to the guest. Payload =
-    /// [`RandomPayload`] (whose [`RandomSource`] says which channel: RDRAND,
-    /// RDSEED, or the `HYPERCALL_GET_RANDOM` `/dev/urandom` / `getrandom()`
-    /// chokepoint), optionally followed by the served byte buffer (GET_RANDOM
-    /// only; RDRAND/RDSEED carry their value inline in the payload). Its own
-    /// category so it can be captured on normal runs without enabling the
-    /// firehose `Exit` capture — it is a determinism *input*.
+    /// [`RandomPayload`], followed by the served bytes for `GetRandom`. Its own
+    /// category so this determinism input can be captured without `Exit`.
     Randomness = 3,
-    /// I/O channel transaction: request signaled + response delivered. Payload =
-    /// [`IoChannelPayload`]. Its own category for the same reason as
-    /// `Randomness`.
+    /// I/O channel transaction (request or response). Payload =
+    /// [`IoChannelPayload`].
     IoChannel = 4,
     /// Reserved (not yet emitted): structured hypervisor diagnostics. Payload =
     /// `{ level: u8, msg: [u8] }`. Always non-deterministic.
@@ -168,20 +148,17 @@ pub struct InjectPayload {
     pub vector: u8,
     /// [`InjectSource`] as `u8`.
     pub source: u8,
-    /// Explicit padding (zeroed) so the struct has no implicit padding.
+    /// Explicit padding (zeroed).
     #[cfg_attr(feature = "cargo", serde(skip))]
     pub _pad: [u8; 6],
-    /// The deterministic TSC this injection was scheduled for (APIC
-    /// `timer_deadline`). Pairing it with the header's actual `tsc` exposes
-    /// scheduled-vs-delivered drift — the key signal for interrupt-timing
-    /// divergence.
+    /// TSC this injection was scheduled for (APIC `timer_deadline`); compare
+    /// with the header `tsc` to see scheduled-vs-delivered drift.
     pub target_tsc: u64,
 }
 const _: () = assert!(core::mem::size_of::<InjectPayload>() == 16);
 
 impl InjectPayload {
-    /// View this fixed-size, no-padding `repr(C)` POD as bytes for
-    /// `event_append` (works in both builds; no `zerocopy` needed).
+    /// View as bytes for `event_append` (no `zerocopy` needed).
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: `InjectPayload` is `repr(C)` with no padding (size-asserted).
         unsafe {
@@ -193,10 +170,7 @@ impl InjectPayload {
     }
 }
 
-/// Which channel a controlled-randomness value was served on. All three are
-/// determinism *inputs* recorded on the unified [`EventKind::Randomness`]
-/// stream; the source lets a consumer tell them apart without separate event
-/// kinds.
+/// Which channel a controlled-randomness value was served on.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RandomSource {
@@ -204,9 +178,8 @@ pub enum RandomSource {
     Rdrand = 0,
     /// RDSEED instruction. Value carried inline in [`RandomPayload::value`].
     Rdseed = 1,
-    /// `HYPERCALL_GET_RANDOM` (the guest `/dev/urandom` / `getrandom()`
-    /// chokepoint). The served bytes follow the [`RandomPayload`] header and the
-    /// requesting process is in [`RandomPayload::pid`]; `value`/`width` are 0.
+    /// `HYPERCALL_GET_RANDOM`. Served bytes follow the [`RandomPayload`];
+    /// `value`/`width` are 0.
     GetRandom = 2,
 }
 
@@ -231,11 +204,9 @@ impl RandomSource {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct RandomPayload {
-    /// Value handed back to the guest for RDRAND/RDSEED. Unused (0) for
-    /// `GetRandom`, whose served bytes follow the header instead.
+    /// Value returned for RDRAND/RDSEED; 0 for `GetRandom`.
     pub value: u64,
-    /// Requesting process (`current->tgid`) for `GetRandom`. 0 for RDRAND/RDSEED
-    /// (served at an instruction exit with no process context).
+    /// Requesting process (`current->tgid`) for `GetRandom`; 0 otherwise.
     pub pid: u32,
     /// [`RandomSource`] as `u8`.
     pub source: u8,
@@ -248,8 +219,7 @@ pub struct RandomPayload {
 const _: () = assert!(core::mem::size_of::<RandomPayload>() == 16);
 
 impl RandomPayload {
-    /// View this fixed-size, no-padding `repr(C)` POD as bytes for
-    /// `event_append`.
+    /// View as bytes for `event_append`.
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: `RandomPayload` is `repr(C)` with no padding (size-asserted).
         unsafe {
@@ -273,12 +243,8 @@ pub enum IoChannelPhase {
 
 /// Fixed metadata prefix of an [`EventKind::IoChannel`] record.
 ///
-/// The record's payload is this 16-byte struct followed by the transaction's
-/// actual bytes (the request envelope, or the response header) — read the tail
-/// as `payload[size_of::<IoChannelPayload>()..]`. The hypervisor treats the
-/// channel bytes as opaque, so the per-transaction details (target, command,
-/// status, exit code, …) are decoded from the tail by the userspace reader, not
-/// carried here.
+/// Followed by the transaction's raw bytes (request envelope or response
+/// header), which the hypervisor treats as opaque; userspace decodes them.
 #[cfg_attr(
     feature = "cargo",
     derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::KnownLayout)
@@ -298,8 +264,7 @@ pub struct IoChannelPayload {
 const _: () = assert!(core::mem::size_of::<IoChannelPayload>() == 16);
 
 impl IoChannelPayload {
-    /// View this fixed-size, no-padding `repr(C)` POD as bytes for
-    /// `event_append`.
+    /// View as bytes for `event_append`.
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: `IoChannelPayload` is `repr(C)` with no padding (size-asserted).
         unsafe {
@@ -314,8 +279,7 @@ impl IoChannelPayload {
 /// Userspace include/exclude mask (set via ioctl). Filtering happens at emit
 /// time, so a disabled category costs a single bit test.
 ///
-/// Hand-rolled following the `EXIT_RECORD_FLAG_*` convention — `bitflags`
-/// is a crates.io dependency and unavailable in the kernel build.
+/// Hand-rolled: `bitflags` is unavailable in the kernel build.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct EventCategories(pub u32);

@@ -15,40 +15,28 @@ use crate::prelude::*;
 /// Maximum feedback buffer size (1 MB = 256 pages).
 const MAX_FEEDBACK_BUFFER_SIZE: u64 = FEEDBACK_BUFFER_MAX_PAGES as u64 * 4096;
 
-/// Distinct RAX error codes for `HYPERCALL_REGISTER_FEEDBACK_BUFFER`, so guest
-/// callers can tell *why* a registration was rejected instead of seeing one
-/// opaque sentinel. Mirrored in `guest/libvmcall.h` as `VMCALL_FB_ERR_*`.
+/// RAX error codes for `HYPERCALL_REGISTER_FEEDBACK_BUFFER`, mirrored in
+/// `guest/libvmcall.h` as `VMCALL_FB_ERR_*`. Success returns the slot index,
+/// which can't realistically collide with these.
 ///
-/// Success returns the assigned slot index (the buffer's position in the
-/// unbounded feedback-buffer vector), which can't collide with these: a
-/// realistic slot count is tiny next to `u64::MAX`. The
-/// `_NOT_RESIDENT` codes mean the guest passed a pointer whose page isn't
-/// faulted in — the hypervisor translates by walking the guest page tables and
-/// can't fault a page in on the guest's behalf, so the caller must touch (and,
-/// for the buffer, pin) the memory first.
+/// `_NOT_RESIDENT` means the page isn't faulted in: the hypervisor walks guest
+/// page tables and can't fault pages in, so the caller must touch (and, for
+/// the buffer, pin) the memory first.
 pub const FB_ERR_BAD_SIZE: u64 = u64::MAX; // size 0 or > MAX_FEEDBACK_BUFFER_SIZE
 pub const FB_ERR_BAD_ID_LEN: u64 = u64::MAX - 1; // id length 0 or > max
 pub const FB_ERR_ID_NOT_RESIDENT: u64 = u64::MAX - 2; // id page not present
 pub const FB_ERR_BUFFER_NOT_RESIDENT: u64 = u64::MAX - 3; // buffer page(s) not present
 pub const FB_ERR_NO_SLOTS: u64 = u64::MAX - 4; // failed to allocate a new slot (ENOMEM)
 
-/// Chunk size used to stage I/O channel bytes through a small stack buffer
-/// when crossing the VmState ↔ guest-memory borrow boundary.
+/// Chunk size for staging I/O channel bytes through a stack buffer.
 ///
-/// `read_guest_memory` borrows the `VmContext` immutably and
-/// `write_guest_memory` borrows it mutably, so we can't hand out a `&[u8]`
-/// directly out of `VmState.io_channel.{request,response}_buf` to either
-/// call — the read-then-write would overlap the borrow. A page-sized stack
-/// staging buffer (4KB) would also exceed the kernel's 8KB stack budget
-/// once combined with the rest of the VMCALL frame, so we chunk: 256 bytes
-/// is small enough to keep the stack frame quiet while still amortising the
-/// per-call overhead of the guest memory accessors.
+/// A slice of `VmState.io_channel` can't be passed to the guest memory
+/// accessors directly (the borrows overlap), and a 4KB staging buffer would
+/// blow the 8KB kernel stack budget, so copies go through 256-byte chunks.
 const IO_COPY_CHUNK: usize = 256;
 
-/// Copy a slice from `VmState.io_channel.request_buf` into guest memory at
-/// the given GPA. Chunks through `IO_COPY_CHUNK` to keep the stack frame
-/// small and to break the (&VmState, &mut VmState) borrow conflict between
-/// reading the source slice and calling `write_guest_memory`.
+/// Copy `VmState.io_channel.request_buf` into guest memory at `gpa`, chunked
+/// through `IO_COPY_CHUNK`.
 fn copy_request_to_guest<C: VmContext>(
     ctx: &mut C,
     gpa: GuestPhysAddr,
@@ -66,9 +54,8 @@ fn copy_request_to_guest<C: VmContext>(
     Ok(())
 }
 
-/// Read up to `len` bytes from guest memory at `gva` into `dst`. Walks the
-/// range one page at a time so the read may straddle a page boundary.
-/// `len` must be `<= dst.len()`.
+/// Read `len` bytes (`<= dst.len()`) from guest memory at `gva` into `dst`,
+/// page by page so the read may straddle a page boundary.
 fn read_guest_id<C: VmContext>(ctx: &C, gva: u64, len: usize, dst: &mut [u8]) -> Result<(), ()> {
     debug_assert!(len <= dst.len());
     let mut offset = 0usize;
@@ -103,11 +90,9 @@ fn copy_response_from_guest<C: VmContext>(
     Ok(())
 }
 
-/// Copy `len` bytes out of the registered serial-console page (at `gpa`) into
-/// `VmState.serial_console.pending_buf`, from where the caller emits them as one
-/// `Serial` event (`event_emit_console`). Chunked through a small stack buffer
-/// for the same borrow/stack reasons as `copy_response_from_guest`. `len` must
-/// be `<= SERIAL_CONSOLE_PAGE_SIZE`, which is the capacity of `pending_buf`.
+/// Copy `len` (`<= SERIAL_CONSOLE_PAGE_SIZE`) bytes from the serial-console
+/// page at `gpa` into `VmState.serial_console.pending_buf`. Chunked like
+/// `copy_request_to_guest`.
 fn copy_serial_console_from_guest<C: VmContext>(
     ctx: &mut C,
     gpa: GuestPhysAddr,
@@ -127,20 +112,16 @@ fn copy_serial_console_from_guest<C: VmContext>(
 
 /// Outcome of a failed guest-memory write from a hypercall handler.
 enum WriteGuest {
-    /// A COW page could not be allocated — caller should surface
-    /// `PoolExhausted` and retry the VMCALL once the pool is refilled.
+    /// COW page allocation failed; surface `PoolExhausted` and retry the VMCALL.
     Pool,
     /// GVA translation or the write itself failed.
     Fault,
 }
 
-/// Ensure every guest page touched by `[gva, gva+len)` is writable from the
-/// hypervisor on a forked VM. A hypervisor-side write generates no EPT
-/// violation, so the lazy COW-on-write path never fires (the same reason
-/// `pre_cow_io_channel_page` exists). We proactively COW each page here, before
-/// any bytes are produced, so a pool-exhaustion retry never double-advances a
-/// PRNG or re-consumes input. No-op for root VMs (their EPT already maps
-/// writable host memory).
+/// COW every page in `[gva, gva+len)` on a forked VM so hypervisor-side writes
+/// land in the fork's copy; such writes raise no EPT violation, so lazy COW
+/// never fires. Done before any bytes are produced so a pool-exhaustion retry
+/// never double-advances a PRNG or re-consumes input. No-op for root VMs.
 fn ensure_guest_writable<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &mut A,
@@ -164,9 +145,8 @@ fn ensure_guest_writable<C: VmContext, A: CowAllocator<C::CowPage>>(
     Ok(())
 }
 
-/// Write `src` into guest memory at `gva`, one page at a time so the write may
-/// straddle page boundaries. The destination pages must already be writable
-/// (see [`ensure_guest_writable`]).
+/// Write `src` to guest memory at `gva`, page by page. The pages must already
+/// be writable (see [`ensure_guest_writable`]).
 fn write_guest_bytes<C: VmContext>(ctx: &mut C, gva: u64, src: &[u8]) -> Result<(), WriteGuest> {
     let mut offset = 0usize;
     while offset < src.len() {
@@ -181,11 +161,8 @@ fn write_guest_bytes<C: VmContext>(ctx: &mut C, gva: u64, src: &[u8]) -> Result<
     Ok(())
 }
 
-/// Record a served `HYPERCALL_GET_RANDOM` request on the unified randomness
-/// event stream: a [`RandomPayload`] with `source = GetRandom` and the
-/// requesting PID, followed by the bytes handed to the guest. This is the same
-/// emit path RDRAND/RDSEED use ([`emit_randomness_event`]) — only the source and
-/// the trailing bytes differ.
+/// Record a served `HYPERCALL_GET_RANDOM` on the randomness event stream
+/// (`source = GetRandom`, requesting PID, then the bytes handed to the guest).
 fn emit_get_random_event<C: VmContext>(ctx: &mut C, pid: u32, bytes: &[u8]) {
     let payload = RandomPayload {
         pid,
@@ -204,11 +181,8 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
 
     match hypercall_nr {
         HYPERCALL_SHUTDOWN => {
-            // Log shutdown state if AtShutdown mode is enabled
             ctx.state_mut().capture_exit_at_shutdown();
-            // Event stream: flush any final non-newline-terminated early-boot
-            // line so it is not lost at shutdown (rare — the kernel
-            // newline-terminates records). No-op if the accumulator is empty.
+            // Flush any final unterminated early-boot serial line.
             let _ = ctx.state_mut().event_flush_serial_line();
 
             if let Err(e) = advance_rip(ctx) {
@@ -217,7 +191,6 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallShutdown)
         }
         HYPERCALL_SNAPSHOT => {
-            // Log snapshot state (if logging is enabled)
             ctx.state_mut().capture_exit_at_snapshot();
 
             if let Err(e) = advance_rip(ctx) {
@@ -238,14 +211,11 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             //   RDX = id GVA (pointer to identifier bytes in guest memory)
             //   RSI = id length (1..=FEEDBACK_BUFFER_ID_MAX_LEN)
             //
-            // Return (RAX):
-            //   on success — slot index that was assigned (its position in the buffer list)
-            //   on failure — u64::MAX
+            // Return (RAX): assigned slot index, or an `FB_ERR_*` code.
             //
-            // IDs are not required to be unique: two registrations with the
-            // same id represent two instances of the same domain (typically
-            // two processes running the same binary) and are merged by the
-            // host at read time. A fresh slot is allocated for each call.
+            // IDs need not be unique: same-id registrations (e.g. two
+            // processes of one binary) get separate slots and are merged by
+            // the host at read time.
             let gva = ctx.state().gprs.rbx;
             let size = ctx.state().gprs.rcx;
             let id_gva = ctx.state().gprs.rdx;
@@ -276,8 +246,6 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 return ExitHandlerResult::Continue;
             }
 
-            // Read the identifier bytes out of guest memory. May straddle a
-            // page boundary; the loop walks one page at a time.
             let mut id_bytes = [0u8; FEEDBACK_BUFFER_ID_MAX_LEN];
             if let Err(()) = read_guest_id(ctx, id_gva, id_len, &mut id_bytes) {
                 log_err!(
@@ -308,15 +276,9 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 }
             };
 
-            // Registration is append-only and the buffer count is unbounded:
-            // build the entry and push it onto the heap-growable vector. Its
-            // assigned slot index is simply its position in the vector.
-            // Duplicate ids are intentionally allowed.
-            //
-            // Only the buffer's GPAs are recorded here. For a forked VM the
-            // pages are copied-on-write lazily through the normal EPT
-            // write-fault path when the guest writes them; no copy is made at
-            // registration.
+            // Append-only; the slot index is the position in the vector. Only
+            // GPAs are recorded: on a fork the pages are COW'd lazily through
+            // the normal EPT write-fault path.
             let info = FeedbackBufferInfo {
                 gva,
                 size,
@@ -364,19 +326,13 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
             }
-            // Exit to userspace so it can sync any per-VM bookkeeping (e.g.,
-            // record that precise exits are now usable for this VM).
+            // Exit so userspace can record that precise exits are now usable.
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallPebsPage)
         }
         HYPERCALL_FILE_FETCH => {
-            // The guest has framed a file-fetch request (offset + name) into
-            // the start of the registered `bedrock-file-xfer` feedback buffer
-            // and wants the next chunk. The hypervisor owns none of this: the
-            // host driver reads the request out of the (host-mapped) buffer,
-            // reads the file chunk, and overwrites the buffer with the response
-            // before the next RUN. We only advance RIP and exit to userspace.
-            // RAX is set to 0; the meaningful result (chunk length / EOF / error)
-            // is delivered in the buffer's response header, not in a register.
+            // The request (offset + name) and response live in the
+            // `bedrock-file-xfer` feedback buffer and are handled entirely by
+            // the host driver; the result is in the buffer's response header.
             ctx.state_mut().gprs.rax = 0;
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
@@ -384,10 +340,8 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFileFetch)
         }
         HYPERCALL_FILE_STORE => {
-            // The guest has sent a chunk of a guest file (name + chunk) into
-            // the registered `bedrock-file-store` feedback buffer. The host
-            // will read the chunk and respond (via the buffer) with how many
-            // bytes it read. Set RAX to 0, advance RIP, and exit to userspace.
+            // The chunk (name + data) and the host's reply live in the
+            // `bedrock-file-store` feedback buffer.
             ctx.state_mut().gprs.rax = 0;
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
@@ -395,11 +349,9 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallFileStore)
         }
         HYPERCALL_IO_REGISTER_PAGE => {
-            // RBX = guest virtual address of the shared 4KB page.
-            // Must be 4KB-aligned; the GPA is what we record because the
-            // guest's view of its own virtual address can drift across CR3
-            // changes but the underlying GPA is stable (the module pins the
-            // page in the kernel's direct map, which never migrates).
+            // RBX = 4KB-aligned GVA of the shared page. The GPA is recorded
+            // since it is stable across CR3 changes (the module pins the page
+            // in the kernel direct map).
             let page_va = ctx.state().gprs.rbx;
             let result: u64 = if page_va & 0xFFF != 0 {
                 log_err!(
@@ -412,23 +364,15 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                     Ok(gpa) => {
                         let gpa = gpa.as_u64();
                         ctx.state_mut().io_channel.page_gpa = gpa;
-                        // The pending FIFO and the in-flight slot belong to
-                        // the host's queue, not to a particular module
-                        // instance — leave `request_len` /
-                        // `request_target_tsc` / `pending` alone so a request
-                        // queued before the guest first loaded the module
-                        // (e.g. an `--io-action` on the CLI of a cold root
-                        // VM) survives registration. We *do* reset
-                        // `request_delivered` and `response_len`: if a
-                        // previous module instance took the IRQ but didn't
-                        // finish GET_REQUEST/PUT_RESPONSE, the new instance
-                        // needs the IRQ re-fired and any stale response
-                        // bytes dropped.
+                        // Keep `request_len`/`request_target_tsc`/`pending`
+                        // (they belong to the host queue, so requests queued
+                        // before the module loaded survive). Reset
+                        // `request_delivered`/`response_len` so a previous
+                        // module instance's unfinished IRQ is re-fired and
+                        // stale response bytes dropped.
                         ctx.state_mut().io_channel.request_delivered = false;
                         ctx.state_mut().io_channel.response_len = 0;
-                        // Pre-CoW the page so subsequent GET_REQUEST writes
-                        // succeed when running under a forked VM. No-op for
-                        // root VMs.
+                        // So GET_REQUEST's host-side writes hit the fork's copy.
                         ctx.pre_cow_io_channel_page(allocator);
                         log_info!(
                             "HYPERCALL_IO_REGISTER_PAGE: gva={:#x} gpa={:#x}\n",
@@ -450,27 +394,17 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
             }
-            // Userspace is notified that the channel is now live (so e.g.
-            // queued I/O actions can start flowing) but doesn't need to do
-            // anything synchronous — the exit reason is mapped to
-            // `ExitKind::Continue` in the userspace dispatcher.
+            // Notifies userspace the channel is live; it maps this to
+            // `ExitKind::Continue`.
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallIoRegisterPage)
         }
         HYPERCALL_IO_GET_REQUEST => {
-            // Guest's workqueue has woken up after the I/O channel IRQ and
-            // is asking for the request bytes. Copy from VmState into the
-            // registered shared page; return the byte count in RAX. 0 means
-            // "spurious IRQ / no request pending" (the guest module should
-            // treat that as a no-op). !0 means "no page registered yet" or
-            // "guest memory access failed".
+            // Copy the request into the shared page. RAX = byte count, 0 if
+            // no request is pending (spurious IRQ), !0 on no page / fault.
             //
-            // After a successful copy, the in-flight slot is consumed:
-            // request_len drops to 0, the slot's freshly free, and we
-            // promote the next pending request from the queue so the
-            // hypervisor can fire the next IRQ on the very next
-            // `inject_pending_interrupt` (no waiting for the guest worker
-            // to finish and call `HYPERCALL_IO_PUT_RESPONSE`). This is
-            // what lets multiple long-running guest commands overlap.
+            // A successful copy consumes the in-flight slot and promotes the
+            // next pending request, so the next IRQ can fire without waiting
+            // for PUT_RESPONSE; this lets long-running guest commands overlap.
             let page_gpa = ctx.state().io_channel.page_gpa;
             let request_len = ctx.state().io_channel.request_len;
             let result: u64 = if page_gpa == 0 {
@@ -505,11 +439,8 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             ExitHandlerResult::Continue
         }
         HYPERCALL_IO_PUT_RESPONSE => {
-            // RBX = response length in bytes (clamped to IO_CHANNEL_BUF_SIZE).
-            // The in-flight slot was already consumed by GET_REQUEST and the
-            // next pending request may already be promoted by the time a
-            // worker calls PUT_RESPONSE — so this handler is purely about
-            // capturing the response bytes and exiting to userspace.
+            // RBX = response length (clamped to IO_CHANNEL_BUF_SIZE). The slot
+            // was already consumed by GET_REQUEST; this only captures bytes.
             let response_len = (ctx.state().gprs.rbx as usize).min(IO_CHANNEL_BUF_SIZE);
             let page_gpa = ctx.state().io_channel.page_gpa;
             let result: u64 = if page_gpa == 0 {
@@ -540,15 +471,9 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
             }
-            // Record the response delivery on the event stream: the metadata
-            // followed by the actual response bytes (just copied into
-            // `io_channel.response_buf`). Those bytes are host-derived, so the
-            // record clears the deterministic flag (handled in
-            // `event_emit_io_channel`). `status`/`exit_code` are 0 — the
-            // hypervisor treats the response as opaque bytes — and `target_tsc`
-            // is 0 on a response. The event buffer is drained by userspace on
-            // this VmcallIoResponse exit; a pending record (if the buffer filled)
-            // re-appends on the next RUN.
+            // Record the response on the event stream. The bytes are
+            // host-derived, so `event_emit_io_channel` clears the
+            // deterministic flag.
             if result == 0 {
                 let payload = IoChannelPayload {
                     phase: IoChannelPhase::Response as u8,
@@ -557,16 +482,11 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 };
                 let _ = ctx.state_mut().event_emit_io_channel(&payload);
             }
-            // Userspace drains the response via ioctl on this exit.
             ExitHandlerResult::ExitToUserspace(ExitReason::VmcallIoResponse)
         }
         HYPERCALL_SERIAL_REGISTER_PAGE => {
-            // RBX = guest virtual address of the shared 4KB console page.
-            // Mirror HYPERCALL_IO_REGISTER_PAGE: require 4KB alignment and
-            // record the GPA (stable across guest CR3 changes — the module
-            // pins the page in the kernel direct map). The host only ever
-            // *reads* this page (in HYPERCALL_SERIAL_WRITE), so unlike the
-            // I/O channel there is no host write that would need pre-CoW.
+            // RBX = 4KB-aligned GVA of the console page; GPA recorded as in
+            // HYPERCALL_IO_REGISTER_PAGE. The host only reads it, so no pre-CoW.
             let page_va = ctx.state().gprs.rbx;
             let result: u64 = if page_va & 0xFFF != 0 {
                 log_err!(
@@ -599,15 +519,11 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
             }
-            // Purely host-internal registration — nothing for userspace to do.
             ExitHandlerResult::Continue
         }
         HYPERCALL_SERIAL_WRITE => {
-            // RBX = number of bytes at the start of the registered console page
-            // to emit (clamped to PAGE_SIZE). Copy them into the host pending
-            // buffer and emit them as one `Serial` event. RIP is advanced
-            // exactly once so the VMCALL is counted a single time (no
-            // non-deterministic double-counting on resume).
+            // RBX = bytes at the start of the console page to emit (clamped),
+            // emitted as one `Serial` event.
             let len = (ctx.state().gprs.rbx as usize).min(SERIAL_CONSOLE_PAGE_SIZE);
             let page_gpa = ctx.state().serial_console.page_gpa;
             let result: u64 = if page_gpa == 0 {
@@ -631,12 +547,9 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 return ExitHandlerResult::Error(e);
             }
             if result == 0 {
-                // Emit this console record as one Serial event. First flush any
-                // residual early-boot line accumulator (cheap insurance — empty
-                // by construction at a clean handover) so a partial byte-path
-                // line never merges with a hypercall line. A full event buffer
-                // is handled centrally by the dispatcher (`event_buffer_full` ->
-                // drain), so the returns are ignored.
+                // Flush any partial early-boot line first so it never merges
+                // with this record. A full event buffer is handled by the
+                // dispatcher, so the returns are ignored.
                 let _ = ctx.state_mut().event_flush_serial_line();
                 let _ = ctx.state_mut().event_emit_console(len);
             }
@@ -649,12 +562,10 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
             //   RDX = PID (current->tgid) of the requesting process
             // Return (RAX): bytes written, or !0 on failure.
             //
-            // The single chokepoint behind the guest's /dev/urandom,
-            // /dev/random and getrandom(). Mirrors the RDRAND device's two
-            // modes (configured together): SeededRng fills from a deterministic
-            // in-VM PRNG with no userspace round-trip; ExitToUserspace records
-            // the request, exits so the fuzzer can stage the exact reply bytes
-            // (surfacing the request's size + PID), then writes them on re-entry.
+            // Backs the guest's /dev/{u,}random and getrandom(). Uses the
+            // RDRAND device's mode: SeededRng fills from the in-VM PRNG;
+            // ExitToUserspace exits so the fuzzer can stage reply bytes, then
+            // writes them on re-entry.
             let buf_gva = ctx.state().gprs.rbx;
             let req_len = ctx.state().gprs.rcx;
             let pid = ctx.state().gprs.rdx;
@@ -701,9 +612,8 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 }
                 RdrandMode::ExitToUserspace => {
                     if ctx.state().devices.random.needs_get_random_exit() {
-                        // First entry: record the request and hand it to
-                        // userspace. Don't advance RIP — we re-execute the
-                        // VMCALL once the reply bytes are staged.
+                        // First entry: don't advance RIP; the VMCALL re-executes
+                        // once the reply bytes are staged.
                         ctx.state_mut()
                             .devices
                             .random
@@ -751,9 +661,6 @@ pub fn handle_vmcall<C: VmContext, A: CowAllocator<C::CowPage>>(
                 }
             }
         }
-        _ => {
-            // Unknown hypercall - exit to userspace with generic Vmcall reason
-            ExitHandlerResult::ExitToUserspace(ExitReason::Vmcall)
-        }
+        _ => ExitHandlerResult::ExitToUserspace(ExitReason::Vmcall),
     }
 }

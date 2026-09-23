@@ -9,11 +9,7 @@ pub const EXIT_RECORD_SIZE: usize = 512;
 pub const EXIT_RECORD_FLAG_DETERMINISTIC: u32 = 1;
 
 /// The payload of an `EventKind::Exit` event: a 512-byte snapshot of one VM
-/// exit. Fixed-size with all fields aligned for efficient access.
-///
-/// The `cargo`-gated `zerocopy`/`serde` derives let the userspace reader cast
-/// and serialize it; the kernel-module build (Kbuild, not Cargo) never sees
-/// those derives.
+/// exit.
 #[cfg_attr(
     feature = "cargo",
     derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::KnownLayout)
@@ -33,41 +29,23 @@ pub struct ExitRecord {
     pub exit_qualification: u64,
 
     // Guest registers (144 bytes)
-    /// RAX register.
     pub rax: u64,
-    /// RCX register.
     pub rcx: u64,
-    /// RDX register.
     pub rdx: u64,
-    /// RBX register.
     pub rbx: u64,
-    /// RSP register.
     pub rsp: u64,
-    /// RBP register.
     pub rbp: u64,
-    /// RSI register.
     pub rsi: u64,
-    /// RDI register.
     pub rdi: u64,
-    /// R8 register.
     pub r8: u64,
-    /// R9 register.
     pub r9: u64,
-    /// R10 register.
     pub r10: u64,
-    /// R11 register.
     pub r11: u64,
-    /// R12 register.
     pub r12: u64,
-    /// R13 register.
     pub r13: u64,
-    /// R14 register.
     pub r14: u64,
-    /// R15 register.
     pub r15: u64,
-    /// RIP (instruction pointer).
     pub rip: u64,
-    /// RFLAGS register.
     pub rflags: u64,
 
     // Device state hashes (56 bytes)
@@ -110,28 +88,20 @@ pub struct ExitRecord {
     /// Number of COW pages at time of exit.
     pub cow_page_count: u32,
 
-    /// Skid of a PEBS-induced EPT-violation exit, in TSC ticks
-    /// (= retired guest instructions) past the PEBS firing target
-    /// (`target_tsc - PEBS_MARGIN`). Non-zero only on EPT_VIOLATION_PEBS
-    /// entries; zero everywhere else. With PDist this should usually be 0.
+    // The pebs_* fields below are non-zero only on EPT_VIOLATION_PEBS entries.
+    /// Retired guest instructions past the PEBS firing target
+    /// (`target_tsc - PEBS_MARGIN`). Usually 0 with PDist.
     pub pebs_skid: i64,
-    /// Guest INST_RETIRED gain between the arming and the firing of this
-    /// PEBS exit. Non-zero only on EPT_VIOLATION_PEBS entries.
+    /// Guest INST_RETIRED gain between arming and firing.
     pub pebs_inst_delta: i64,
-    /// Tsc_offset gain (HLT/MWAIT clamps) between arming and firing.
-    /// Should be 0 for a well-behaved PEBS exit. Non-zero only on
-    /// EPT_VIOLATION_PEBS entries.
+    /// tsc_offset gain (HLT/MWAIT clamps) between arming and firing; should be 0.
     pub pebs_tsc_offset_delta: i64,
-    /// Run-loop iterations the firing arming persisted across (0 if armed
-    /// fresh in the firing iter, > 0 if stale across non-PEBS exits).
-    /// Non-zero only on EPT_VIOLATION_PEBS entries.
+    /// Run-loop iterations the arming persisted across (0 = armed fresh).
     pub pebs_iters_since_arm: u32,
-    /// PEBS firing target minus current TSC at arming time, in retired guest
-    /// instructions. Lets
-    /// post-mortem tooling correlate skid against arm delta.
+    /// Firing target minus TSC at arming time, in retired guest instructions.
     pub pebs_arm_delta: u64,
 
-    // --- Determinism debugging fields (mirrored from bedrock-vm). ---
+    // Determinism debugging fields (mirrored from bedrock-vm).
     /// `last_instruction_count` at exit time (fresh PMC0 read).
     pub last_instruction_count: u64,
     /// `apic.timer_deadline` at exit time. 0 if no timer pending.
@@ -148,11 +118,9 @@ pub struct ExitRecord {
     pub _padding: [u64; 16],
 }
 
-// Compile-time assertion that ExitRecord is exactly EXIT_RECORD_SIZE bytes.
 const _: () = assert!(core::mem::size_of::<ExitRecord>() == EXIT_RECORD_SIZE);
 
 impl ExitRecord {
-    /// Create a new empty log entry.
     pub const fn new() -> Self {
         Self {
             tsc: 0,
@@ -209,7 +177,6 @@ impl ExitRecord {
         }
     }
 
-    /// Returns true if this entry represents a deterministic exit.
     pub fn is_deterministic(&self) -> bool {
         self.flags & EXIT_RECORD_FLAG_DETERMINISTIC != 0
     }

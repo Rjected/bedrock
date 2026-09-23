@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! RootVm - A concrete VM implementation for running guests.
-//!
-//! This module provides `RootVm`, a concrete implementation of the `VmContext`
-//! trait that can be used in production (kernel module) and testing scenarios.
+//! RootVm - a VM that owns its guest memory.
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
@@ -15,28 +12,15 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
 
-/// A concrete virtual machine implementation.
-///
-/// `RootVm` provides a complete VM context including:
-/// - A VMCS for controlling VM execution
-/// - General-purpose register state
-/// - Guest physical memory (owned, freed on drop)
-/// - EPT page table mapping guest physical to host physical addresses
-///
-/// # Type Parameters
-///
-/// * `V` - The VMCS type, must implement `VirtualMachineControlStructure`
-/// * `G` - The guest memory type, must implement `GuestMemory`
-/// * `I` - The instruction counter type
+/// A root VM owning its guest physical memory and EPT.
 #[repr(C)]
 pub struct RootVm<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> {
-    /// VM state (shared structure with ForkedVm). Boxed to reduce stack usage.
+    /// VM state. Boxed to reduce stack usage.
     pub state: VmStateBox<V, I>,
     /// Guest physical memory. Owned by this VM and freed on drop.
     pub memory: G,
-    /// Number of child ForkedVms derived from this VM.
-    /// When non-zero, this VM cannot be run (children hold references to our memory).
-    /// Uses AtomicUsize for interior mutability (remove_child called via &self).
+    /// Number of child forks. While non-zero this VM must not run (children
+    /// reference our memory). Atomic because remove_child takes &self.
     children_count: AtomicUsize,
 }
 
@@ -54,25 +38,9 @@ pub enum RootVmError<E> {
 }
 
 impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> RootVm<V, G, I> {
-    /// Create a new RootVm with the given VMCS, guest memory, machine, and frame allocator.
-    ///
-    /// This creates an EPT page table, maps all guest memory pages into it, and
-    /// allocates an MSR bitmap page if MSR bitmaps are supported.
-    /// Guest physical addresses are identity-mapped starting from 0.
-    ///
-    /// # Arguments
-    ///
-    /// * `vmcs` - The VMCS, already allocated and initialized with revision ID
-    /// * `memory` - Guest physical memory to be owned by this VM
-    /// * `machine` - Machine for allocating pages (MSR bitmap)
-    /// * `allocator` - Frame allocator for EPT page table structures
-    /// * `exit_handler_rip` - Address of the VM exit handler (HOST_RIP in VMCS)
-    /// * `instruction_counter` - Instruction counter for deterministic execution
-    /// * `tsc_frequency` - Configured TSC frequency in Hz
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if EPT creation, mapping, or MSR bitmap allocation fails.
+    /// Create a new RootVm, mapping all guest memory into a fresh EPT
+    /// (GPA = offset into `memory`). `vmcs` must already carry the revision ID;
+    /// `tsc_frequency` is in Hz.
     #[inline(never)]
     pub fn new<A: FrameAllocator<Frame = V::P>>(
         vmcs: V,
@@ -83,18 +51,12 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> R
         instruction_counter: I,
         tsc_frequency: u64,
     ) -> Result<Self, RootVmError<A::Error>> {
-        // Create the EPT page table
         let mut ept: EptPageTable<V::P> =
             EptPageTable::new(allocator).map_err(RootVmError::EptCreation)?;
 
-        // Map all guest memory pages into the EPT
-        // Guest physical address = offset into guest memory (identity mapped from 0)
-        //
         // Skip the LAPIC (0xFEE00000) and IOAPIC (0xFEC00000) MMIO pages so
-        // guest accesses to those addresses trigger EPT violations and get
-        // emulated by handle_apic_access / handle_ioapic_access. Without this,
-        // guests with >~4GB of RAM have the APIC pages mapped as regular
-        // memory and APIC emulation never runs.
+        // accesses EPT-fault into handle_apic_access / handle_ioapic_access.
+        // Otherwise guests with >~4GB RAM map them as regular memory.
         let mem_size = memory.size();
         let num_pages = mem_size.div_ceil(PAGE_SIZE);
 
@@ -102,7 +64,6 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> R
             let page_offset = page_idx * PAGE_SIZE;
             let guest_phys_u64 = page_offset as u64;
 
-            // Leave APIC MMIO pages unmapped so accesses trap to emulation
             if (APIC_BASE..APIC_BASE + APIC_SIZE).contains(&guest_phys_u64)
                 || (IOAPIC_BASE..IOAPIC_BASE + IOAPIC_SIZE).contains(&guest_phys_u64)
             {
@@ -124,7 +85,6 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> R
             .map_err(RootVmError::EptMapping)?;
         }
 
-        // Create VmState with the EPT
         let state = VmState::new::<A>(
             vmcs,
             ept,
@@ -217,7 +177,6 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> V
                 | ExitTrigger::AllExits
                 | ExitTrigger::Checkpoints
                 | ExitTrigger::TscRange => {
-                    // Hash full guest memory
                     let mut hasher = Xxh64Hasher::new();
                     // SAFETY: mem_ptr is valid and mem_size is the correct size
                     let memory = unsafe { core::slice::from_raw_parts(mem_ptr, mem_size) };
@@ -228,28 +187,19 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> V
             }
         };
 
-        // Patch the pending `Exit` record's memory_hash in the event buffer
-        // (root VMs have no COW pages, so cow_page_count stays 0).
+        // Root VMs have no COW pages, so cow_page_count is 0.
         self.state.finalize_exit_memory_hash(memory_hash, 0);
     }
 }
 
-/// Ensure VMCS is cleared when RootVm is dropped.
-///
-/// This is important because the VMCS page must not be freed while
-/// the VMCS is still "loaded" or associated with a CPU.
+/// Clear the VMCS on drop: its page must not be freed while still loaded on a CPU.
 impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> Drop
     for RootVm<V, G, I>
 {
     fn drop(&mut self) {
-        // Clear the VMCS to transition it to "clear" state before freeing
-        // the underlying page. If the VMCS is not currently loaded, this
-        // is a no-op. If it is loaded, this ensures proper cleanup.
         if let Err(_e) = self.state.vmcs.clear() {
-            // Log error but continue - we're in drop, can't do much else
             log_err!("Failed to clear VMCS during drop\n");
         }
-        // Return the VPID to the pool for reuse
         deallocate_vpid(self.state.vpid);
     }
 }
@@ -258,7 +208,6 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> P
     for RootVm<V, G, I>
 {
     fn read_page(&self, gpa: GuestPhysAddr) -> Option<*const u8> {
-        // Align to page boundary
         let page_gpa = gpa.as_u64() & !0xFFF;
         let offset = page_gpa as usize;
 

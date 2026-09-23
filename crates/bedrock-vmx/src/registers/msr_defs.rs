@@ -18,18 +18,15 @@ pub mod msr {
     pub const IA32_PRED_CMD: u32 = 0x49;
     /// Protected Processor Inventory Number control.
     pub const IA32_PPIN_CTL: u32 = 0x4E;
-    /// MKTME Key ID Partitioning (Multi-Key Total Memory Encryption).
-    /// Read-only. Returns number of activated KeyIDs for TME-MK and TDX.
+    /// MKTME Key ID Partitioning (RO): activated KeyIDs for TME-MK and TDX.
     pub const IA32_MKTME_KEYID_PARTITIONING: u32 = 0x87;
     /// BIOS update signature.
     pub const IA32_BIOS_SIGN_ID: u32 = 0x8B;
     /// General purpose performance counter 0.
     pub const IA32_PMC0: u32 = 0xC1;
-    /// Full-width-write alias for `IA32_PMC0`. `WRMSR` to `IA32_PMC0`
-    /// truncates the input to 32 bits and sign-extends from bit 31; writes
-    /// to `IA32_A_PMC0` write all 48 counter bits directly. Available when
-    /// `IA32_PERF_CAPABILITIES.FULL_WRITE` (bit 13) is set. See SDM Vol 3B
-    /// Section 21.2.8.
+    /// Full-width-write alias for `IA32_PMC0` (writes all 48 bits; `IA32_PMC0`
+    /// sign-extends from bit 31). Requires `PERF_CAPABILITIES.FULL_WRITE`
+    /// (bit 13). SDM Vol 3B §21.2.8.
     pub const IA32_A_PMC0: u32 = 0x4C1;
     /// General purpose performance counter 1.
     pub const IA32_PMC1: u32 = 0xC2;
@@ -126,21 +123,18 @@ pub mod msr {
     /// Last fixed range MTRR for 4K (at 0xF8000).
     pub const IA32_MTRR_FIX4K_F8000: u32 = 0x26F;
 
-    /// PEBS enable. Per-counter bits enabling PEBS record generation when the
-    /// counter overflows. GP counter bits start at bit 0; fixed counter bits
-    /// start at bit 32. See Intel SDM Vol 3B Section 21.9.1, Figure 21-68.
+    /// PEBS enable, per counter (GP from bit 0, fixed from bit 32).
+    /// SDM Vol 3B §21.9.1, Figure 21-68.
     pub const IA32_PEBS_ENABLE: u32 = 0x3F1;
-    /// Adaptive PEBS record content selector. Available when
-    /// IA32_PERF_CAPABILITIES.PEBS_BASELINE = 1. See Intel SDM Vol 3B Section
-    /// 21.9.2.3.
+    /// Adaptive PEBS record content selector (needs PEBS_BASELINE). SDM Vol 3B
+    /// §21.9.2.3.
     pub const MSR_PEBS_DATA_CFG: u32 = 0x3F2;
     /// PEBS load latency threshold.
     pub const IA32_PEBS_LD_LAT_THRESHOLD: u32 = 0x3F6;
     /// PEBS frontend.
     pub const IA32_PEBS_FRONTEND: u32 = 0x3F7;
-    /// Debug Store area. Linear address of the DS_BUFFER_MANAGEMENT_AREA used
-    /// by BTS and PEBS to locate the BTS/PEBS buffers and counter reset values.
-    /// See Intel SDM Vol 3B Section 19.6.3.4.
+    /// Debug Store area: linear address of the DS management area used by
+    /// BTS/PEBS. SDM Vol 3B §19.6.3.4.
     pub const IA32_DS_AREA: u32 = 0x600;
     /// Atom core frequency ratios.
     pub const MSR_ATOM_CORE_RATIOS: u32 = 0x66A;
@@ -153,14 +147,11 @@ pub mod msr {
     /// Performance global status (read-only on most parts; reports overflow
     /// bits per counter, plus PEBS_BO and CondChg). See SDM Vol 3B 21.4.6.
     pub const IA32_PERF_GLOBAL_STATUS: u32 = 0x38E;
-    /// Performance global control — per-counter enable bits (bit 0 = PMC0,
-    /// bit 32 = FIXED_CTR0). Both `IA32_PERFEVTSELx.EN` and the
-    /// corresponding bit here must be 1 for the counter to count.
+    /// Performance global control — per-counter enables (bit 0 = PMC0, bit 32 =
+    /// FIXED_CTR0); ANDed with `IA32_PERFEVTSELx.EN`.
     pub const IA32_PERF_GLOBAL_CTRL: u32 = 0x38F;
-    /// Performance global status reset — write-1-to-clear for the bits in
-    /// `IA32_PERF_GLOBAL_STATUS`. Used to clear lingering counter-overflow
-    /// state that would otherwise cause the PEBS engine to flush a buffered
-    /// record the moment `IA32_PEBS_ENABLE` is re-asserted.
+    /// W1C for `IA32_PERF_GLOBAL_STATUS`. Clears lingering overflow state that
+    /// would otherwise flush a buffered PEBS record when PEBS is re-enabled.
     pub const IA32_PERF_GLOBAL_STATUS_RESET: u32 = 0x390;
     /// Fixed counter 0 (INST_RETIRED.ANY).
     pub const IA32_FIXED_CTR0: u32 = 0x309;
@@ -285,32 +276,19 @@ pub mod msr {
 }
 
 /// Error returned by MSR read/write operations.
-/// See Intel SDM Vol 2B (RDMSR) and Vol 2D (WRMSR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsrError {
-    /// The MSR address in ECX is reserved or unimplemented.
-    /// Results in #GP(0) on hardware.
+    /// Reserved or unimplemented MSR address. #GP(0) on hardware.
     InvalidAddress,
 }
 
 /// Result type for MSR operations.
 pub type MsrResult<T> = Result<T, MsrError>;
 
-/// Trait for reading and writing Model-Specific Registers (MSRs).
+/// Read/write access to MSRs via RDMSR (0F 32) / WRMSR (0F 30).
 ///
-/// MSRs are accessed via the RDMSR and WRMSR instructions:
-/// - RDMSR (opcode 0F 32): Reads the MSR specified in ECX into EDX:EAX
-/// - WRMSR (opcode 0F 30): Writes EDX:EAX to the MSR specified in ECX
-///
-/// Both instructions require CPL 0 (ring 0) or real-address mode.
-/// Invalid MSR addresses or reserved bit violations cause #GP(0).
-///
-/// See Intel SDM Vol 2B Section 4-535 (RDMSR) and Vol 2D Section 6-8 (WRMSR).
-///
-/// Implementors must ensure:
-/// - Operations are only performed at CPL 0
-/// - Invalid MSR addresses are handled appropriately
-/// - Reserved bits are not modified
+/// Requires CPL 0; invalid addresses or reserved bits #GP(0).
+/// See Intel SDM Vol 2B (RDMSR) and Vol 2D (WRMSR).
 ///
 /// # Example Implementation
 ///
@@ -341,40 +319,9 @@ pub type MsrResult<T> = Result<T, MsrError>;
 /// }
 /// ```
 pub trait MsrAccess {
-    /// Read a 64-bit value from the MSR at the given address.
-    ///
-    /// Corresponds to the RDMSR instruction (opcode 0F 32).
-    /// The MSR address is placed in ECX, and the result is returned in EDX:EAX.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - The MSR address (placed in ECX)
-    ///
-    /// # Returns
-    ///
-    /// The 64-bit MSR value (EDX:EAX), or an error if the operation fails.
-    ///
-    /// # Errors
-    ///
-    /// * `MsrError::InvalidAddress` - The MSR address is reserved or unimplemented
-    /// * `MsrError::PrivilegeViolation` - Not executing at CPL 0
+    /// RDMSR: read the MSR at `address`.
     fn read_msr(&self, address: u32) -> MsrResult<u64>;
 
-    /// Write a 64-bit value to the MSR at the given address.
-    ///
-    /// Corresponds to the WRMSR instruction (opcode 0F 30).
-    /// The MSR address is placed in ECX, and the value is provided in EDX:EAX.
-    ///
-    /// WRMSR is a serializing instruction (except for IA32_TSC_DEADLINE and X2APIC MSRs).
-    /// Writing to MTRRs invalidates TLBs including global entries.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - The MSR address (placed in ECX)
-    /// * `value` - The 64-bit value to write (EDX:EAX)
-    ///
-    /// # Errors
-    ///
-    /// * `MsrError::InvalidAddress` - The MSR address is reserved or unimplemented
+    /// WRMSR: write `value` to the MSR at `address`.
     fn write_msr(&self, address: u32, value: u64) -> MsrResult<()>;
 }

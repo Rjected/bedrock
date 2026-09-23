@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Tests for VM exit handling.
-//!
-//! This module uses mock implementations from test_mocks for testing
-//! exit handlers in userland.
+//! Userland tests for VM exit handling.
 
 extern crate std;
 
@@ -143,20 +140,13 @@ impl VmContext for MockVmContext {
         Ok(())
     }
 
-    fn finalize_exit_record<K: Kernel>(&mut self, _kernel: &K) {
-        // Mock does nothing for log finalization
-    }
+    fn finalize_exit_record<K: Kernel>(&mut self, _kernel: &K) {}
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[test]
 fn test_cpuid_exit_basic() {
     let mut ctx = MockVmContext::new();
 
-    // Set up CPUID exit
     ctx.set_exit_reason(ExitReason::Cpuid);
     ctx.set_exit_qualification(0);
     ctx.set_guest_rip(0x1000);
@@ -168,10 +158,8 @@ fn test_cpuid_exit_basic() {
 
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // Should continue guest execution
     assert_eq!(result, ExitHandlerResult::Continue);
 
-    // RIP should be advanced
     assert_eq!(ctx.get_guest_rip(), Some(0x1002));
 
     // EAX should have max supported leaf
@@ -257,13 +245,11 @@ fn test_msr_read_exits_to_userspace() {
 
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // Should exit to userspace for MSR handling
     assert_eq!(
         result,
         ExitHandlerResult::ExitToUserspace(ExitReason::MsrRead)
     );
 
-    // RIP should be advanced past the instruction
     assert_eq!(ctx.get_guest_rip(), Some(0x1002));
 }
 
@@ -283,13 +269,11 @@ fn test_msr_write_exits_to_userspace() {
 
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // Should exit to userspace for MSR handling
     assert_eq!(
         result,
         ExitHandlerResult::ExitToUserspace(ExitReason::MsrWrite)
     );
 
-    // RIP should be advanced past the instruction
     assert_eq!(ctx.get_guest_rip(), Some(0x1002));
 }
 
@@ -310,7 +294,6 @@ fn test_cr_access_mov_to_cr3() {
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
     assert_eq!(result, ExitHandlerResult::Continue);
 
-    // Verify CR3 was updated
     let cr3 = ctx
         .vmcs_setup()
         .get_field_natural(VmcsFieldNatural::GuestCr3);
@@ -321,7 +304,6 @@ fn test_cr_access_mov_to_cr3() {
 fn test_cr_access_mov_from_cr0() {
     let mut ctx = MockVmContext::new();
 
-    // Set CR0 value
     ctx.vmcs_setup()
         .set_field_natural(VmcsFieldNatural::GuestCr0, 0x80000011);
 
@@ -335,7 +317,6 @@ fn test_cr_access_mov_from_cr0() {
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
     assert_eq!(result, ExitHandlerResult::Continue);
 
-    // Verify RBX contains CR0 value
     assert_eq!(ctx.gprs().rbx, 0x80000011);
 }
 
@@ -386,7 +367,6 @@ fn test_triple_fault() {
 
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // Triple fault should be an error
     assert!(matches!(
         result,
         ExitHandlerResult::Error(ExitError::TripleFault)
@@ -405,7 +385,6 @@ fn test_ept_violation_exits_to_userspace() {
 
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // EPT violation should exit to userspace
     assert_eq!(
         result,
         ExitHandlerResult::ExitToUserspace(ExitReason::EptViolation)
@@ -429,7 +408,6 @@ fn test_vmcall_shutdown_hypercall() {
         result,
         ExitHandlerResult::ExitToUserspace(ExitReason::VmcallShutdown)
     );
-    // RIP should be advanced past the VMCALL instruction
     assert_eq!(ctx.get_guest_rip(), Some(0x1003));
 }
 
@@ -470,7 +448,6 @@ fn test_vmcall_snapshot_hypercall() {
         ExitHandlerResult::ExitToUserspace(ExitReason::VmcallSnapshot)
     );
 
-    // RIP should be advanced past the VMCALL instruction
     assert_eq!(ctx.get_guest_rip(), Some(0x1003));
 }
 
@@ -507,7 +484,6 @@ fn test_vmcall_snapshot_with_logging_enabled() {
 
     let mut ctx = MockVmContext::new();
 
-    // Capture Exit records via the unified event stream.
     let event_buffer = attach_exit_event_buffer(&mut ctx);
 
     // Use AtShutdown mode - this skips automatic per-exit capture but still
@@ -547,7 +523,6 @@ fn test_vmcall_snapshot_requires_exit_category() {
 
     let mut ctx = MockVmContext::new();
     let _event_buffer = attach_exit_event_buffer(&mut ctx);
-    // Disable EXIT capture again.
     ctx.state_mut()
         .set_event_categories(EventCategories::empty());
 
@@ -568,7 +543,6 @@ fn test_vmcall_snapshot_respects_log_start_tsc() {
     let mut ctx = MockVmContext::new();
     let event_buffer = attach_exit_event_buffer(&mut ctx);
 
-    // Enable logging with a start threshold
     ctx.state_mut().exit_trigger = ExitTrigger::AtShutdown;
     ctx.state_mut().exit_start_tsc = 5000; // Don't log until TSC >= 5000
     ctx.state_mut().emulated_tsc = 1000; // Current TSC is below threshold
@@ -590,9 +564,7 @@ fn test_vmcall_snapshot_respects_log_start_tsc() {
     assert_eq!(entry.tsc, 6000);
 }
 
-// =============================================================================
 // Feedback buffer tests
-// =============================================================================
 
 #[test]
 fn test_vmcall_register_feedback_buffer_success() {
@@ -600,25 +572,11 @@ fn test_vmcall_register_feedback_buffer_success() {
 
     let mut ctx = MockVmContext::new();
 
-    // Set up a simple page table structure in guest memory for GVA translation.
-    // We'll set up an identity mapping so GVA == GPA for simplicity.
-    // The page table walk reads from guest memory, so we need to set up valid entries.
-
-    // For this test, we simulate successful GVA translation by pre-populating
-    // the guest memory with valid page table entries.
-
-    // CR3 points to PML4 at physical address 0x1000
+    // Identity-map GVA == GPA via guest page tables. CR3 -> PML4 at 0x1000.
     ctx.vmcs_setup()
         .set_field_natural(VmcsFieldNatural::GuestCr3, 0x1000);
 
-    // Set up PML4 -> PDPT -> PD -> PT identity mapping for address 0x2000.
-    // PML4[0] at 0x1000 -> points to PDPT at 0x2000
-    // PDPT[0] at 0x2000 -> points to PD at 0x3000
-    // PD[0] at 0x3000 -> points to PT at 0x4000
-    // PT[0] at 0x4000 -> points to page at 0x5000 (identity mapped)
-
-    // For simplicity, use 1GB pages (PDPT entry with PS bit set).
-    // PML4 entry: present, writable, points to PDPT
+    // Use a 1GB page (PDPT entry with PS set).
     let pml4_entry: u64 = 0x2003; // Present + Writable + address 0x2000
     ctx.memory[0x1000..0x1008].copy_from_slice(&pml4_entry.to_le_bytes());
 
@@ -626,7 +584,6 @@ fn test_vmcall_register_feedback_buffer_success() {
     let pdpt_entry: u64 = 0x83; // Present + Writable + PS (1GB page) + address 0x0
     ctx.memory[0x2000..0x2008].copy_from_slice(&pdpt_entry.to_le_bytes());
 
-    // Set up VMCALL exit
     ctx.set_exit_reason(ExitReason::Vmcall);
     ctx.set_exit_qualification(0);
     ctx.set_guest_rip(0x1000);
@@ -636,7 +593,7 @@ fn test_vmcall_register_feedback_buffer_success() {
     let id_bytes = b"build-id-abcd";
     ctx.memory[0x6000..0x6000 + id_bytes.len()].copy_from_slice(id_bytes);
 
-    // Set hypercall number and arguments. New ABI: RDX = id GVA, RSI = id len.
+    // RDX = id GVA, RSI = id len.
     ctx.gprs_mut().rax = HYPERCALL_REGISTER_FEEDBACK_BUFFER;
     ctx.gprs_mut().rbx = 0x5000; // GVA of buffer
     ctx.gprs_mut().rcx = 4096; // Size: 1 page
@@ -654,7 +611,6 @@ fn test_vmcall_register_feedback_buffer_success() {
     // RAX should be the assigned slot index (0 on first registration)
     assert_eq!(ctx.gprs().rax, 0);
 
-    // RIP should be advanced
     assert_eq!(ctx.get_guest_rip(), Some(0x1003));
 
     // Feedback buffer should be registered at slot 0 (the first appended entry)
@@ -688,13 +644,10 @@ fn test_vmcall_register_feedback_buffer_invalid_size() {
 
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // Should continue (error is reported via return value)
     assert_eq!(result, ExitHandlerResult::Continue);
 
-    // RAX carries the differentiated bad-size code.
     assert_eq!(ctx.gprs().rax, crate::exits::FB_ERR_BAD_SIZE);
 
-    // Feedback buffer should NOT be registered at index 0
     assert!(ctx.state().feedback_buffers.is_empty());
 }
 
@@ -717,13 +670,10 @@ fn test_vmcall_register_feedback_buffer_size_too_large() {
 
     let result = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // Should continue (error is reported via return value)
     assert_eq!(result, ExitHandlerResult::Continue);
 
-    // RAX carries the differentiated bad-size code.
     assert_eq!(ctx.gprs().rax, crate::exits::FB_ERR_BAD_SIZE);
 
-    // Feedback buffer should NOT be registered at index 0
     assert!(ctx.state().feedback_buffers.is_empty());
 }
 
@@ -823,9 +773,7 @@ fn test_vmcall_register_feedback_buffer_unbounded_count() {
     ctx.set_exit_qualification(0);
     ctx.set_instruction_len(3);
 
-    // Register far more buffers than the old fixed cap (16) to prove the
-    // count is unbounded and the backing storage grows on the heap. Duplicate
-    // ids / GVAs are intentionally allowed; each registration appends a slot.
+    // Registration count is unbounded; duplicate ids / GVAs each append a slot.
     const N: u64 = 40;
     for i in 0..N {
         ctx.set_guest_rip(0x1000);
@@ -859,9 +807,7 @@ fn test_vmcall_register_feedback_buffer_unbounded_count() {
     assert_eq!(last.id_bytes(), id_bytes);
 }
 
-// =============================================================================
 // I/O channel tests
-// =============================================================================
 
 /// Helper: install a 1GB identity-mapped page-table walk so any `GVA` in
 /// `[0, 1GB)` translates to the same `GPA`. Matches what the feedback-buffer
@@ -968,7 +914,6 @@ fn test_vmcall_io_get_request_writes_payload_to_guest() {
     let mut ctx = MockVmContext::new();
     install_identity_paging(&mut ctx);
 
-    // Register page.
     ctx.set_exit_reason(ExitReason::Vmcall);
     ctx.set_exit_qualification(0);
     ctx.set_guest_rip(0x1000);
@@ -987,7 +932,6 @@ fn test_vmcall_io_get_request_writes_payload_to_guest() {
         chan.request_len = request.len();
     }
 
-    // Issue GET_REQUEST.
     ctx.set_exit_reason(ExitReason::Vmcall);
     ctx.set_exit_qualification(0);
     ctx.set_guest_rip(0x2000);
@@ -1015,7 +959,6 @@ fn test_vmcall_io_get_request_promotes_next_pending() {
     let mut ctx = MockVmContext::new();
     install_identity_paging(&mut ctx);
 
-    // Register page.
     ctx.set_exit_reason(ExitReason::Vmcall);
     ctx.set_exit_qualification(0);
     ctx.set_guest_rip(0x1000);
@@ -1075,7 +1018,6 @@ fn test_vmcall_io_put_response_captures_response() {
     let mut ctx = MockVmContext::new();
     install_identity_paging(&mut ctx);
 
-    // Register page.
     ctx.set_exit_reason(ExitReason::Vmcall);
     ctx.set_exit_qualification(0);
     ctx.set_guest_rip(0x1000);
@@ -1084,10 +1026,8 @@ fn test_vmcall_io_put_response_captures_response() {
     ctx.gprs_mut().rbx = 0x5000;
     let _ = handle_exit(&mut ctx, &MockKernel, &mut MockFrameAllocator::new());
 
-    // PUT_RESPONSE no longer needs to clear the in-flight slot — that
-    // happened in GET_REQUEST so the next pending could be promoted
-    // immediately. Here we just verify it captures the response bytes
-    // and exits to userspace.
+    // The in-flight slot was cleared by GET_REQUEST; PUT_RESPONSE just
+    // captures the response bytes and exits to userspace.
     let response: Vec<u8> = (0..500).map(|i| ((i * 7) % 256) as u8).collect();
     ctx.memory[0x5000..0x5000 + response.len()].copy_from_slice(&response);
 
@@ -1187,9 +1127,7 @@ fn test_check_io_channel_defers_until_target_tsc() {
     );
 }
 
-// =============================================================================
 // Paravirtual batch console tests
-// =============================================================================
 
 #[test]
 fn test_vmcall_serial_register_page_success() {
@@ -1364,9 +1302,7 @@ fn test_vmcall_serial_write_not_registered() {
     );
 }
 
-// =============================================================================
 // HYPERCALL_GET_RANDOM (guest /dev/urandom / getrandom() chokepoint)
-// =============================================================================
 
 /// Reproduce the SeededRng fill the `HYPERCALL_GET_RANDOM` handler performs, so
 /// a test can assert the exact bytes a freshly-seeded device hands the guest.

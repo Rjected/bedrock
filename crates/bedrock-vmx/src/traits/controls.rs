@@ -25,7 +25,7 @@ pub mod cpu_based {
     pub const MWAIT_EXITING: u32 = 1 << 10;
     /// RDPMC exiting.
     pub const RDPMC_EXITING: u32 = 1 << 11;
-    /// RDTSC exiting - causes VM exits on RDTSC and RDTSCP instructions.
+    /// RDTSC exiting (also covers RDTSCP).
     pub const RDTSC_EXITING: u32 = 1 << 12;
     /// CR3-load exiting.
     pub const CR3_LOAD_EXITING: u32 = 1 << 15;
@@ -37,11 +37,11 @@ pub mod cpu_based {
     pub const CR8_STORE_EXITING: u32 = 1 << 20;
     /// Unconditional I/O exiting.
     pub const UNCOND_IO_EXITING: u32 = 1 << 24;
-    /// Monitor trap flag - causes VM exit after each guest instruction.
+    /// Monitor trap flag: exit after each guest instruction.
     pub const MONITOR_TRAP_FLAG: u32 = 1 << 27;
     /// Use MSR bitmaps.
     pub const USE_MSR_BITMAPS: u32 = 1 << 28;
-    /// MONITOR exiting - causes VM exit on MONITOR instruction for deterministic behavior.
+    /// MONITOR exiting.
     pub const MONITOR_EXITING: u32 = 1 << 29;
     /// Activate secondary controls.
     pub const ACTIVATE_SECONDARY_CONTROLS: u32 = 1 << 31;
@@ -58,11 +58,11 @@ pub mod secondary_exec {
     pub const ENABLE_VPID: u32 = 1 << 5;
     /// Unrestricted guest.
     pub const UNRESTRICTED_GUEST: u32 = 1 << 7;
-    /// RDRAND exiting - causes VM exit on RDRAND instruction.
+    /// RDRAND exiting.
     pub const RDRAND_EXITING: u32 = 1 << 11;
     /// Enable INVPCID.
     pub const ENABLE_INVPCID: u32 = 1 << 12;
-    /// RDSEED exiting - causes VM exit on RDSEED instruction.
+    /// RDSEED exiting.
     pub const RDSEED_EXITING: u32 = 1 << 16;
 }
 
@@ -71,7 +71,7 @@ pub mod secondary_exec {
 pub mod vm_exit {
     /// Host address-space size (64-bit host).
     pub const HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
-    /// Load IA32_PERF_GLOBAL_CTRL on VM exit (for hardware perf counter switching).
+    /// Load IA32_PERF_GLOBAL_CTRL on VM exit.
     pub const LOAD_IA32_PERF_GLOBAL_CTRL: u32 = 1 << 12;
     /// Save IA32_EFER.
     pub const SAVE_IA32_EFER: u32 = 1 << 20;
@@ -84,7 +84,7 @@ pub mod vm_exit {
 pub mod vm_entry {
     /// IA-32e mode guest.
     pub const IA32E_MODE: u32 = 1 << 9;
-    /// Load IA32_PERF_GLOBAL_CTRL on VM entry (for hardware perf counter switching).
+    /// Load IA32_PERF_GLOBAL_CTRL on VM entry.
     pub const LOAD_IA32_PERF_GLOBAL_CTRL: u32 = 1 << 13;
     /// Load IA32_EFER.
     pub const LOAD_IA32_EFER: u32 = 1 << 15;

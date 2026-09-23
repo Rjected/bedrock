@@ -1,31 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Device and MSR state structures for VM emulation.
-//!
-//! These structures group related emulated device states for cleaner
-//! trait interfaces.
+//! Grouped emulated device and MSR state.
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
-/// Grouped device emulation states for cleaner trait interface.
-///
-/// This struct bundles all the device states that the exit handler needs
-/// to access during VM operation. Using a single struct reduces the number
-/// of methods on the `VmContext` trait.
+/// All emulated device state the exit handlers need.
 #[derive(Clone)]
 pub struct DeviceStates {
-    /// Local APIC state for interrupt emulation.
     pub apic: ApicState,
-    /// Serial port (8250/16550 UART) state.
+    /// 8250/16550 UART.
     pub serial: SerialState,
-    /// I/O APIC state for interrupt routing.
     pub ioapic: IoApicState,
-    /// RTC (CMOS clock) state.
+    /// CMOS clock.
     pub rtc: RtcState,
-    /// Memory Type Range Registers state.
     pub mtrr: MtrrState,
     /// Controlled-randomness device: RDRAND, RDSEED, and the
     /// `HYPERCALL_GET_RANDOM` (`/dev/urandom` / `getrandom()`) chokepoint.
@@ -33,7 +23,6 @@ pub struct DeviceStates {
 }
 
 impl DeviceStates {
-    /// Create a new DeviceStates with default values for all devices.
     pub fn new() -> Self {
         Self {
             apic: ApicState::default(),
@@ -52,10 +41,7 @@ impl Default for DeviceStates {
     }
 }
 
-/// Grouped guest MSR state for cleaner trait interface.
-///
-/// This struct bundles MSRs that are emulated by the hypervisor rather than
-/// passed through to hardware.
+/// Guest MSRs emulated by the hypervisor rather than passed through.
 #[derive(Clone, Copy)]
 pub struct GuestMsrState {
     /// IA32_PAT (0x277) - Page Attribute Table.
@@ -67,10 +53,9 @@ pub struct GuestMsrState {
 }
 
 impl GuestMsrState {
-    /// Create a new GuestMsrState with default values.
     pub fn new() -> Self {
         Self {
-            pat: 0x0007_0406_0007_0406, // Default PAT value after reset
+            pat: 0x0007_0406_0007_0406, // reset default
             tsc_aux: 0,
             syscall: SyscallMsrs::default(),
         }

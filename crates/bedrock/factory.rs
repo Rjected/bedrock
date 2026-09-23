@@ -16,12 +16,9 @@ use super::vmx::traits::{
 use super::vmx::RootVm;
 use super::vmx_asm::VmxContextExt;
 
-/// Frame allocator for EPT page tables that uses the Kernel trait.
-///
-/// When `pool` is `Some`, pages are taken from the pre-filled pool (for use
-/// during the VM run loop with preemption disabled). When `pool` is `None`,
-/// pages are allocated directly with `GFP_KERNEL` (for VM creation/fork paths
-/// that run in sleepable context).
+/// EPT frame allocator. With a `pool`, pages come from the pre-filled pool
+/// (run loop, preemption disabled); without, they are allocated directly with
+/// `GFP_KERNEL` (sleepable creation/fork paths).
 pub(crate) struct KernelFrameAllocator<'a> {
     kernel: &'a LinuxKernel,
     pool: Option<&'a mut PagePool>,
@@ -77,18 +74,8 @@ impl CowAllocator<KernelPage> for KernelFrameAllocator<'_> {
     }
 }
 
-/// Create a new VM with the specified guest memory size.
-///
-/// This allocates all VM resources: VMCS, guest memory, EPT tables.
-/// Uses `LinuxInstructionCounter` for deterministic instruction counting.
-///
-/// # Arguments
-///
-/// * `machine` - The machine abstraction for hardware access
-/// * `memory_size` - Size of guest memory to allocate in bytes
-/// * `tsc_frequency` - Configured TSC frequency in Hz
-///
-/// Returns `None` if allocation fails.
+/// Create a new root VM (VMCS, guest memory, EPT tables). Returns `None` if
+/// allocation fails.
 #[inline(never)]
 pub(crate) fn create_vm(
     machine: &LinuxMachine,
@@ -97,12 +84,10 @@ pub(crate) fn create_vm(
 ) -> Option<RootVm<RealVmcs, KernelGuestMemory, LinuxInstructionCounter>> {
     log_info!("create_vm: starting with memory_size={}\n", memory_size);
 
-    // Allocate a VMCS for this VM.
     log_info!("create_vm: allocating VMCS\n");
     let vmcs = RealVmcs::new(machine).ok()?;
     log_info!("create_vm: VMCS allocated\n");
 
-    // Allocate guest memory.
     log_info!(
         "create_vm: allocating guest memory ({} bytes)\n",
         memory_size
@@ -115,19 +100,14 @@ pub(crate) fn create_vm(
         memory.virt_addr().as_u64() as *const u8
     );
 
-    // Create frame allocator for EPT
     let mut allocator = KernelFrameAllocator::new(machine.kernel());
 
-    // Get exit handler address for HOST_RIP
     let exit_handler_rip = super::vmx::VmxContext::exit_handler_addr();
     log_info!("Exit handler RIP: {:#x}\n", exit_handler_rip);
 
-    // Create instruction counter for deterministic execution. The actual PMU
-    // setup happens lazily inside the run loop (with preemption disabled);
-    // construction itself is infallible.
+    // PMU setup happens lazily inside the run loop (preemption disabled).
     let instruction_counter = LinuxInstructionCounter::new();
 
-    // Create RootVm with EPT mapping, MSR bitmap, and instruction counter
     match RootVm::new(
         vmcs,
         memory,
@@ -140,8 +120,7 @@ pub(crate) fn create_vm(
         Ok(vm) => {
             log_info!("RootVm created successfully\n");
 
-            // RTC uses a fixed base time (2024-01-01 00:00:00 UTC) for deterministic
-            // execution. Time advances based on emulated TSC, not host time.
+            // RTC uses a fixed base time; it advances with the emulated TSC.
             log_info!(
                 "RTC initialized with fixed base time: {}\n",
                 vm.state.devices.rtc.base_time

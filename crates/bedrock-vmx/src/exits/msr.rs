@@ -19,44 +19,30 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
 
     let value: u64 = match msr_num {
         msr::IA32_MISC_ENABLE => {
-            // Return guest-safe value derived from host:
-            // - Sets BTS/PEBS unavailable (bits 11, 12)
-            // - Clears MWAIT (bit 18) to match CPUID
+            // Host value with BTS/PEBS unavailable and MWAIT cleared.
             let host_val = ctx.state().host_state.misc_enable;
             MiscEnable::for_guest(host_val).bits()
         }
-        msr::IA32_BIOS_SIGN_ID => {
-            // Return fake microcode version (upper 32 bits).
-            // Guest writes 0 then executes CPUID then reads this.
-            FAKE_MICROCODE_VERSION
-        }
+        msr::IA32_BIOS_SIGN_ID => FAKE_MICROCODE_VERSION,
         msr::IA32_MCG_CAP | msr::IA32_MCG_STATUS => {
-            // Return 0 - no machine check support (bhyve approach)
+            // No machine check support (like bhyve).
             0
         }
-        msr::IA32_SPEC_CTRL => {
-            // Return 0 - no speculation mitigations (deterministic guest)
-            0
-        }
+        msr::IA32_SPEC_CTRL => 0,
         msr::IA32_PRED_CMD => {
-            // Write-only MSR, but return 0 if guest reads it
+            // Write-only.
             0
         }
         msr::IA32_TSC_ADJUST => {
-            // Return 0 - we don't support TSC adjustment
-            // KVM stores per-vCPU value, bhyve exits to userspace
+            // TSC adjustment unsupported.
             0
         }
         msr::IA32_TSC_DEADLINE => {
-            // Return 0 - TSC-deadline mode not supported
-            // (CPUID bit 24 is cleared, guest uses regular APIC timer instead)
+            // TSC-deadline mode is hidden in CPUID.
             0
         }
         msr::IA32_MTRRCAP => {
-            // MTRR capabilities (like bhyve):
-            // - VCNT = 10 (10 variable range MTRRs)
-            // - FIX = 1 (fixed range MTRRs supported, bit 8)
-            // - WC = 1 (write-combining supported, bit 10)
+            // Like bhyve: WC (bit 10), FIX (bit 8), VCNT = MTRR_VAR_MAX.
             (1 << 10) | (1 << 8) | (MTRR_VAR_MAX as u64)
         }
         msr::IA32_MTRR_DEF_TYPE => ctx.state().devices.mtrr.def_type,
@@ -91,42 +77,22 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         msr::IA32_APIC_BASE => ctx.state().devices.apic.base,
         msr::IA32_TSC_AUX => ctx.state().msr_state.tsc_aux,
         msr::IA32_FEATURE_CONTROL => {
-            // Return "locked, VMX not enabled" - we don't support nested virt.
-            // Bit 0 = Lock, Bit 2 = VMX outside SMX enable.
-            0x1 // Lock bit only
+            // Locked (bit 0), VMX disabled: no nested virt.
+            0x1
         }
         msr::IA32_PLATFORM_INFO => {
-            // Return host platform info (bhyve approach).
-            // Contains max non-turbo ratio in bits 15:8.
+            // Host value, like bhyve (max non-turbo ratio in bits 15:8).
             ctx.state().host_state.platform_info
         }
         msr::IA32_THERM_INTERRUPT
         | msr::IA32_THERM_STATUS
         | msr::IA32_PACKAGE_THERM_STATUS
-        | msr::IA32_PACKAGE_THERM_INTERRUPT => {
-            // Return 0 - no thermal monitoring support.
-            0
-        }
-        msr::IA32_PPIN_CTL => {
-            // Return 0 - PPIN feature not available.
-            0
-        }
-        msr::IA32_PERF_CAPABILITIES => {
-            // Return 0 - no performance monitoring capabilities.
-            0
-        }
-        msr::IA32_LBR_TOS => {
-            // Return 0 - no LBR support.
-            0
-        }
-        msr::IA32_OFFCORE_RSP_0 | msr::IA32_OFFCORE_RSP_1 => {
-            // Return 0 - no off-core response PMU support.
-            0
-        }
-        msr::IA32_PEBS_LD_LAT_THRESHOLD | msr::IA32_PEBS_FRONTEND => {
-            // Return 0 - no PEBS support.
-            0
-        }
+        | msr::IA32_PACKAGE_THERM_INTERRUPT => 0,
+        msr::IA32_PPIN_CTL => 0,
+        msr::IA32_PERF_CAPABILITIES => 0,
+        msr::IA32_LBR_TOS => 0,
+        msr::IA32_OFFCORE_RSP_0 | msr::IA32_OFFCORE_RSP_1 => 0,
+        msr::IA32_PEBS_LD_LAT_THRESHOLD | msr::IA32_PEBS_FRONTEND => 0,
         msr::IA32_PERFEVTSEL0
         | msr::IA32_PERFEVTSEL1
         | msr::IA32_PERFEVTSEL2
@@ -145,24 +111,15 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         | msr::IA32_PMC6
         | msr::IA32_PMC7
         | msr::IA32_MPERF
-        | msr::IA32_APERF => {
-            // Return 0 - no PMU support.
-            0
-        }
-        msr::MSR_ATOM_CORE_RATIOS | msr::MSR_ATOM_CORE_VIDS | msr::MSR_ATOM_CORE_TURBO_RATIOS => {
-            // Return 0 - model-specific MSRs not supported.
-            0
-        }
+        | msr::IA32_APERF => 0,
+        msr::MSR_ATOM_CORE_RATIOS | msr::MSR_ATOM_CORE_VIDS | msr::MSR_ATOM_CORE_TURBO_RATIOS => 0,
         msr::IA32_MISC_FEATURES_ENABLES => {
-            // Return 0 - CPUID faulting not enabled (bhyve approach).
+            // CPUID faulting not enabled (like bhyve).
             0
         }
-        msr::IA32_RTIT_CTL => {
-            // Return 0 - Intel PT not supported (bhyve approach).
-            0
-        }
+        msr::IA32_RTIT_CTL => 0,
         msr::MSR_RAPL_POWER_UNIT => {
-            // Fixed RAPL unit multipliers for determinism:
+            // Fixed RAPL units for determinism:
             //   Power units  (bits 3:0)  = 0x3 → 1/8 Watts
             //   Energy units (bits 12:8) = 0x10 → 1/65536 Joules
             //   Time units   (bits 19:16) = 0xA → 1/1024 seconds
@@ -171,19 +128,13 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         msr::MSR_PKG_ENERGY_STATUS
         | msr::MSR_DRAM_ENERGY_STATUS
         | msr::MSR_PP0_ENERGY_STATUS
-        | msr::MSR_PP1_ENERGY_STATUS => {
-            // Return 0 - no energy consumption visible to guest.
-            0
-        }
+        | msr::MSR_PP1_ENERGY_STATUS => 0,
         msr::MSR_PKG_POWER_LIMIT
         | msr::MSR_PKG_POWER_INFO
         | msr::MSR_DRAM_POWER_LIMIT
         | msr::MSR_DRAM_POWER_INFO
         | msr::MSR_PP0_POWER_LIMIT
-        | msr::MSR_PP1_POWER_LIMIT => {
-            // Return 0 - power limits not supported.
-            0
-        }
+        | msr::MSR_PP1_POWER_LIMIT => 0,
         msr::MSR_PKG_CST_CONFIG_CONTROL
         | msr::MSR_POWER_CTL
         | msr::MSR_PPERF
@@ -196,25 +147,15 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         | msr::IA32_PERF_STATUS
         | msr::IA32_PERF_CTL
         | msr::IA32_ENERGY_PERF_BIAS
-        | msr::MSR_OC_MAILBOX => {
-            // Return 0 - power management not supported.
-            0
-        }
-        msr::MSR_SMI_COUNT => {
-            // Return 0 - no SMM support.
-            0
-        }
+        | msr::MSR_OC_MAILBOX => 0,
+        msr::MSR_SMI_COUNT => 0,
         msr::MSR_AMD64_DE_CFG => {
-            // Return 0 - AMD MSR probed by Linux on Intel.
+            // AMD MSR probed by Linux on Intel.
             0
         }
-        msr::IA32_MKTME_KEYID_PARTITIONING => {
-            // Return 0 - no multi-key memory encryption support.
-            0
-        }
-        // SYSCALL MSRs (STAR, LSTAR, CSTAR, FMASK) use passthrough - no VM exit.
+        msr::IA32_MKTME_KEYID_PARTITIONING => 0,
+        // SYSCALL MSRs (STAR, LSTAR, CSTAR, FMASK) are passthrough.
         _ => {
-            // Unknown MSR - exit to userspace
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
             }
@@ -222,7 +163,6 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         }
     };
 
-    // Write value to EAX:EDX (RDMSR result format)
     let gprs = &mut ctx.state_mut().gprs;
     gprs.rax = value & 0xFFFF_FFFF;
     gprs.rdx = value >> 32;
@@ -236,38 +176,35 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
 /// Handle MSR write (WRMSR) exit.
 pub fn handle_msr_write<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
     let msr_num = ctx.state().gprs.rcx as u32;
-    // WRMSR value is in EDX:EAX
     let value = ((ctx.state().gprs.rdx & 0xFFFF_FFFF) << 32) | (ctx.state().gprs.rax & 0xFFFF_FFFF);
 
     match msr_num {
         msr::IA32_MISC_ENABLE => {
-            // Ignore writes - guest can't change these features
+            // Ignored.
         }
         msr::IA32_BIOS_SIGN_ID => {
-            // Ignore writes - guest writes 0 before CPUID to trigger
-            // microcode version update, but we just return a fake version
+            // Ignored; reads return a fixed fake version.
         }
         msr::IA32_MCG_CAP | msr::IA32_MCG_STATUS => {
-            // Ignore writes - no MCE support
+            // Ignored.
         }
         msr::IA32_SPEC_CTRL => {
-            // Ignore writes - no speculation mitigations
+            // Ignored.
         }
         msr::IA32_PRED_CMD => {
-            // Ignore writes - IBPB command, no-op for deterministic guest
+            // IBPB: no-op.
         }
         msr::IA32_TSC_ADJUST => {
-            // Ignore writes - we don't support TSC adjustment
+            // Ignored.
         }
         msr::IA32_TSC_DEADLINE => {
-            // Ignore writes - TSC-deadline mode not supported
-            // (CPUID bit 24 is cleared, guest uses regular APIC timer instead)
+            // Ignored; TSC-deadline mode is hidden in CPUID.
         }
         msr::IA32_MTRRCAP => {
-            // MTRRcap is read-only, ignore writes (bhyve returns error, we just ignore)
+            // Read-only; ignored (bhyve returns an error).
         }
         msr::IA32_MTRR_DEF_TYPE => {
-            // Store def_type (bhyve validates reserved bits, we just store)
+            // Reserved bits are not validated (bhyve does).
             ctx.state_mut().devices.mtrr.def_type = value;
         }
         msr::IA32_MTRR_PHYSBASE0..=msr::IA32_MTRR_PHYSMASK9 => {
@@ -298,8 +235,7 @@ pub fn handle_msr_write<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
             ctx.state_mut().msr_state.pat = value;
         }
         msr::IA32_APIC_BASE => {
-            // Like bhyve: reject any attempt to change APIC_BASE.
-            // Our APIC MMIO emulation is hardcoded to 0xFEE00000.
+            // Like bhyve, reject changes: APIC MMIO is hardcoded to 0xFEE00000.
             if ctx.state().devices.apic.base != value {
                 if let Err(e) = advance_rip(ctx) {
                     return ExitHandlerResult::Error(e);
@@ -311,17 +247,16 @@ pub fn handle_msr_write<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
             ctx.state_mut().msr_state.tsc_aux = value;
         }
         msr::IA32_FEATURE_CONTROL => {
-            // Ignore writes - MSR is locked (bit 0 = 1).
-            // Guest can't change VMX settings.
+            // Ignored; the MSR is locked.
         }
         msr::IA32_PLATFORM_INFO => {
-            // Ignore writes - MSR is read-only.
+            // Read-only.
         }
         msr::IA32_THERM_INTERRUPT
         | msr::IA32_THERM_STATUS
         | msr::IA32_PACKAGE_THERM_STATUS
         | msr::IA32_PACKAGE_THERM_INTERRUPT => {
-            // Ignore writes - no thermal monitoring support.
+            // Ignored.
         }
         msr::IA32_PPIN_CTL
         | msr::IA32_PERF_CAPABILITIES
@@ -352,13 +287,13 @@ pub fn handle_msr_write<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         | msr::MSR_ATOM_CORE_RATIOS
         | msr::MSR_ATOM_CORE_VIDS
         | msr::MSR_ATOM_CORE_TURBO_RATIOS => {
-            // Ignore writes - features not available.
+            // Ignored.
         }
         msr::IA32_MISC_FEATURES_ENABLES => {
-            // Ignore writes - we don't support CPUID faulting (bhyve approach).
+            // Ignored; no CPUID faulting (like bhyve).
         }
         msr::IA32_RTIT_CTL => {
-            // Ignore writes - Intel PT not supported.
+            // Ignored.
         }
         msr::MSR_RAPL_POWER_UNIT
         | msr::MSR_PKG_POWER_LIMIT
@@ -371,7 +306,7 @@ pub fn handle_msr_write<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         | msr::MSR_PP0_ENERGY_STATUS
         | msr::MSR_PP1_POWER_LIMIT
         | msr::MSR_PP1_ENERGY_STATUS => {
-            // Ignore writes - RAPL not supported.
+            // Ignored.
         }
         msr::MSR_PKG_CST_CONFIG_CONTROL
         | msr::MSR_POWER_CTL
@@ -386,11 +321,10 @@ pub fn handle_msr_write<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         | msr::IA32_PERF_CTL
         | msr::IA32_ENERGY_PERF_BIAS
         | msr::MSR_OC_MAILBOX => {
-            // Ignore writes - power management not supported.
+            // Ignored.
         }
-        // SYSCALL MSRs (STAR, LSTAR, CSTAR, FMASK) use passthrough - no VM exit.
+        // SYSCALL MSRs (STAR, LSTAR, CSTAR, FMASK) are passthrough.
         _ => {
-            // Unknown MSR - exit to userspace
             if let Err(e) = advance_rip(ctx) {
                 return ExitHandlerResult::Error(e);
             }

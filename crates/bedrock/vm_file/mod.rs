@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! VM file descriptor support for per-VM anonymous inodes.
-//!
-//! This module provides the file operations for bedrock-vm anonymous inodes,
-//! which are created when userspace calls CREATE_ROOT_VM. Each VM gets its
-//! own file descriptor, and the VM is released when the file descriptor is
-//! closed.
+//! Per-VM anonymous-inode file descriptors (created by CREATE_ROOT_VM and
+//! CREATE_FORKED_VM); the VM is released when its FD is closed.
 //!
 //! # Module Structure
 //!
@@ -23,6 +19,5 @@ pub(crate) mod handlers;
 pub(crate) mod root;
 pub(crate) mod structs;
 
-// Re-export commonly used items
 pub(crate) use core::ParentVmArc;
 pub(crate) use fd::{create_forked_vm_fd, create_vm_fd};

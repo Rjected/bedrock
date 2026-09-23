@@ -8,11 +8,9 @@
 //! cargo run -p bedrock-lab --example lab_branching -- <vmlinux> <initramfs>
 //! ```
 //!
-//! The guest is expected to load `bedrock-io.ko` and issue the ready
-//! hypercall before the ready deadline. After that, the example forks one
-//! branch with a custom `InputSource`. The lab uses that source to serve
-//! guest RDRAND/RDSEED exits and to schedule bash commands on the
-//! deterministic I/O channel.
+//! After the guest (with `bedrock-io.ko`) signals ready, one branch is forked
+//! with a custom `InputSource` that serves RDRAND/RDSEED and schedules bash
+//! commands.
 //!
 //! Pass `--events-dir <dir>` to capture each run's event stream to
 //! `<dir>/run-NNN/events.jsonl` for divergence debugging.
@@ -66,11 +64,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         ready_cp.time().as_secs_f64()
     );
 
-    // Advance an idle branch up to the first I/O time and re-checkpoint
-    // there. The input-driven branch then forks from this point, so the
-    // captured exits only cover the part the lab is actively driving — the
-    // pre-I/O idle window (which is uninteresting for divergence
-    // debugging) doesn't end up in the JSONL.
+    // Re-checkpoint at the first I/O time so the idle pre-I/O window isn't
+    // captured.
     let first_io_time = ready_cp.time() + VirtDuration::from_secs(1, ready_cp.tsc_frequency());
     let mut idle = ready_cp.branch()?;
     idle.run_until(first_io_time)?;
@@ -88,15 +83,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         println!("=== iteration {iter} ===");
 
-        // Use ready_cp.time() as the source base so the first I/O fires at
-        // pre_io_cp.time() (i.e. immediately when run_until starts pumping
-        // the input-driven branch), rather than another 1s in the future.
+        // Base on ready_cp so the first I/O fires immediately at pre_io_cp.
         let source = DemoInputSource::new(ready_cp.time());
         let mut branch = pre_io_cp.branch_with_input_source(source)?;
         if args.events_dir.is_some() {
-            // Capture every exit (deterministic and non-deterministic). Memory
-            // hashing is skipped — register state already pins down divergence,
-            // and hashing every exit dominates run time.
+            // No memory hashing: register state suffices and hashing dominates.
             branch.set_event_config(&EventConfig {
                 exits: ExitCapture::AllExits { memory_hash: false },
                 ..Default::default()
@@ -125,8 +116,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         print_input_recording(branch.input_recording());
         sink.close_events();
-        // `branch` drops here, releasing its slot in `lab.live_branches`
-        // so the next iteration's fork starts from a clean slate.
     }
 
     Ok(())
@@ -142,16 +131,13 @@ struct Args {
     /// Path to an initramfs/initrd image.
     initramfs: String,
 
-    /// If set, capture the input-driven branch's event stream to
-    /// `<dir>/run-NNN/events.jsonl` (one dir per iteration), which
-    /// `contrib/determ-divergence.py` reads to locate where two runs diverge.
-    /// Without this flag the branch runs without capture.
+    /// Capture each iteration's event stream to `<dir>/run-NNN/events.jsonl`
+    /// (for `contrib/determ-divergence.py`).
     #[arg(long)]
     events_dir: Option<String>,
 
     /// Re-run the input-driven phase this many times from the same pre-IO
-    /// checkpoint, each into its own `run-NNN/` under `--events-dir`. The
-    /// boot + pre-IO phase happens once and is shared across iterations.
+    /// checkpoint.
     #[arg(long, default_value_t = 1)]
     iterations: u32,
 }
@@ -172,8 +158,6 @@ impl DemoInputSource {
                     at: base + VirtDuration::from_secs(1, base.frequency()),
                     target: BashTarget::Host,
                     command: "echo input-source: first command".to_string(),
-                    // Record this command's output so it comes back on the
-                    // resulting `ActionResponse` (via the output feedback buffer).
                     record_output: true,
                 },
                 IoInput {
@@ -244,10 +228,8 @@ fn print_input_recording(recording: &bedrock_lab::InputRecording) {
     }
 }
 
-/// Lab sink: serial lines go to stdout; `Record` events are written to an
-/// `events.jsonl` that can be swapped between iterations via
-/// [`LabSink::open_events`] / [`LabSink::close_events`], so a single tree (and a
-/// single boot) produces N independent run dirs.
+/// Serial lines to stdout; `Record` events to a per-iteration `events.jsonl`
+/// swapped via [`LabSink::open_events`] / [`LabSink::close_events`].
 struct LabSink {
     events: Mutex<Option<BufWriter<fs::File>>>,
 }
@@ -259,8 +241,7 @@ impl LabSink {
         }
     }
 
-    /// Direct subsequent `Record` events into `<dir>/events.jsonl`, closing any
-    /// previously-open file first. The `dir` is created if it doesn't exist.
+    /// Redirect `Record` events into `<dir>/events.jsonl`.
     fn open_events(&self, dir: &str) -> std::io::Result<()> {
         fs::create_dir_all(dir)?;
         let events = fs::File::create(format!("{dir}/events.jsonl"))?;
@@ -269,9 +250,7 @@ impl LabSink {
         Ok(())
     }
 
-    /// Flush and drop the current file so the next iteration starts with a
-    /// fresh `--events-dir`. Subsequent `Record` events are dropped until the
-    /// next `open_events` call.
+    /// Close the file; `Record` events are dropped until `open_events`.
     fn close_events(&self) {
         let mut g = self.events.lock().unwrap();
         if let Some(mut events) = g.take() {

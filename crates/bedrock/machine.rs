@@ -43,7 +43,6 @@ impl Kernel for LinuxKernel {
         T: Sync,
         E: Send,
     {
-        // Store the closure and data in a struct we can pass through the C callback.
         struct CallbackData<'a, F, T, E> {
             func: &'a F,
             data: &'a T,
@@ -53,8 +52,7 @@ impl Kernel for LinuxKernel {
         // SAFETY: This is only accessed from one CPU at a time via for_each_cpu.
         unsafe impl<F, T, E> Sync for CallbackData<'_, F, T, E> {}
 
-        // The C callback that bedrock_for_each_cpu will invoke on each CPU.
-        // The info parameter points to BedrockCpuCallInfo, which contains our CallbackData.
+        // C callback; `info` points to BedrockCpuCallInfo wrapping our CallbackData.
         extern "C" fn trampoline<F, T, E>(info: *mut core::ffi::c_void)
         where
             F: Fn(&T) -> Result<(), E>,
@@ -64,13 +62,11 @@ impl Kernel for LinuxKernel {
             // SAFETY: call_info.info points to our CallbackData struct.
             let cb = unsafe { &*(call_info.info as *const CallbackData<'_, F, T, E>) };
             if let Err(e) = (cb.func)(cb.data) {
-                // Store the error and signal to C code that we failed.
                 // SAFETY: Only one CPU at a time accesses this.
                 unsafe {
                     *cb.error.get() = Some(e);
                 }
-                // Set error code to signal failure to the C code.
-                // This will cause bedrock_for_each_cpu to stop iterating.
+                // Non-zero error makes bedrock_for_each_cpu stop iterating.
                 call_info.error = -1;
             }
         }
@@ -83,9 +79,8 @@ impl Kernel for LinuxKernel {
 
         let mut failed_cpu: i32 = -1;
 
-        // SAFETY: bedrock_for_each_cpu is our C helper that uses for_each_online_cpu
-        // with smp_call_function_single to call the callback on each CPU sequentially.
-        // It stops on the first error and returns the failed CPU.
+        // SAFETY: bedrock_for_each_cpu runs the callback on each online CPU
+        // sequentially (smp_call_function_single) and stops on the first error.
         let ret = unsafe {
             c_helpers::bedrock_for_each_cpu(
                 Some(trampoline::<F, T, E>),
@@ -96,7 +91,6 @@ impl Kernel for LinuxKernel {
             )
         };
 
-        // Check if any CPU encountered an error.
         if ret != 0 {
             // SAFETY: bedrock_for_each_cpu has completed, so no more writes to error.
             if let Some(e) = unsafe { (*cb_data.error.get()).take() } {
@@ -272,17 +266,7 @@ impl DescriptorTableAccess for RealDescriptorTableAccess {
     }
 
     fn read_tr_base(&self) -> u64 {
-        // On Linux, the TSS base is stored in the per-CPU TSS structure.
-        // We need to get this from the kernel's cpu_tss_rw.
-        // For now, we read it by parsing the GDT entry pointed to by TR.
-        // This is complex, so we use a simpler approach: read from the kernel's
-        // per-CPU data structure.
-        //
-        // The kernel stores the TSS at a known per-CPU location.
-        // We can use the kernel's this_cpu_ptr(&cpu_tss_rw) equivalent.
-        //
-        // For a minimal implementation, we read it from the GDT.
-        // The TR selector points to a TSS descriptor in the GDT.
+        // Parse the TSS descriptor that TR selects in the GDT.
         let gdtr = self.read_gdtr();
         let tr = self.read_tr();
         let index = tr.bits() as usize >> 3; // Remove RPL and TI bits
@@ -291,19 +275,10 @@ impl DescriptorTableAccess for RealDescriptorTableAccess {
             return 0;
         }
 
-        // TSS descriptor in 64-bit mode is 16 bytes (system segment descriptor)
+        // 64-bit TSS descriptors are 16 bytes (two GDT slots).
         let desc_addr = gdtr.base as usize + index * 8;
 
-        // Read the 16-byte TSS descriptor
-        // Format (64-bit TSS descriptor):
-        // Bytes 0-1: Limit 15:0
-        // Bytes 2-3: Base 15:0
-        // Byte 4: Base 23:16
-        // Byte 5: Type/Attributes
-        // Byte 6: Limit 19:16 / Flags
-        // Byte 7: Base 31:24
-        // Bytes 8-11: Base 63:32
-        // Bytes 12-15: Reserved
+        // Base: bytes 2-3 (15:0), 4 (23:16), 7 (31:24), 8-11 (63:32).
         // SAFETY: desc_addr points into the GDT which is valid kernel memory, and the TR selector index is validated above.
         unsafe {
             let desc_ptr = desc_addr as *const u8;

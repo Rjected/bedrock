@@ -9,16 +9,13 @@ use std::mem::size_of;
 fn test_ioctl_encoding() {
     use super::ioctl::CreateVmConfig;
 
-    // Verify our ioctl encoding matches the kernel's
-    // _IOW('B', 0, CreateVmConfig) - has write direction bit and size of CreateVmConfig
+    // _IOW('B', 0, CreateVmConfig)
     assert_eq!((BEDROCK_CREATE_ROOT_VM >> 30) & 0x3, IOC_WRITE);
     assert_eq!(
         (BEDROCK_CREATE_ROOT_VM >> 16) & 0x3FFF,
         size_of::<CreateVmConfig>() as u64
     );
 
-    // _IOR('B', 1, size) and _IOW('B', 2, size) depend on struct size
-    // Just verify they're different and have the right direction bits
     assert_ne!(BEDROCK_VM_GET_REGS, BEDROCK_VM_SET_REGS);
     assert_eq!((BEDROCK_VM_GET_REGS >> 30) & 0x3, IOC_READ);
     assert_eq!((BEDROCK_VM_SET_REGS >> 30) & 0x3, IOC_WRITE);
@@ -26,8 +23,7 @@ fn test_ioctl_encoding() {
 
 #[test]
 fn test_regs_size() {
-    // Verify Regs has the expected size (for ABI compatibility)
-    // This should match sizeof(BedrockRegs) in the kernel
+    // Must match sizeof(BedrockRegs) in the kernel.
     let size = size_of::<Regs>();
     println!("Regs size: {} bytes", size);
 
@@ -40,8 +36,7 @@ fn test_regs_size() {
     // rip: 8
     // rflags: 8
     // Total: 128 + 40 + 48 + 160 + 20 + 8 + 8 + 8 = 420
-
-    // Note: actual size may differ due to alignment
+    // (plus alignment padding)
     assert!(size > 0);
 }
 
@@ -49,7 +44,6 @@ fn test_regs_size() {
 fn test_real_mode_defaults() {
     let regs = Regs::real_mode();
 
-    // Reserved RFLAGS bit should be set
     assert_eq!(regs.rflags & Regs::RFLAGS_RESERVED, Regs::RFLAGS_RESERVED);
 
     // Reset vector
@@ -64,14 +58,11 @@ fn test_real_mode_defaults() {
 fn test_long_mode_defaults() {
     let regs = Regs::long_mode();
 
-    // Reserved RFLAGS bit should be set
     assert_eq!(regs.rflags & Regs::RFLAGS_RESERVED, Regs::RFLAGS_RESERVED);
 
-    // CR0 should have PE and PG
     assert!((regs.control_regs.cr0.bits() & cr0::PE) != 0);
     assert!((regs.control_regs.cr0.bits() & cr0::PG) != 0);
 
-    // EFER should have LME and LMA
     assert!((regs.extended_control.efer.bits() & efer::LME) != 0);
     assert!((regs.extended_control.efer.bits() & efer::LMA) != 0);
 }

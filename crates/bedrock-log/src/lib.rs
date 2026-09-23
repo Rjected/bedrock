@@ -2,9 +2,7 @@
 
 //! Conditional logging macros for bedrock.
 //!
-//! This crate provides logging macros that work in both kernel and userspace contexts:
-//! - In kernel mode (without `cargo` feature): uses `pr_info!`, `pr_err!`, etc. from the kernel crate
-//! - In userspace/tests (with `cargo` feature): no-op (compiles to nothing)
+//! Kernel builds use the kernel's `pr_*!` macros; `cargo` builds compile to no-ops.
 //!
 //! # Usage
 //!

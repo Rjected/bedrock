@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Linux boot_params (zero page) setup.
-//!
-//! Based on Linux boot protocol Documentation/arch/x86/boot.rst.
-//! The boot_params structure is documented in arch/x86/include/uapi/asm/bootparam.h.
+//! Linux boot_params (zero page) setup, per Documentation/arch/x86/boot.rst and
+//! arch/x86/include/uapi/asm/bootparam.h.
 
 use super::constants::boot_params_offsets as offsets;
 use super::constants::boot_protocol::{self, loadflags};
@@ -63,7 +61,6 @@ pub fn setup_boot_params(
     write_u32(boot_params, offsets::CMD_LINE_PTR, CMDLINE_ADDR as u32);
     write_u32(boot_params, offsets::CMDLINE_SIZE, cmdline.len() as u32);
 
-    // E820 memory map
     setup_e820_table(boot_params, memory_size);
 }
 
@@ -105,7 +102,6 @@ fn setup_e820_table(boot_params: &mut [u8], memory_size: usize) {
     }
 }
 
-/// Write the kernel command line to memory.
 pub fn write_cmdline(memory: &mut [u8], cmdline: &str) {
     let cmdline_bytes = cmdline.as_bytes();
     let dest = &mut memory[CMDLINE_ADDR as usize..][..cmdline_bytes.len() + 1];

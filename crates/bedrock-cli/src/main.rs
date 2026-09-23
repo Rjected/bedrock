@@ -24,18 +24,12 @@ use bedrock_vm::{
 
 use args::{Args, IoAction, RdrandMode, ScheduledIoAction};
 
-/// Line-buffered output that prefixes each line with a virtual time timestamp.
-///
-/// The timestamp format is `[vt x.xxx]` where x.xxx is the emulated TSC
-/// converted to seconds since VM start. Console output arrives as `Serial`
-/// event records, each stamped with the emulated TSC of its first byte; a line
-/// continued across records keeps that first record's TSC.
+/// Line-buffered console output prefixed with `[vt x.xxx]` (virtual seconds).
 struct LineBufferedOutput {
-    /// Partial line buffer (content before newline received).
     buffer: String,
-    /// Emulated TSC at the start of the line currently in `buffer`.
+    /// Emulated TSC at the start of the line in `buffer`.
     line_tsc: u64,
-    /// Optional file to write raw output (without timestamps).
+    /// Raw output without timestamps.
     log_file: Option<File>,
 }
 
@@ -48,13 +42,9 @@ impl LineBufferedOutput {
         }
     }
 
-    /// Process one `Serial` event record (a chunk of console bytes stamped with
-    /// the emulated TSC of the chunk's first byte), printing each completed line
-    /// with a `[vt x.xxx]` timestamp. A fresh line takes `record_tsc` as its
-    /// start time; a line continued from a previous record keeps the earlier
-    /// start TSC. Bytes not yet terminated by `\n` stay buffered.
+    /// Print each completed line of a `Serial` record. A line continued across
+    /// records keeps its first record's TSC.
     fn write_serial_record(&mut self, bytes: &[u8], record_tsc: u64, tsc_frequency: u64) {
-        // Write raw output to log file if present.
         if let Some(ref mut f) = self.log_file {
             let _ = f.write_all(bytes);
             let _ = f.flush();
@@ -76,7 +66,7 @@ impl LineBufferedOutput {
         let _ = std::io::stdout().flush();
     }
 
-    /// Flush any remaining partial line (without timestamp since it's incomplete).
+    /// Flush the partial line, without a timestamp.
     fn flush_partial(&mut self) {
         if !self.buffer.is_empty() {
             print!("{}", self.buffer);
@@ -86,13 +76,8 @@ impl LineBufferedOutput {
     }
 }
 
-/// Render a completed console line for display.
-///
-/// A [`ConsoleLine::Journal`] record is shown in the human `[source] | message`
-/// form, with the source tinted by a colour derived from the label so each
-/// source stays visually distinct. A [`ConsoleLine::Raw`] line — raw kernel
-/// printk emitted before the guest's `journalctl` tail starts, or any
-/// non-record line — is shown verbatim.
+/// Render journal records as a coloured `[source] | message`; raw lines
+/// (e.g. early printk) verbatim.
 fn render_console_line(line: &str) -> String {
     match ConsoleLine::parse(line) {
         ConsoleLine::Journal { source, message } => {
@@ -106,9 +91,7 @@ fn render_console_line(line: &str) -> String {
     }
 }
 
-/// Pick an ANSI SGR foreground colour (31..=36) for a source label, matching
-/// the palette the guest's old jq formatter used: the sum of the label's
-/// Unicode scalar values modulo the six-colour range.
+/// ANSI foreground colour (31..=36) from the sum of the label's chars.
 fn source_color(label: &str) -> u32 {
     label.chars().map(|c| c as u32).sum::<u32>() % 6 + 31
 }
@@ -120,13 +103,11 @@ fn main() {
     }
 }
 
-/// Log a VM exit warning with RIP.
 fn log_vm_exit(vm: &Vm, msg: &str) {
     let rip = vm.get_regs().map(|r| r.rip).unwrap_or(0);
     warn!("VM exit: {} at RIP {:#018x}", msg, rip);
 }
 
-/// Serialize an `IoAction` into the I/O channel request wire format.
 fn encode_io_action(action: &IoAction) -> Vec<u8> {
     io_channel::encode_request(
         action.container.as_deref(),
@@ -135,8 +116,7 @@ fn encode_io_action(action: &IoAction) -> Vec<u8> {
     )
 }
 
-/// Read `len` bytes of recorded command output from the output feedback
-/// buffer (registered by the guest under `IO_OUTPUT_BUFFER_ID`).
+/// Read `len` bytes of recorded command output from the output feedback buffer.
 fn read_io_output(vm: &mut Vm, len: usize) -> io::Result<Vec<u8>> {
     let slots = vm.feedback_buffer_slots_for_id(io_channel::IO_OUTPUT_BUFFER_ID)?;
     let slot = match slots.first() {
@@ -152,7 +132,6 @@ fn read_io_output(vm: &mut Vm, len: usize) -> io::Result<Vec<u8>> {
         .unwrap_or_default())
 }
 
-/// Wait for Ctrl-C if wait flag is set.
 fn maybe_wait_for_ctrl_c(wait: bool) {
     if wait {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -188,7 +167,6 @@ macro_rules! debug_opt {
     };
 }
 
-/// Build RDRAND config from command-line arguments.
 fn build_rdrand_config(args: &Args) -> RdrandConfig {
     match args.rdrand_mode {
         RdrandMode::Seeded => RdrandConfig::seeded_rng(args.rdrand_seed),
@@ -196,19 +174,12 @@ fn build_rdrand_config(args: &Args) -> RdrandConfig {
     }
 }
 
-/// Build the unified event-stream config from command-line arguments.
-///
-/// `--event-categories` selects the non-exit kinds; `--exit-capture` /
-/// `--single-step` set the `Exit` trigger policy and, when active, add the
-/// `EXIT` category. Returns an enabled config; the caller only applies it when
-/// `--events-jsonl` provides a drain sink.
+/// `--event-categories` selects non-exit kinds; `--exit-capture` /
+/// `--single-step` own the `EXIT` category and trigger.
 fn build_event_config(args: &Args) -> EventConfig {
-    // `--exit-capture`/`--single-step` own the EXIT category; ignore any `exit`
-    // token in `--event-categories` so the two can't disagree.
     let mut categories = parse_event_categories(&args.event_categories);
     categories.0 &= !EventCategories::EXIT.0;
-    // Serial is the console: always captured so guest output is printed,
-    // regardless of `--event-categories`.
+    // Serial is the console, so it is always on.
     categories = categories.union(EventCategories::SERIAL);
 
     let (trigger, target_tsc) = args.exit_trigger();
@@ -265,7 +236,6 @@ fn run() -> io::Result<()> {
     let args = Args::parse();
     let memory_size = args.memory * 1024 * 1024;
 
-    // Validate: vmlinux is required for root VMs (not forked)
     if args.parent_id.is_none() && args.vmlinux.is_none() {
         return Err(io::Error::other(
             "vmlinux path is required when creating a root VM (not using --parent-id)",
@@ -299,7 +269,6 @@ fn run() -> io::Result<()> {
     );
     debug_opt!("Stop at TSC:", args.stop_at_tsc);
 
-    // Open log file if specified and create line-buffered output
     let log_file: Option<File> = args
         .serial_log_file
         .as_ref()
@@ -307,10 +276,8 @@ fn run() -> io::Result<()> {
         .transpose()?;
     let mut output = LineBufferedOutput::new(log_file);
 
-    // Build configs from args
     let rdrand_config = build_rdrand_config(&args);
 
-    // Build VM configuration
     let mut builder = VmBuilder::new().rdrand(rdrand_config);
 
     let tsc_frequency = args.virt_tsc_frequency.unwrap_or(DEFAULT_TSC_FREQUENCY);
@@ -334,7 +301,6 @@ fn run() -> io::Result<()> {
         builder = builder.stop_at_tsc(tsc);
     }
 
-    // Create VM
     let mut vm: Vm = builder.build().map_err(|e| {
         io::Error::other(
             format!(
@@ -353,10 +319,6 @@ fn run() -> io::Result<()> {
         );
     }
 
-    // Enable the unified event stream. `--event-categories` chooses which kinds
-    // are captured; `--exit-capture` / `--single-step` add `Exit` records and
-    // set their trigger policy. `--events-jsonl` is the sole sink — exit records
-    // are just events with `kind: "exit"`.
     let mut events_jsonl_file: Option<std::io::BufWriter<File>> =
         if let Some(ref path) = args.events_jsonl {
             Some(std::io::BufWriter::new(File::create(path)?))
@@ -365,9 +327,7 @@ fn run() -> io::Result<()> {
         };
     let mut total_event_count: usize = 0;
 
-    // Always enable the event stream: guest serial output flows through it as
-    // `Serial` records (printed to the console below). `--events-jsonl`
-    // additionally drains every record (exits included) to a file.
+    // Always enabled: guest serial output flows through it.
     let event_config = build_event_config(&args);
     vm.set_event_config(&event_config)
         .map_err(|e| io::Error::other(format!("failed to enable event stream: {}", e)))?;
@@ -379,24 +339,19 @@ fn run() -> io::Result<()> {
         warn!("--exit-capture/--single-step capture exit records but --events-jsonl is not set; they will not be saved");
     }
 
-    // Setup for new VMs (not forked)
     if vm.is_root() {
         let vmlinux = args.vmlinux.as_ref().expect("vmlinux required for root VM");
 
-        // Read kernel file
         let kernel_data = read_file(vmlinux)?;
 
-        // Read initramfs if provided
         let initramfs_data = args.initramfs.as_ref().map(|p| read_file(p)).transpose()?;
 
-        // Load kernel into guest memory
         info!("Loading kernel from {}", vmlinux);
         let memory = vm.memory_mut().expect("Root VM must have memory");
         let (kernel_entry, kernel_end) = load_kernel(memory, &kernel_data)?;
         debug!("  Kernel entry point: {:#x}", kernel_entry);
         debug!("  Kernel ends at: {:#x}", kernel_end);
 
-        // Build Linux boot configuration
         let mut boot_config = LinuxBootConfig::new(kernel_entry, kernel_end).cmdline(&args.cmdline);
 
         if let Some(ref data) = initramfs_data {
@@ -404,7 +359,6 @@ fn run() -> io::Result<()> {
             boot_config = boot_config.initramfs(data);
         }
 
-        // Setup Linux boot (GDT, page tables, MP tables, boot_params, registers)
         debug!("Setting up Linux boot structures...");
         let boot_info = vm.setup_linux_boot(&boot_config).map_err(io_error)?;
         trace!(
@@ -417,11 +371,8 @@ fn run() -> io::Result<()> {
         }
     }
 
-    // Queue all I/O actions upfront. The hypervisor owns the pending
-    // FIFO and the guest module spawns parallel workers, so the CLI's
-    // job is just to push every scheduled action into the queue before
-    // the VM starts running. Sorting by target_tsc keeps the FIFO order
-    // deterministic when target_tscs are identical or zero.
+    // Queue all I/O actions upfront into the hypervisor's FIFO; sorting keeps
+    // the order deterministic when target_tscs tie.
     let mut io_schedule: Vec<ScheduledIoAction> = args.io_actions.clone();
     io_schedule.sort_by_key(|a| a.target_tsc);
     for (idx, sched) in io_schedule.iter().enumerate() {
@@ -441,10 +392,7 @@ fn run() -> io::Result<()> {
         info!("Queued {} I/O actions", io_schedule.len());
     }
 
-    // Build the file server for the file-transmission hypercall. The guest's
-    // initrd downloads its workload files (compose.yaml / images.tar) by name
-    // at boot; we serve them from the host paths the user passed via
-    // `--file <name>=<path>`.
+    // Serves `--file` mappings to the guest's file-fetch hypercall.
     let mut file_server =
         FileServer::new(args.files.iter().map(|f| (f.name.clone(), f.path.clone())));
     if !file_server.is_empty() {
@@ -455,11 +403,9 @@ fn run() -> io::Result<()> {
         );
     }
 
-    // Build the file writer for the file store hypercall. This allows the host
-    // to copy files from the guest.
+    // Receives files the guest stores to the host.
     let mut file_writer = FileWriter::new();
 
-    // Run VM
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
     let timeout_duration = args
@@ -467,7 +413,6 @@ fn run() -> io::Result<()> {
         .map(std::time::Duration::from_secs_f64);
 
     loop {
-        // Check wall-clock timeout
         if let Some(timeout) = timeout_duration {
             if wall_clock_start.elapsed() >= timeout {
                 info!("Wall-clock timeout reached ({:.1}s)", timeout.as_secs_f64());
@@ -477,10 +422,7 @@ fn run() -> io::Result<()> {
 
         match vm.run() {
             Ok(exit) => {
-                // Drain the unified event stream once: print `Serial` records as
-                // timestamped console lines, and (when --events-jsonl is set)
-                // write every record — exits included, each with its
-                // `deterministic` flag — to the JSONL sink.
+                // Print `Serial` records; write all records to --events-jsonl.
                 if exit.event_len > 0 {
                     if let Some(buffer) = vm.event_buffer() {
                         let drained = &buffer[..(exit.event_len as usize).min(buffer.len())];
@@ -501,7 +443,6 @@ fn run() -> io::Result<()> {
                     }
                 }
 
-                // Use the new ExitKind enum for cleaner matching
                 match exit.kind() {
                     ExitKind::VmcallShutdown => {
                         info!("VM shutdown (VMCALL hypercall)");
@@ -614,10 +555,8 @@ fn run() -> io::Result<()> {
         }
     }
 
-    // Flush any partial line from guest output
     output.flush_partial();
 
-    // Flush the event JSONL sink.
     if let Some(ref mut w) = events_jsonl_file {
         let _ = w.flush();
     }
@@ -625,10 +564,8 @@ fn run() -> io::Result<()> {
         info!("Wrote {} event records to {}", total_event_count, path);
     }
 
-    // Display exit statistics after VM shutdown
     let wall_clock_elapsed = wall_clock_start.elapsed();
     if let Ok(stats) = vm.get_exit_stats() {
-        // Write exit stats JSON if requested
         if let Some(ref path) = args.exit_stats_json {
             let json = serde_json::to_string_pretty(&stats).map_err(io_error)?;
             std::fs::write(path, json)?;
@@ -646,7 +583,6 @@ fn run() -> io::Result<()> {
         warn!("Failed to retrieve exit statistics");
     }
 
-    // Display userspace ioctl timing statistics
     println!("{}", vm.get_ioctl_stats());
 
     Ok(())

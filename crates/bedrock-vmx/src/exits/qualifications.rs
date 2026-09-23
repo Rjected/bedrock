@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Exit qualification types for VM exits.
-//!
-//! These structures parse the exit qualification field from the VMCS
-//! for various exit reasons.
+//! Parsers for VMCS exit qualification and related fields.
 
 /// CR access type (bits 5:4 of exit qualification).
 /// Intel SDM Vol 3C, Table 29-3.
@@ -141,10 +138,8 @@ pub struct EptViolationQualification {
     pub executable: bool,
     /// Guest linear-address field is valid.
     pub guest_linear_valid: bool,
-    /// The access was asynchronous to instruction execution and not part of
-    /// event delivery — set for accesses caused by Intel PT trace output, by
-    /// PEBS on processors with the EPT-friendly enhancement, or by user-
-    /// interrupt delivery.
+    /// Access was asynchronous to instruction execution (Intel PT output,
+    /// EPT-friendly PEBS, or user-interrupt delivery).
     pub asynchronous: bool,
 }
 
@@ -301,9 +296,7 @@ pub struct RdrandInstructionInfo {
 impl From<u32> for RdrandInstructionInfo {
     fn from(value: u32) -> Self {
         Self {
-            // Bits 6:3 = destination register
             dest_reg: ((value >> 3) & 0xF) as u8,
-            // Bits 12:11 = operand size
             operand_size: RdrandOperandSize::try_from(((value >> 11) & 0x3) as u8)
                 .unwrap_or(RdrandOperandSize::Size64),
         }

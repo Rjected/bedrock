@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Host half of the `HYPERCALL_FILE_STORE` hypercall.
-//!
-//! FileWriter reads a file chunk from the guest via the registered shared buffer
-//! and writes it to a host file.
+//! Host half of `HYPERCALL_FILE_STORE`: guest file chunks written to host files.
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -12,15 +9,12 @@ use std::io::{self, Write};
 
 use crate::Vm;
 
-/// Identifier the guest registers its file-storing buffer under
-/// (`HYPERCALL_REGISTER_FEEDBACK_BUFFER`). The host finds the buffer by this id.
+/// Feedback-buffer id of the guest's file-store buffer.
 pub const FILE_STORE_BUFFER_ID: &[u8] = b"bedrock-file-store";
 
-/// Bytes reserved at the start of the shared buffer for the request/response
-/// header. Data begins at this offset. The request header is
-/// `u32 name_len | u32 chunk_len | u64 reserved`; the response header is
-/// `i64 result | u64 reserved`. See guest/libvmcall.h for
-/// VMCALL_FILE_STORE_HEADER_LEN.
+/// Header size. Request: `u32 name_len | u32 chunk_len | u64 reserved`;
+/// response: `i64 result | u64 reserved`. Matches
+/// `VMCALL_FILE_STORE_HEADER_LEN` in guest/libvmcall.h.
 pub const FILE_STORE_HEADER_LEN: usize = 16;
 
 /// An error occurred while writing a chunk.
@@ -46,13 +40,11 @@ impl FileWriter {
         }
     }
 
-    /// Write the chunk the guest sent to a file on the host.
-    /// Returns the bytes accepted or 0 if the host disallows the file name.
+    /// Returns the bytes accepted, or 0 if the file name is disallowed.
     pub fn write(&mut self, vm: &mut Vm) -> io::Result<usize> {
         let slot = self.resolve_slot(vm)?;
 
-        // Ensure the buffer is mapped read-write so the response lands in the
-        // guest's pages. Map it once; subsequent fetches reuse the mapping.
+        // Read-write so the response lands in the guest's pages.
         if vm.feedback_buffer_mut_at(slot).is_none() {
             vm.map_feedback_buffer_mut_at(slot)?;
         }
@@ -67,7 +59,6 @@ impl FileWriter {
             ));
         }
 
-        // Parse the request header.
         let name_len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
         let chunk_len = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
 
@@ -86,7 +77,7 @@ impl FileWriter {
             String::from_utf8_lossy(&buf[FILE_STORE_HEADER_LEN..FILE_STORE_HEADER_LEN + name_len])
                 .into_owned();
 
-        // Open and truncate the file if not already cached from a prior chunked write.
+        // Truncate on the first chunk only.
         let file = match self.handles.entry(name) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
@@ -111,7 +102,6 @@ impl FileWriter {
         }
     }
 
-    /// Resolve and cache the feedback-buffer slot the guest registered.
     fn resolve_slot(&mut self, vm: &Vm) -> io::Result<usize> {
         if let Some(slot) = self.slot {
             return Ok(slot);
@@ -128,8 +118,7 @@ impl FileWriter {
     }
 }
 
-/// Write the response `result` into the buffer header and zero the reserved part of
-/// the header.
+/// Write the response header.
 fn write_result(buf: &mut [u8], result: i64) {
     buf[0..8].copy_from_slice(&result.to_le_bytes());
     buf[8..16].fill(0);

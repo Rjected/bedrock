@@ -48,8 +48,7 @@ impl From<UnknownExitReason> for ExitError {
 /// Result of handling a VM exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitHandlerResult {
-    /// Continue guest execution (exit was fully handled), without exiting to userspace. This
-    /// should be the most common case.
+    /// Exit fully handled; resume the guest without exiting to userspace.
     Continue,
     /// Exit to userspace with the given reason.
     ExitToUserspace(ExitReason),
@@ -92,16 +91,12 @@ pub fn advance_rip<C: VmContext>(ctx: &mut C) -> Result<(), ExitError> {
     Ok(())
 }
 
-/// Record one controlled-randomness value on the unified event stream.
+/// Emit one source-labelled [`EventKind::Randomness`] record. RDRAND/RDSEED
+/// carry the value inline in `payload` with empty `bytes`;
+/// `HYPERCALL_GET_RANDOM` appends the served buffer as `bytes`.
 ///
-/// The single emit path shared by RDRAND/RDSEED (`source` carries the value
-/// inline in the [`RandomPayload`], `bytes` empty) and `HYPERCALL_GET_RANDOM`
-/// (`source = GetRandom`, the served buffer in `bytes` trailing the header). One
-/// [`EventKind::Randomness`] record, source-labelled — there is no separate
-/// event kind per randomness channel.
-///
-/// A full event buffer is handled centrally by the exit dispatcher, so the
-/// append result is ignored (as elsewhere for randomness records).
+/// A full event buffer is handled by the exit dispatcher, so the append
+/// result is ignored.
 pub fn emit_randomness_event<C: VmContext>(ctx: &mut C, payload: &RandomPayload, bytes: &[u8]) {
     let header = payload.as_bytes();
     let n = bytes.len().min(RANDOM_REPLY_MAX);

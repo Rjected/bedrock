@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! VM file descriptor creation functions.
-//!
-//! This module provides functions to create anonymous inode file descriptors
-//! for VMs.
+//! Anonymous-inode FD creation for VMs.
 
 use core::ffi::c_int;
 use kernel::bindings;
@@ -19,27 +16,14 @@ use super::core::{BedrockForkedVmFile, BedrockVmFile, ParentVmArc};
 use super::forked::BEDROCK_FORKED_VM_FOPS;
 use super::root::BEDROCK_VM_FOPS;
 
-/// Create an anonymous inode file descriptor for a VM.
-///
-/// This function:
-/// 1. Wraps the VM in a `BedrockVmFile`
-/// 2. Adds it to the global vm_list for tracking
-/// 3. Creates an anonymous inode file descriptor
-///
-/// The returned file descriptor owns the VM. When the fd is closed, the VM
-/// is automatically released.
-///
-/// # Returns
-///
-/// On success, returns the new file descriptor (positive integer).
-/// On failure, returns a negative error code and the VM is freed.
+/// Wrap the VM in a `BedrockVmFile`, register it in the handler's vm_list, and
+/// create its FD, which owns the VM. On failure the VM is freed.
 #[inline(never)]
 pub(crate) fn create_vm_fd(
     vm: RootVm<RealVmcs, KernelGuestMemory, LinuxInstructionCounter>,
     vm_id: u64,
 ) -> Result<i32, kernel::error::Error> {
-    // Wrap VM in BedrockVmFile and allocate under an Arc. The file
-    // descriptor owns this Arc reference via private_data.
+    // The FD owns this Arc reference via private_data.
     let vm_file = Arc::new(
         BedrockVmFile::new(vm, vm_id),
         kernel::alloc::flags::GFP_KERNEL,
@@ -47,8 +31,7 @@ pub(crate) fn create_vm_fd(
     let handler_ref = ParentVmArc::Root(vm_file.clone());
     let vm_ptr = Arc::into_raw(vm_file).cast_mut();
 
-    // Register in global vm_list. The handler owns a strong reference while
-    // the VM is visible by ID.
+    // The handler owns a strong reference while the VM is visible by ID.
     {
         let mut guard = HANDLER.lock();
         if let Some(handler) = guard.as_mut() {
@@ -56,10 +39,8 @@ pub(crate) fn create_vm_fd(
         }
     }
 
-    // Create anonymous inode file descriptor
-    // SAFETY: The name is a valid C string literal. BEDROCK_VM_FOPS is a valid,
-    // static file_operations struct. vm_ptr is a valid heap-allocated BedrockVmFile.
-    // The flags are standard open flags.
+    // SAFETY: The name is a valid C string, BEDROCK_VM_FOPS is a static
+    // file_operations, and vm_ptr is a valid heap-allocated BedrockVmFile.
     let fd = unsafe {
         bedrock_anon_inode_getfd(
             c"bedrock-vm".as_ptr(),
@@ -70,15 +51,14 @@ pub(crate) fn create_vm_fd(
     };
 
     if fd < 0 {
-        // Cleanup on failure: remove from list and free
         {
             let mut guard = HANDLER.lock();
             if let Some(handler) = guard.as_mut() {
                 handler.remove_vm(vm_ptr);
             }
         }
-        // SAFETY: vm_ptr was created by Arc::into_raw above and has not been
-        // transferred to the kernel (fd creation failed), so we drop that Arc.
+        // SAFETY: vm_ptr came from Arc::into_raw above and was not handed to
+        // the kernel, so we drop that Arc.
         let _ = unsafe { Arc::from_raw(vm_ptr) };
         return Err(kernel::error::Error::from_errno(fd));
     }
@@ -86,21 +66,8 @@ pub(crate) fn create_vm_fd(
     Ok(fd)
 }
 
-/// Create an anonymous inode file descriptor for a forked VM.
-///
-/// This function:
-/// 1. Wraps the ForkedVm in a `BedrockForkedVmFile`
-/// 2. Adds it to the global vm_list for tracking
-/// 3. Creates an anonymous inode file descriptor
-///
-/// The ForkedVm already has its parent's children count incremented.
-/// When the fd is closed, the ForkedVm is dropped, which decrements
-/// the parent's children count.
-///
-/// # Returns
-///
-/// On success, returns the new file descriptor (positive integer).
-/// On failure, returns a negative error code and the ForkedVm is freed.
+/// Like [`create_vm_fd`] for a forked VM. The parent's children count is
+/// already incremented; dropping the ForkedVm on FD close decrements it.
 #[inline(never)]
 pub(crate) fn create_forked_vm_fd(
     vm: ForkedVm<RealVmcs, KernelPage, LinuxInstructionCounter>,
@@ -114,8 +81,7 @@ pub(crate) fn create_forked_vm_fd(
     let handler_ref = ParentVmArc::Forked(vm_file.clone());
     let vm_ptr = Arc::into_raw(vm_file).cast_mut();
 
-    // Register in global vm_list. The handler owns a strong reference while
-    // the VM is visible by ID.
+    // The handler owns a strong reference while the VM is visible by ID.
     {
         let mut guard = HANDLER.lock();
         if let Some(handler) = guard.as_mut() {
@@ -123,9 +89,8 @@ pub(crate) fn create_forked_vm_fd(
         }
     }
 
-    // SAFETY: The name is a valid C string literal. BEDROCK_FORKED_VM_FOPS is a valid,
-    // static file_operations struct. vm_ptr is a valid heap-allocated BedrockForkedVmFile.
-    // The flags are standard open flags.
+    // SAFETY: The name is a valid C string, BEDROCK_FORKED_VM_FOPS is a static
+    // file_operations, and vm_ptr is a valid heap-allocated BedrockForkedVmFile.
     let fd = unsafe {
         bedrock_anon_inode_getfd(
             c"bedrock-forked-vm".as_ptr(),
@@ -142,8 +107,8 @@ pub(crate) fn create_forked_vm_fd(
                 handler.remove_vm(vm_ptr);
             }
         }
-        // SAFETY: vm_ptr was created by Arc::into_raw above and has not been
-        // transferred to the kernel (fd creation failed), so we drop that Arc.
+        // SAFETY: vm_ptr came from Arc::into_raw above and was not handed to
+        // the kernel, so we drop that Arc.
         let _ = unsafe { Arc::from_raw(vm_ptr) };
         return Err(kernel::error::Error::from_errno(fd));
     }

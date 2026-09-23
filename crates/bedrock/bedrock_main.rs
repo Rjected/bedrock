@@ -30,7 +30,6 @@ mod vmx;
 mod vmx_asm;
 mod vmxon;
 
-// Re-exports from internal modules
 use c_helpers::bedrock_copy_from_user;
 use factory::{create_vm, KernelFrameAllocator};
 use instruction_counter::LinuxInstructionCounter;
@@ -46,9 +45,7 @@ use vmxon::RealVmx;
 /// Ioctl magic number for bedrock ('B' for Bedrock).
 const BEDROCK_IOC_MAGIC: u32 = b'B' as u32;
 
-/// Configuration for CREATE_ROOT_VM ioctl.
-///
-/// Userspace passes this struct to configure the VM at creation time.
+/// Configuration for the CREATE_ROOT_VM ioctl.
 #[repr(C)]
 struct BedrockCreateVmConfig {
     /// Size of guest memory to allocate in bytes.
@@ -57,12 +54,10 @@ struct BedrockCreateVmConfig {
     tsc_frequency: u64,
 }
 
-/// Ioctl number for CREATE_ROOT_VM command.
-/// Takes a BedrockCreateVmConfig pointer as argument, returns FD via return value.
+/// CREATE_ROOT_VM: takes a `BedrockCreateVmConfig` pointer, returns the VM FD.
 const BEDROCK_CREATE_ROOT_VM: u32 = _IOW::<BedrockCreateVmConfig>(BEDROCK_IOC_MAGIC, 0);
 
-/// Ioctl number for CREATE_FORKED_VM command.
-/// This is _IOW('B', 1, u64) - takes parent VM ID as argument, returns FD via return value.
+/// CREATE_FORKED_VM: takes the parent VM ID, returns the forked VM FD.
 const BEDROCK_CREATE_FORKED_VM: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 1);
 
 module! {
@@ -73,10 +68,8 @@ module! {
     license: "GPL",
 }
 
-/// Register a misc device with custom mode permissions.
-///
-/// The standard `MiscDeviceRegistration::register` doesn't allow setting the mode,
-/// so we need this helper to create world-accessible device files.
+/// Register a misc device with a custom mode (the standard
+/// `MiscDeviceRegistration::register` can't set it).
 fn register_miscdev_with_mode(
     name: &'static kernel::str::CStr,
     mode: u16,
@@ -85,50 +78,38 @@ fn register_miscdev_with_mode(
     // MiscDeviceRegistration's Drop will call misc_deregister.
     unsafe {
         ::pin_init::pin_init_from_closure(move |slot: *mut MiscDeviceRegistration<BedrockFile>| {
-            // Get a pointer to the inner miscdevice struct
             let inner_ptr = slot.cast::<bindings::miscdevice>();
 
-            // Create the base miscdevice from options
             let opts = MiscDeviceOptions { name };
             inner_ptr.write(opts.into_raw::<BedrockFile>());
 
-            // Set the mode for world-accessible permissions
             (*inner_ptr).mode = mode;
 
-            // Register the misc device
             kernel::error::to_result(bindings::misc_register(inner_ptr))
         })
     }
 }
 
-/// Maximum number of VMs (root + all live forks/checkpoints) the handler
-/// tracks at once. A fork past this fails with `ENOSPC`. Sized for a fuzzer
-/// that retains many live checkpoints, each backed by its own VM; the only
-/// cost is heap memory (the `vm_list` capacity plus per-VM EPT/VMCS/COW
-/// state for VMs that actually go live), so tune to host RAM.
+/// Maximum number of VMs (root + all live forks/checkpoints) tracked at once;
+/// a fork past this fails with `ENOSPC`. Cost is heap memory only, so tune to
+/// host RAM.
 const MAX_TRACKED_VMS: usize = 1024;
 
-// Define a global mutex for the handler using the kernel's global_lock! macro.
 // SAFETY: Initialized in module init before first use.
 kernel::sync::global_lock! {
     unsafe(uninit) static HANDLER: Mutex<Option<BedrockHandler<'static, RealVmx, MAX_TRACKED_VMS>>> = None;
 }
 
-/// Private data for an open bedrock device file.
-///
-/// Each open file descriptor gets its own instance of this struct.
-/// The actual VM management is handled by the global HANDLER.
+/// Per-open-file private data; VM management lives in the global `HANDLER`.
 #[pin_data]
 struct BedrockFile {}
 
 /// Handle CREATE_ROOT_VM ioctl - separated to isolate stack usage.
 #[inline(never)]
 fn handle_create_root_vm(arg: usize) -> Result<isize> {
-    // Copy the configuration struct from userspace
     let mut config = core::mem::MaybeUninit::<BedrockCreateVmConfig>::uninit();
-    // SAFETY: `config.as_mut_ptr()` points to valid, aligned, writable memory for a
-    // BedrockCreateVmConfig. `arg` is a user-provided pointer from the ioctl syscall.
-    // bedrock_copy_from_user performs a bounded copy.
+    // SAFETY: `config` is valid writable memory for a BedrockCreateVmConfig; `arg`
+    // is a user pointer and bedrock_copy_from_user performs a bounded copy.
     let not_copied = unsafe {
         bedrock_copy_from_user(
             config.as_mut_ptr().cast::<core::ffi::c_void>(),
@@ -139,8 +120,7 @@ fn handle_create_root_vm(arg: usize) -> Result<isize> {
     if not_copied != 0 {
         return Err(EFAULT);
     }
-    // SAFETY: bedrock_copy_from_user succeeded (returned 0), so all bytes of `config`
-    // have been written and it is now fully initialized.
+    // SAFETY: bedrock_copy_from_user returned 0, so `config` is fully initialized.
     let config = unsafe { config.assume_init() };
 
     let memory_size = config.memory_size as usize;
@@ -155,14 +135,12 @@ fn handle_create_root_vm(arg: usize) -> Result<isize> {
         return Err(EINVAL);
     }
 
-    // Allocate a VM ID from the handler
     let vm_id = {
         let mut guard = HANDLER.lock();
         let handler = guard.as_mut().ok_or(ENODEV)?;
         handler.alloc_vm_id().ok_or(ENOSPC)?
     };
 
-    // Create the VM with the specified memory size and TSC frequency
     let vm = create_vm(&MACHINE, memory_size, tsc_frequency).ok_or_else(|| {
         log_err!(
             "Failed to create VM {} with {} bytes of memory\n",
@@ -172,7 +150,6 @@ fn handle_create_root_vm(arg: usize) -> Result<isize> {
         ENOMEM
     })?;
 
-    // Create anonymous inode FD for the VM
     let fd = create_vm_fd(vm, vm_id).inspect_err(|e| {
         log_err!("Failed to create VM FD: {:?}\n", e);
     })?;
@@ -188,35 +165,26 @@ fn handle_create_root_vm(arg: usize) -> Result<isize> {
 
 /// Handle CREATE_FORKED_VM ioctl - separated to isolate stack usage.
 ///
-/// This function is designed for parallel fork creation. The handler lock is
-/// only held briefly to:
-/// 1. Allocate a VM ID
-/// 2. Find and validate the parent VM
-/// 3. Retain the parent and increment its children_count
-/// 4. Get a raw pointer to the retained parent
-///
-/// The expensive work (EPT cloning, VMCS copying, etc.) happens outside the lock,
-/// allowing multiple forks from the same parent to proceed in parallel.
+/// The handler lock is held only to allocate the ID, find the parent, and
+/// increment its children_count; the expensive fork work (EPT/VMCS cloning)
+/// runs outside the lock so forks from the same parent proceed in parallel.
 ///
 /// # Safety Invariants
 ///
 /// - Once children_count > 0, the parent cannot be run (can_run() returns false)
-/// - Concurrent forks only READ parent state, which is safe
-/// - The retained parent reference keeps parent memory alive if the FD closes
+/// - Concurrent forks only READ parent state
+/// - The retained parent Arc keeps parent memory alive if its FD closes
 #[inline(never)]
 fn handle_create_forked_vm(parent_vm_id: u64) -> Result<isize> {
     log_info!("FORK: Starting fork from parent {}\n", parent_vm_id);
 
-    // Phase 1: Under lock - allocate ID, find parent, clone parent Arc
-    // This is the only serialized part of fork creation.
+    // Phase 1 (locked): allocate ID, find parent, clone parent Arc.
     let (vm_id, parent) = {
         let mut guard = HANDLER.lock();
         let handler = guard.as_mut().ok_or(ENODEV)?;
 
-        // Allocate VM ID
         let vm_id = handler.alloc_vm_id().ok_or(ENOSPC)?;
 
-        // Find the parent VM by ID
         let parent_ref = handler.find_vm_by_id(parent_vm_id).ok_or_else(|| {
             log_err!("Parent VM {} not found\n", parent_vm_id);
             ENOENT
@@ -224,9 +192,7 @@ fn handle_create_forked_vm(parent_vm_id: u64) -> Result<isize> {
 
         let parent_type = parent_ref.file_type();
 
-        // Clone the parent Arc and increment children_count BEFORE releasing
-        // the handler lock. The cloned reference keeps parent memory alive even
-        // if userspace closes the parent FD while fork creation continues.
+        // Increment children_count BEFORE releasing the handler lock.
         let parent = parent_ref;
         match &parent {
             ParentVmArc::Root(parent_file) => {
@@ -247,8 +213,7 @@ fn handle_create_forked_vm(parent_vm_id: u64) -> Result<isize> {
         (vm_id, parent)
     }; // Lock released here - expensive work can now proceed in parallel
 
-    // Phase 2: Without lock - do the expensive fork work
-    // Multiple threads can execute this phase concurrently for the same parent.
+    // Phase 2 (unlocked): expensive fork work, may run concurrently per parent.
     let fork_result = {
         let mut allocator = KernelFrameAllocator::new(MACHINE.kernel());
         let exit_handler_rip = vmx::VmxContext::exit_handler_addr();
@@ -256,8 +221,7 @@ fn handle_create_forked_vm(parent_vm_id: u64) -> Result<isize> {
 
         match &parent {
             ParentVmArc::Root(parent_file) => {
-                // Use new_with_incremented_parent since we already incremented
-                // children_count in phase 1 while holding the lock.
+                // children_count was already incremented in phase 1.
                 ForkedVm::new_with_incremented_parent(
                     parent_file.as_ref(),
                     &MACHINE,
@@ -276,7 +240,6 @@ fn handle_create_forked_vm(parent_vm_id: u64) -> Result<isize> {
         }
     };
 
-    // Handle fork result - on failure, we need to decrement children_count
     let forked_vm = match fork_result {
         Ok(vm) => vm,
         Err(e) => {
@@ -285,8 +248,7 @@ fn handle_create_forked_vm(parent_vm_id: u64) -> Result<isize> {
                 parent_vm_id,
                 e
             );
-            // Decrement children_count since ForkedVm wasn't created
-            // (normally ForkedVm::drop does this, but creation failed)
+            // ForkedVm::drop would normally decrement children_count.
             match &parent {
                 ParentVmArc::Root(parent_file) => {
                     ParentVm::remove_child(parent_file.as_ref());
@@ -299,7 +261,7 @@ fn handle_create_forked_vm(parent_vm_id: u64) -> Result<isize> {
         }
     };
 
-    // Phase 3: Create FD (re-acquires lock briefly to register VM)
+    // Phase 3: create FD (re-acquires lock briefly to register VM).
     log_info!("FORK: Creating FD for forked VM {}\n", vm_id);
     let fd = create_forked_vm_fd(forked_vm, parent, vm_id).inspect_err(|e| {
         log_err!("Failed to create forked VM FD: {:?}\n", e);
@@ -352,7 +314,6 @@ impl kernel::InPlaceModule for Bedrock {
                 // SAFETY: Called exactly once during module initialization.
                 HANDLER.init();
 
-                // Initialize VMX and create the handler
                 let handler = match BedrockHandler::<RealVmx, MAX_TRACKED_VMS>::new(&MACHINE) {
                     Ok(h) => {
                         log_info!("VMX initialized successfully\n");
@@ -364,13 +325,11 @@ impl kernel::InPlaceModule for Bedrock {
                     }
                 };
 
-                // Store the handler in the global
                 {
                     let mut guard = HANDLER.lock();
                     *guard = Some(handler);
                 }
 
-                // Initialize the miscdev field with world-readable/writable permissions
                 let miscdev_slot = core::ptr::addr_of_mut!((*slot)._miscdev);
                 register_miscdev_with_mode(c_str!("bedrock"), 0o666).__pinned_init(miscdev_slot)?;
 
@@ -387,13 +346,11 @@ impl PinnedDrop for Bedrock {
     fn drop(self: Pin<&mut Self>) {
         log_info!("Bedrock module unloading...\n");
 
-        // Clear the global handler first
         {
             let mut guard = HANDLER.lock();
             *guard = None;
         }
 
-        // Deinitialize VMX on all CPUs
         match MACHINE.kernel().call_on_all_cpus_with_data(
             &MACHINE,
             |machine| -> Result<(), VmxoffError> {

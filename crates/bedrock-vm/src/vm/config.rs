@@ -6,26 +6,19 @@ use crate::events::EventCategories;
 
 pub use bedrock_vmx::ExitTrigger;
 
-/// Single-step configuration for MTF (Monitor Trap Flag) mode.
-///
-/// Configures the VM to single-step (exit after each instruction) within
-/// a specified emulated TSC range. This is useful for debugging determinism
-/// issues by tracing every instruction in a specific region.
+/// Single-step (MTF) within an emulated TSC range.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct SingleStepConfig {
-    /// Whether single-stepping is enabled.
-    /// 0 = disabled, non-zero = enabled.
+    /// Non-zero = enabled.
     pub enabled: u64,
-    /// Start of TSC range (inclusive).
+    /// Inclusive.
     pub tsc_start: u64,
-    /// End of TSC range (exclusive).
+    /// Exclusive.
     pub tsc_end: u64,
 }
 
-/// Synthetic exit reason for checkpoint records.
-/// This value identifies an `Exit` record that is a periodic state snapshot
-/// rather than an actual VM exit.
+/// Synthetic exit reason of periodic checkpoint `Exit` records.
 pub const EXIT_REASON_CHECKPOINT: u32 = 0xFFFFFFFF;
 
 /// Bit flag: skip memory hashing in exit records (set `memory_hash` to 0).
@@ -33,38 +26,23 @@ pub const EXIT_FLAG_NO_MEMORY_HASH: u32 = 1 << 0;
 /// Bit flag: intercept guest #PF exceptions for determinism analysis.
 pub const EXIT_FLAG_INTERCEPT_PF: u32 = 1 << 1;
 
-/// Unified event-stream configuration passed to the kernel via ioctl.
-///
-/// One struct configures the whole stream: enabling it allocates the 1 MB event
-/// buffer (mmap'd to userspace) and installs the category mask, while the
-/// `exit_*` fields carry the trigger policy for `Exit` records. The mask filters
-/// records at emit time, so a disabled category costs a single bit test in the
-/// hypervisor. The stream is fully opt-in: with `enabled = 0` (the default)
-/// nothing is allocated and the hypervisor emits no events.
-///
-/// The category mask and the exit trigger are orthogonal dimensions: for `Exit`
-/// records to appear, the [`EventCategories::EXIT`] bit must be set *and*
-/// `exit_trigger` must be something other than [`ExitTrigger::Disabled`].
+/// Event-stream configuration ioctl payload. Enabling allocates the 1 MB
+/// buffer; disabled categories cost one bit test at emit time. `Exit` records
+/// need both [`EventCategories::EXIT`] and a non-[`Disabled`](ExitTrigger::Disabled)
+/// `exit_trigger`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct EventConfig {
-    /// Whether the event stream is enabled. The disabled->enabled transition
-    /// allocates the event buffer; enabled->disabled frees it.
     pub enabled: u32,
-    /// Category include mask (see [`EventCategories`]). Records whose category
-    /// bit is clear are dropped at emit time.
+    /// [`EventCategories`] mask.
     pub categories: u32,
-    /// `Exit`-record trigger policy ([`ExitTrigger`] as u32).
+    /// [`ExitTrigger`] as u32.
     pub exit_trigger: u32,
-    /// Exit flags bitfield (see `EXIT_FLAG_*` constants).
+    /// `EXIT_FLAG_*` bits.
     pub exit_flags: u32,
-    /// Mode-specific TSC for the exit trigger:
-    /// - `AtTsc`: emit once when emulated_tsc >= this value
-    /// - `Checkpoints`: interval between checkpoint records
-    /// - others: ignored
+    /// `AtTsc` threshold or `Checkpoints` interval; ignored otherwise.
     pub exit_target_tsc: u64,
-    /// Universal start threshold — no `Exit` records until emulated_tsc reaches
-    /// this value. 0 = capture from the start.
+    /// No `Exit` records before this emulated TSC (0 = from the start).
     pub exit_start_tsc: u64,
 }
 
@@ -74,8 +52,7 @@ impl EventConfig {
         Self::default()
     }
 
-    /// Enable the event stream with the given category mask. The exit trigger
-    /// starts [`ExitTrigger::Disabled`]; add one with [`with_exit_trigger`](Self::with_exit_trigger).
+    /// Enabled with no exit trigger; see [`with_exit_trigger`](Self::with_exit_trigger).
     pub fn enabled(categories: EventCategories) -> Self {
         Self {
             enabled: 1,
@@ -84,16 +61,14 @@ impl EventConfig {
         }
     }
 
-    /// Set the `Exit`-record trigger policy and its mode-specific TSC value
-    /// (`AtTsc` threshold / `Checkpoints` interval; pass 0 for the others).
+    /// `target_tsc` is the `AtTsc` threshold / `Checkpoints` interval, else 0.
     pub fn with_exit_trigger(mut self, trigger: ExitTrigger, target_tsc: u64) -> Self {
         self.exit_trigger = trigger as u32;
         self.exit_target_tsc = target_tsc;
         self
     }
 
-    /// Set the universal start threshold — no `Exit` records until the emulated
-    /// TSC reaches this value.
+    /// No `Exit` records before `start_tsc`.
     pub fn with_exit_start_tsc(mut self, start_tsc: u64) -> Self {
         self.exit_start_tsc = start_tsc;
         self
@@ -111,7 +86,6 @@ impl EventConfig {
         self
     }
 
-    /// The configured category mask as an [`EventCategories`].
     pub fn categories(&self) -> EventCategories {
         EventCategories(self.categories)
     }

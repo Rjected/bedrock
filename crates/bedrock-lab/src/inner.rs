@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Internal shared state.
-//!
-//! `LabInner` is the genealogy registry shared by all live [`Checkpoint`]
-//! handles and by every live [`Branch`]. Checkpoints register themselves as
-//! `Weak` references so the registry never extends their lifetime. Branches —
-//! which are non-`Clone` owning handles — register lightweight by-value
-//! metadata that they remove on drop or when consumed by `Branch::checkpoint`.
+//! `LabInner`: the genealogy registry shared by every [`Checkpoint`] and
+//! [`Branch`]. Checkpoints register as `Weak` so the registry never extends
+//! their lifetime; branches register metadata that they remove on drop.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{
@@ -19,8 +15,7 @@ use crate::checkpoint::{Checkpoint, CheckpointId, CheckpointInner};
 use crate::event::EventSink;
 use crate::time::VirtTime;
 
-/// Metadata about a live branch, kept in [`LabInner::live_branches`] so the
-/// tree view can show branches the user is currently holding.
+/// A live branch, so the tree view can show it.
 #[derive(Debug, Clone)]
 pub(crate) struct BranchMeta {
     pub(crate) id: BranchId,
@@ -28,8 +23,7 @@ pub(crate) struct BranchMeta {
     pub(crate) current_time: VirtTime,
 }
 
-/// Shared lab state. One instance per execution tree, held by every node
-/// (checkpoint or branch) in the tree via [`Arc`].
+/// Shared lab state; one per tree.
 pub(crate) struct LabInner {
     pub(crate) tsc_frequency: u64,
     next_checkpoint_id: AtomicU64,
@@ -39,11 +33,8 @@ pub(crate) struct LabInner {
     pub(crate) sink: Arc<dyn EventSink>,
 }
 
-/// Indexed logical checkpoint tree.
-///
-/// VM provenance lives on [`CheckpointInner`] as `_vm_parent`; this graph is
-/// only the user-facing timeline. Rewinds insert nodes into this logical tree
-/// without changing the underlying VM fork hierarchy.
+/// The logical checkpoint tree. Rewinds insert nodes here without changing the
+/// VM fork hierarchy (`CheckpointInner::_vm_parent`).
 #[derive(Default)]
 pub(crate) struct LabGraph {
     checkpoints: HashMap<CheckpointId, Weak<CheckpointInner>>,
@@ -56,8 +47,7 @@ impl LabInner {
         Arc::new(Self {
             tsc_frequency,
             next_checkpoint_id: AtomicU64::new(0),
-            // BranchId(0) is reserved for root-VM boot/setup events emitted
-            // before the ready checkpoint exists.
+            // BranchId(0) is reserved for pre-ready root boot events.
             next_branch_id: AtomicU64::new(1),
             graph: Mutex::new(LabGraph::default()),
             live_branches: Mutex::new(HashMap::new()),

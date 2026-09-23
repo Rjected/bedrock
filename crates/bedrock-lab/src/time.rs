@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Virtual time — the deterministic time currency of the hypervisor.
-//!
-//! The hypervisor's emulated TSC counts *retired guest instructions*, not
-//! wall-clock time — that's what makes execution deterministic. [`VirtTime`]
-//! is an *absolute moment* on this timeline; it pairs an instruction count
-//! with the TSC frequency it was measured against, so it can convert cleanly
-//! between counts, seconds, and `std::time::Duration`.
-//!
-//! [`VirtDuration`] is a *delta* between two moments at the same frequency.
-//! The two types compose with the obvious arithmetic:
+//! Virtual time. The emulated TSC counts retired guest instructions;
+//! [`VirtTime`] (a moment) and [`VirtDuration`] (a delta) pair such a count
+//! with its TSC frequency so they convert to seconds and `Duration`:
 //!
 //! ```ignore
 //! let t0: VirtTime = ...;
@@ -18,15 +11,11 @@
 //! let t2: VirtTime = t0 + dt;
 //! ```
 //!
-//! Mixing frequencies is a programming error; arithmetic between different
-//! frequencies panics (see [`VirtTime::checked_sub`] for the fallible form).
+//! Arithmetic across frequencies panics (see [`VirtTime::checked_sub`]).
 
 use std::time::Duration;
 
 /// An absolute moment in emulated virtual time.
-///
-/// Internally a retired-instruction count paired with the TSC frequency
-/// (instructions per emulated second) it was measured against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VirtTime {
     instructions: u64,
@@ -34,8 +23,6 @@ pub struct VirtTime {
 }
 
 /// A delta between two virtual-time moments.
-///
-/// Internally a retired-instruction delta paired with its TSC frequency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VirtDuration {
     instructions: u64,
@@ -180,16 +167,10 @@ impl std::ops::Sub<VirtTime> for VirtTime {
     }
 }
 
-/// Define `vt!`, `tsc!`, `vt_dur!`, and `tsc_dur!` bound to a TSC frequency,
-/// so callers don't have to thread the frequency through every construction.
-///
-/// `vt!` / `tsc!` produce [`VirtTime`]; `vt_dur!` / `tsc_dur!` produce
-/// [`VirtDuration`]. The `vt*!` forms take a numeric literal with an `s` or
-/// `ms` suffix (integer or float — both flow through the f64 constructors);
-/// the `tsc*!` forms take a raw retired-instruction count.
-///
-/// The first argument must be a literal `$` — the standard stable-Rust
-/// workaround that lets the outer macro define inner macros.
+/// Define `vt!`/`tsc!` ([`VirtTime`]) and `vt_dur!`/`tsc_dur!`
+/// ([`VirtDuration`]) bound to a TSC frequency. `vt*!` take a literal with an
+/// `s` or `ms` suffix; `tsc*!` a raw instruction count. The first argument must
+/// be a literal `$` so the macro can define inner macros.
 ///
 /// ```ignore
 /// bedrock_lab::define_virt_time_macros!($, 2_995_200_000);
