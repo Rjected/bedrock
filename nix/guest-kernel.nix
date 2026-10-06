@@ -26,6 +26,9 @@ let
       # (RAX=11) so guest userspace randomness is fuzzer-controlled and recorded.
       ../guest/patches/0004-random-source-urandom-getrandom-from-vmcall.patch
       ../guest/patches/0005-random-use-vmmcall-on-amd.patch
+      # bedrock_ncpus=N boot param: affinity syscalls report N CPUs so thread
+      # pools are sized as on an N-core machine (still one vCPU underneath).
+      ../guest/patches/0006-sched-report-bedrock-ncpus-from-affinity-syscalls.patch
     ];
   };
 
