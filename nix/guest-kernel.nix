@@ -5,6 +5,7 @@
 # No CONFIG_RUST needed.
 { pkgs
 , linux-src
+, svmReference ? false
 }:
 
 let
@@ -24,6 +25,7 @@ let
       # Source /dev/urandom, /dev/random and getrandom() from HYPERCALL_GET_RANDOM
       # (RAX=11) so guest userspace randomness is fuzzer-controlled and recorded.
       ../guest/patches/0004-random-source-urandom-getrandom-from-vmcall.patch
+      ../guest/patches/0005-random-use-vmmcall-on-amd.patch
     ];
   };
 
@@ -62,6 +64,14 @@ let
 
     # Don't treat warnings as errors
     ./scripts/config --disable WERROR
+
+    ${pkgs.lib.optionalString svmReference ''
+      # The SVM reference backend steps every instruction. Avoid spending
+      # hundreds of millions of steps sorting ORC and ftrace metadata at boot.
+      ./scripts/config --disable FTRACE
+      ./scripts/config --disable UNWINDER_ORC
+      ./scripts/config --enable UNWINDER_FRAME_POINTER
+    ''}
 
     # Module support
     ./scripts/config --enable MODULES

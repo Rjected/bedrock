@@ -1,28 +1,22 @@
 # Minimal guest initramfs for bedrock VM tests.
-# Init boots, immediately issues VMCALL shutdown to bedrock.
-{ pkgs }:
+# The default init shuts down immediately; initSource supplies other test guests.
+{ pkgs, initSource ? null }:
 
 let
   initBin = pkgs.stdenv.mkDerivation {
     name = "bedrock-guest-init";
     dontUnpack = true;
     buildPhase = ''
+      ${if initSource != null then "cp ${initSource} init.c" else ''
       cat > init.c << 'EOF'
-      static inline void bedrock_shutdown(void) {
-          __asm__ volatile(
-              "mov $0, %%rax\n\t"
-              "vmcall\n\t"
-              :
-              :
-              : "rax"
-          );
-      }
+      #include "libvmcall.h"
       void _start(void) {
-          bedrock_shutdown();
+          vmcall_shutdown();
           for (;;) __asm__ volatile("hlt");
       }
       EOF
-      $CC -static -nostdlib -o init init.c
+      ''}
+      $CC -I${../guest} -static -nostdlib -o init init.c
     '';
     installPhase = "cp init $out";
   };

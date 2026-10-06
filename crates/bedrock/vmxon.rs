@@ -109,7 +109,52 @@ pub(crate) struct RealVmx;
 impl Vmx for RealVmx {
     type M = LinuxMachine;
 
+    fn uses_nested_paging() -> bool {
+        super::svm::supported()
+    }
+
+    fn initialize(machine: &Self::M) -> Result<(), super::vmx::VmxInitError> {
+        if !super::svm::supported() {
+            if cfg!(svm_only) {
+                return Err(super::vmx::VmxInitError::Unsupported);
+            }
+            return Self::initialize_vmx(machine);
+        }
+        use super::vmx::traits::{Kernel, Machine};
+        Self::set_basic_info(super::vmx::traits::VmxBasic {
+            vmcs_revision_id: 0,
+            vmcs_size: 4096,
+            mem_type_wb: true,
+            io_exit_info: true,
+            vmx_flex_controls: true,
+        });
+        machine
+            .kernel()
+            .call_on_all_cpus_with_data(machine, |_machine| {
+                if unsafe { c_helpers::bedrock_svm_enable() } != 0 {
+                    return Err(super::vmx::VmxInitError::Unsupported);
+                }
+                let vcpu = Self::current_vcpu();
+                vcpu.set_capabilities(VmxCapabilities {
+                    cpu_based_exec_ctrl: super::vmx::traits::cpu_based::ACTIVATE_SECONDARY_CONTROLS,
+                    cpu_based_exec_ctrl2: super::vmx::traits::secondary_exec::ENABLE_EPT,
+                    cr0_fixed1: u64::MAX,
+                    cr4_fixed1: u64::MAX,
+                    has_ept: true,
+                    ..VmxCapabilities::default()
+                });
+                vcpu.set_vmxon(true);
+                Ok(())
+            })
+    }
+
     fn is_supported() -> bool {
+        if super::svm::supported() {
+            return true;
+        }
+        if cfg!(svm_only) {
+            return false;
+        }
         // CPUID.1:ECX.VMX[bit 5]. rbx is reserved by LLVM, so save/restore it.
         let ecx: u32;
         let rbx_save: u64;
@@ -177,6 +222,12 @@ impl Vmx for RealVmx {
     }
 
     fn vmxoff() -> Result<(), VmxoffError> {
+        if super::svm::supported() {
+            unsafe {
+                c_helpers::bedrock_svm_disable();
+            }
+            return Ok(());
+        }
         let rflags: u64;
         // SAFETY: VMXOFF is valid when the processor is in VMX root operation.
         unsafe {
@@ -199,6 +250,10 @@ impl Vmx for RealVmx {
     }
 
     fn invept_single_context(eptp: u64) -> Result<(), InveptError> {
+        // AMD's VMCB requests a full translation flush on each entry.
+        if super::svm::supported() {
+            return Ok(());
+        }
         // Bits 0-63: EPTP; bits 64-127 reserved (must be 0).
         #[repr(C, align(16))]
         struct InveptDescriptor {
@@ -237,6 +292,9 @@ impl Vmx for RealVmx {
     }
 
     fn invvpid_single_context(vpid: u16) -> Result<(), InvvpidError> {
+        if super::svm::supported() {
+            return Ok(());
+        }
         // Bits 0-15: VPID (rest of the qword reserved); bits 64-127: linear
         // address (type 0 only).
         #[repr(C, align(16))]
@@ -280,6 +338,9 @@ impl Vmx for RealVmx {
     }
 
     fn invvpid_all_context() -> Result<(), InvvpidError> {
+        if super::svm::supported() {
+            return Ok(());
+        }
         // Descriptor is ignored for type 2.
         #[repr(C, align(16))]
         struct InvvpidDescriptor {

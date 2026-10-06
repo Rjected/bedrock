@@ -4,7 +4,7 @@
 
 use super::compat::{ept_vec_init, ept_vec_push, ept_vec_with_capacity, EptVec};
 
-use super::entry::{EptEntry, EptMemoryType, EptPermissions};
+use super::entry::{EptEntry, EptMemoryType, EptPermissions, PageTableFormat};
 use super::traits::{FrameAllocator, GuestPhysAddr, HostPhysAddr, VirtAddr};
 
 /// Error type for EPT remap operations.
@@ -17,6 +17,7 @@ pub enum EptRemapError {
 /// 4-level EPT hierarchy (PML4 -> PDPT -> PD -> PT). Owns its frames, which
 /// are freed on drop.
 pub struct EptPageTable<Frame> {
+    format: PageTableFormat,
     /// Host physical address of the PML4 table (used for EPTP).
     pml4_phys: HostPhysAddr,
     /// All allocated EPT frames. vmalloc-backed in kernel builds since the list
@@ -27,6 +28,13 @@ pub struct EptPageTable<Frame> {
 impl<Frame> EptPageTable<Frame> {
     /// Create an EPT with a zeroed PML4.
     pub fn new<A: FrameAllocator<Frame = Frame>>(allocator: &mut A) -> Result<Self, A::Error> {
+        Self::new_with_format(allocator, PageTableFormat::IntelEpt)
+    }
+
+    pub fn new_with_format<A: FrameAllocator<Frame = Frame>>(
+        allocator: &mut A,
+        format: PageTableFormat,
+    ) -> Result<Self, A::Error> {
         let pml4_frame = allocator.allocate_frame()?;
         let pml4_phys = A::frame_phys_addr(&pml4_frame);
 
@@ -39,11 +47,18 @@ impl<Frame> EptPageTable<Frame> {
 
         let frames = ept_vec_init(pml4_frame);
 
-        Ok(Self { pml4_phys, frames })
+        Ok(Self {
+            pml4_phys,
+            frames,
+            format,
+        })
     }
 
     /// EPTP value for the VMCS (write-back, 4-level walk).
     pub fn eptp(&self) -> u64 {
+        if self.format == PageTableFormat::AmdNpt {
+            return self.pml4_phys.as_u64();
+        }
         let mem_type = 6u64; // WB
         let page_walk_len = 3u64; // 4 levels - 1
         self.pml4_phys.as_u64() | (page_walk_len << 3) | mem_type
@@ -103,7 +118,7 @@ impl<Frame> EptPageTable<Frame> {
             return None;
         }
 
-        Some((pte.addr(), pte.permissions()))
+        Some((pte.addr(), pte.permissions_with_format(self.format)))
     }
 
     /// Map a 4KB guest physical page to a host physical page.
@@ -131,7 +146,7 @@ impl<Frame> EptPageTable<Frame> {
         // SAFETY: pt_entry points to a valid, aligned EptEntry within an allocated PT
         // page, obtained via get_entry_mut which ensures the pointer is in bounds.
         unsafe {
-            *pt_entry = EptEntry::page_entry_4k(host_phys, perms, mem_type);
+            *pt_entry = EptEntry::page_entry_with_format(host_phys, perms, mem_type, self.format);
         }
 
         Ok(())
@@ -191,7 +206,7 @@ impl<Frame> EptPageTable<Frame> {
             return Err(EptRemapError::NotMapped);
         }
 
-        *pte = EptEntry::page_entry_4k(new_host_phys, perms, mem_type);
+        *pte = EptEntry::page_entry_with_format(new_host_phys, perms, mem_type, self.format);
         Ok(())
     }
 
@@ -244,7 +259,7 @@ impl<Frame> EptPageTable<Frame> {
             // SAFETY: entry is a valid, aligned, writable pointer to an EptEntry
             // obtained from get_entry_mut. Writing the new table entry is safe.
             unsafe {
-                *entry = EptEntry::table_entry(new_phys, perms);
+                *entry = EptEntry::table_entry_with_format(new_phys, perms, self.format);
             }
 
             ept_vec_push(&mut self.frames, new_frame);
@@ -306,8 +321,11 @@ impl<Frame> EptPageTable<Frame> {
             // SAFETY: dst_pml4 points to a valid PML4 table and pml4_idx is in 0..511,
             // so the write target is within the allocated page.
             unsafe {
-                *dst_pml4.add(pml4_idx) =
-                    EptEntry::table_entry(new_pdpt_phys, src_pml4e.permissions());
+                *dst_pml4.add(pml4_idx) = EptEntry::table_entry_with_format(
+                    new_pdpt_phys,
+                    src_pml4e.permissions_with_format(self.format),
+                    self.format,
+                );
             }
 
             let src_pdpt = allocator
@@ -338,8 +356,11 @@ impl<Frame> EptPageTable<Frame> {
                 // SAFETY: dst_pdpt points to a valid PDPT table and pdpt_idx is in
                 // 0..511, so the write target is within the allocated page.
                 unsafe {
-                    *dst_pdpt.add(pdpt_idx) =
-                        EptEntry::table_entry(new_pd_phys, src_pdpte.permissions());
+                    *dst_pdpt.add(pdpt_idx) = EptEntry::table_entry_with_format(
+                        new_pd_phys,
+                        src_pdpte.permissions_with_format(self.format),
+                        self.format,
+                    );
                 }
 
                 let src_pd = allocator
@@ -370,8 +391,11 @@ impl<Frame> EptPageTable<Frame> {
                     // SAFETY: dst_pd points to a valid PD table and pd_idx is in 0..511,
                     // so the write target is within the allocated page.
                     unsafe {
-                        *dst_pd.add(pd_idx) =
-                            EptEntry::table_entry(new_pt_phys, src_pde.permissions());
+                        *dst_pd.add(pd_idx) = EptEntry::table_entry_with_format(
+                            new_pt_phys,
+                            src_pde.permissions_with_format(self.format),
+                            self.format,
+                        );
                     }
 
                     let src_pt = allocator
@@ -389,10 +413,11 @@ impl<Frame> EptPageTable<Frame> {
                         }
 
                         let host_phys = src_pte.addr();
-                        let new_entry = EptEntry::page_entry_4k(
+                        let new_entry = EptEntry::page_entry_with_format(
                             host_phys,
                             EptPermissions::READ_EXECUTE,
                             EptMemoryType::WriteBack,
+                            self.format,
                         );
 
                         // SAFETY: dst_pt points to a valid, newly allocated PT table and
@@ -406,6 +431,7 @@ impl<Frame> EptPageTable<Frame> {
         }
 
         Ok(Self {
+            format: self.format,
             pml4_phys: new_pml4_phys,
             frames,
         })

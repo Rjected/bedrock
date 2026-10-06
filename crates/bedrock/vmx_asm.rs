@@ -63,7 +63,31 @@ impl RealVmRunner {
 impl VmRunner for RealVmRunner {
     type Vmcs = RealVmcs;
 
-    unsafe fn run(&mut self, ctx: &mut VmxContext, _vmcs: &Self::Vmcs) -> Result<(), VmEntryError> {
+    fn saved_guest_msr(&self, vmcs: &Self::Vmcs, index: u32) -> Option<u64> {
+        if !super::svm::supported() {
+            return None;
+        }
+        use super::svm_core::vmcb::{offset as o, Vmcb};
+        use super::vmx::VirtualMachineControlStructure;
+        let offset = match index {
+            0xc0000081 => o::STAR,
+            0xc0000082 => o::LSTAR,
+            0xc0000083 => o::CSTAR,
+            0xc0000084 => o::SFMASK,
+            0xc0000102 => o::KERNEL_GS_BASE,
+            _ => return None,
+        };
+        // Called after VMRUN with the VM lock held.
+        let v = unsafe { &*(vmcs.vmcs_region_ptr().cast::<Vmcb>()) };
+        Some(v.read(offset, 8))
+    }
+
+    unsafe fn run(&mut self, ctx: &mut VmxContext, vmcs: &Self::Vmcs) -> Result<(), VmEntryError> {
+        if super::svm::supported() {
+            use super::vmx::VirtualMachineControlStructure;
+            let v = unsafe { &mut *(vmcs.vmcs_region_ptr().cast::<super::svm_core::vmcb::Vmcb>()) };
+            return unsafe { super::svm::run(ctx, v, vmcs.svm_phys_addr()) };
+        }
         // SAFETY: Caller guarantees the VMCS is loaded and configured
         // (HOST_RSP = ctx, HOST_RIP = vmx_exit_handler) with interrupts in the
         // appropriate state.

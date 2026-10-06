@@ -18,6 +18,12 @@ pub fn handle_msr_read<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
     let msr_num = ctx.state().gprs.rcx as u32;
 
     let value: u64 = match msr_num {
+        msr::IA32_EFER if C::V::uses_nested_paging() => {
+            match ctx.state().vmcs.read64(VmcsField64::GuestIa32Efer) {
+                Ok(value) => value,
+                Err(error) => return ExitHandlerResult::Error(error.into()),
+            }
+        }
         msr::IA32_MISC_ENABLE => {
             // Host value with BTS/PEBS unavailable and MWAIT cleared.
             let host_val = ctx.state().host_state.misc_enable;
@@ -179,6 +185,11 @@ pub fn handle_msr_write<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
     let value = ((ctx.state().gprs.rdx & 0xFFFF_FFFF) << 32) | (ctx.state().gprs.rax & 0xFFFF_FFFF);
 
     match msr_num {
+        msr::IA32_EFER if C::V::uses_nested_paging() => {
+            if let Err(error) = ctx.state().vmcs.write64(VmcsField64::GuestIa32Efer, value) {
+                return ExitHandlerResult::Error(error.into());
+            }
+        }
         msr::IA32_MISC_ENABLE => {
             // Ignored.
         }

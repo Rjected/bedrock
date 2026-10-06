@@ -9,6 +9,7 @@ members = [
     "crates/bedrock-lab",
     "crates/bedrock-log",
     "crates/bedrock-memory",
+    "crates/bedrock-svm",
     "crates/bedrock-vm",
     "crates/bedrock-vmx",
     "guest/workload-monitor",

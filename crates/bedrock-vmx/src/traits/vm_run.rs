@@ -48,6 +48,9 @@ where
     V: VirtualMachineControlStructure,
     I: InstructionCounter,
 {
+    if let Ok(rsp) = state.vmcs.read_natural(VmcsFieldNatural::GuestRsp) {
+        state.gprs.rsp = rsp;
+    }
     state.gprs.rax = state.vmx_ctx.guest_rax;
     state.gprs.rbx = state.vmx_ctx.guest_rbx;
     state.gprs.rcx = state.vmx_ctx.guest_rcx;
@@ -92,7 +95,9 @@ where
     let host_kernel_gs_base = msr.read_msr(msr::IA32_KERNEL_GS_BASE).unwrap_or(0);
 
     // No VMCS fields for these; SYSCALL/SYSRET/SWAPGS read hardware directly.
-    ctx.state().msr_state.syscall.load(msr);
+    if !Ctx::V::uses_nested_paging() {
+        ctx.state().msr_state.syscall.load(msr);
+    }
 
     ctx.state().vmcs.load().map_err(VmRunError::VmcsLoad)?;
 
@@ -124,7 +129,17 @@ where
     ctx.state_mut().vmx_ctx.launched = 0;
 
     // kernel_gs_base is already saved by run_loop on every exit.
-    ctx.state_mut().msr_state.syscall = SyscallMsrs::capture(msr);
+    ctx.state_mut().msr_state.syscall = if Ctx::V::uses_nested_paging() {
+        let vmcs = &ctx.state().vmcs;
+        SyscallMsrs {
+            star: Star::new(runner.saved_guest_msr(vmcs, msr::IA32_STAR).unwrap_or(0)),
+            lstar: Lstar::new(runner.saved_guest_msr(vmcs, msr::IA32_LSTAR).unwrap_or(0)),
+            cstar: Cstar::new(runner.saved_guest_msr(vmcs, msr::IA32_CSTAR).unwrap_or(0)),
+            fmask: Fmask::new(runner.saved_guest_msr(vmcs, msr::IA32_FMASK).unwrap_or(0)),
+        }
+    } else {
+        SyscallMsrs::capture(msr)
+    };
 
     // Restore host MSRs even if VMCLEAR failed.
     ctx.state().host_state.syscall_msrs.load(msr);
@@ -280,7 +295,9 @@ where
 
         // IA32_KERNEL_GS_BASE has no VMCS field.
         let msr = machine.msr_access();
-        let _ = msr.write_msr(msr::IA32_KERNEL_GS_BASE, ctx.state().kernel_gs_base);
+        if !Ctx::V::uses_nested_paging() {
+            let _ = msr.write_msr(msr::IA32_KERNEL_GS_BASE, ctx.state().kernel_gs_base);
+        }
 
         // Captured before entry: the exit handler may clear `armed_action`.
         let pebs_armed_this_iter = ctx
@@ -293,10 +310,20 @@ where
         }
 
         // Split borrow: vmx_ctx mutably, vmcs immutably.
+        let software_exit = Ctx::V::uses_nested_paging()
+            && super::super::exits::prepare_instruction_exit(ctx, runner, allocator)
+                .map_err(VmRunError::ExitHandler)?;
+        if software_exit {
+            ctx.sync_gprs_to_vmx_ctx();
+        }
         let state = ctx.state_mut();
         // SAFETY: Caller guarantees VMCS is properly configured and loaded,
         // interrupts are disabled, and preemption cannot migrate us.
-        let run_result = unsafe { runner.run(&mut state.vmx_ctx, &state.vmcs) };
+        let run_result = if software_exit {
+            Ok(())
+        } else {
+            unsafe { runner.run(&mut state.vmx_ctx, &state.vmcs) }
+        };
 
         if pebs_armed_this_iter {
             pebs_post_vm_exit(ctx, msr);
@@ -304,7 +331,9 @@ where
 
         // Before any IRQ window, so host handlers neither clobber the guest
         // value nor see it.
-        ctx.state_mut().kernel_gs_base = msr.read_msr(msr::IA32_KERNEL_GS_BASE).unwrap_or(0);
+        ctx.state_mut().kernel_gs_base = runner
+            .saved_guest_msr(&ctx.state().vmcs, msr::IA32_KERNEL_GS_BASE)
+            .unwrap_or_else(|| msr.read_msr(msr::IA32_KERNEL_GS_BASE).unwrap_or(0));
         let _ = msr.write_msr(msr::IA32_KERNEL_GS_BASE, host_kernel_gs_base);
 
         let post_exit_tsc = rdtsc();
@@ -320,6 +349,9 @@ where
         }
 
         // Service pending host interrupts; host XCR0 is already restored.
+        if let Ok(reason) = ctx.state().vmcs.read32(VmcsField32::VmExitReason) {
+            ctx.state_mut().instruction_counter.record_exit(reason);
+        }
         let pre_irq_tsc = rdtsc();
         {
             let _irq_window = ReverseIrqGuard::new(machine.kernel());

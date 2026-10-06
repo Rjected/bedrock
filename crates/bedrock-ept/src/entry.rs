@@ -4,6 +4,13 @@
 
 use super::traits::HostPhysAddr;
 
+/// Hardware encoding of the guest-physical translation tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTableFormat {
+    IntelEpt,
+    AmdNpt,
+}
+
 /// EPT entry permission flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -51,7 +58,15 @@ impl EptEntry {
 
     /// Create an EPT entry pointing to the next level page table.
     pub fn table_entry(addr: HostPhysAddr, perms: EptPermissions) -> Self {
-        Self((addr.as_u64() & Self::ADDR_MASK) | perms.bits())
+        Self::table_entry_with_format(addr, perms, PageTableFormat::IntelEpt)
+    }
+
+    pub fn table_entry_with_format(
+        addr: HostPhysAddr,
+        perms: EptPermissions,
+        format: PageTableFormat,
+    ) -> Self {
+        Self((addr.as_u64() & Self::ADDR_MASK) | Self::encode_permissions(perms, format))
     }
 
     /// Create an EPT entry for a 4KB page.
@@ -60,7 +75,40 @@ impl EptEntry {
         perms: EptPermissions,
         mem_type: EptMemoryType,
     ) -> Self {
-        Self((addr.as_u64() & Self::ADDR_MASK) | perms.bits() | mem_type.to_bits())
+        Self::page_entry_with_format(addr, perms, mem_type, PageTableFormat::IntelEpt)
+    }
+
+    pub fn page_entry_with_format(
+        addr: HostPhysAddr,
+        perms: EptPermissions,
+        mem_type: EptMemoryType,
+        format: PageTableFormat,
+    ) -> Self {
+        let memory_bits = match format {
+            PageTableFormat::IntelEpt => mem_type.to_bits(),
+            // NPT uses ordinary x86 PAT/PWT/PCD bits; zero selects WB with
+            // Bedrock's default PAT. EPT's WB encoding would set A/D bits.
+            PageTableFormat::AmdNpt => 0,
+        };
+        Self(
+            (addr.as_u64() & Self::ADDR_MASK)
+                | Self::encode_permissions(perms, format)
+                | memory_bits,
+        )
+    }
+
+    fn encode_permissions(perms: EptPermissions, format: PageTableFormat) -> u64 {
+        match format {
+            PageTableFormat::IntelEpt => perms.bits(),
+            PageTableFormat::AmdNpt => {
+                if perms.bits() == 0 {
+                    return 0;
+                }
+                // Present, writable, user-accessible, and NX. U/S must be 1
+                // at every level for guest userspace to access the mapping.
+                1 | (perms.bits() & 2) | 4 | if perms.bits() & 4 == 0 { 1 << 63 } else { 0 }
+            }
+        }
     }
 
     /// Returns true if this entry is present (has any permission bits set).
@@ -76,6 +124,20 @@ impl EptEntry {
     /// Get the permission bits from this entry.
     pub const fn permissions(&self) -> EptPermissions {
         EptPermissions::from_bits(self.0)
+    }
+
+    pub const fn permissions_with_format(&self, format: PageTableFormat) -> EptPermissions {
+        match format {
+            PageTableFormat::IntelEpt => self.permissions(),
+            PageTableFormat::AmdNpt => {
+                if self.0 & 1 == 0 {
+                    return EptPermissions::from_bits(0);
+                }
+                EptPermissions::from_bits(
+                    1 | (self.0 & 2) | if self.0 & (1 << 63) == 0 { 4 } else { 0 },
+                )
+            }
+        }
     }
 
     pub const fn raw(&self) -> u64 {

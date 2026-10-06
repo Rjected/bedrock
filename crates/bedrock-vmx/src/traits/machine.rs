@@ -37,6 +37,11 @@ pub enum VmEntryError {
 pub trait VmRunner {
     type Vmcs: VirtualMachineControlStructure;
 
+    /// Guest MSRs saved by the backend rather than left in host registers.
+    fn saved_guest_msr(&self, _vmcs: &Self::Vmcs, _index: u32) -> Option<u64> {
+        None
+    }
+
     /// One VM entry/exit cycle: load guest GPRs from `ctx`, VMLAUNCH/VMRESUME,
     /// save guest GPRs back on exit. `Ok` means a normal VM exit.
     ///

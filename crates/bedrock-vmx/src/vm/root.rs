@@ -51,8 +51,13 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> R
         instruction_counter: I,
         tsc_frequency: u64,
     ) -> Result<Self, RootVmError<A::Error>> {
+        let format = if <V::M as Machine>::V::uses_nested_paging() {
+            PageTableFormat::AmdNpt
+        } else {
+            PageTableFormat::IntelEpt
+        };
         let mut ept: EptPageTable<V::P> =
-            EptPageTable::new(allocator).map_err(RootVmError::EptCreation)?;
+            EptPageTable::new_with_format(allocator, format).map_err(RootVmError::EptCreation)?;
 
         // Skip the LAPIC (0xFEE00000) and IOAPIC (0xFEC00000) MMIO pages so
         // accesses EPT-fault into handle_apic_access / handle_ioapic_access.

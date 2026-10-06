@@ -19,10 +19,26 @@ pub fn handle_cpuid<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
 
     match leaf {
         0x0 => {
-            // Vendor string passes through; cap the max basic leaf.
-            if eax > 0x16 {
-                eax = 0x16; // Cap at highest leaf we handle
-            }
+            // Match the fixed Skylake signature below. Linux's CPUID-based
+            // TSC calibration is Intel-specific; host AMD identification
+            // would send it to the unsupported PIT calibration path.
+            ebx = 0x756e6547;
+            edx = 0x49656e69;
+            ecx = 0x6c65746e;
+            eax = 0x16; // Includes our emulated TSC-frequency leaves.
+        }
+        0x40000000 => {
+            eax = 0x40000001;
+            ebx = 0x72646542; // Bedr
+            ecx = 0x566b636f; // ockV
+            edx = 0x20204d4d; // MM
+        }
+        0x40000001 => {
+            // Bedrock hypercall instruction: bit zero means VMMCALL.
+            eax = u32::from(C::V::uses_nested_paging());
+            ebx = 0;
+            ecx = 0;
+            edx = 0;
         }
         0x1 => {
             // Fixed signature: Family 6, Model 85 (Skylake-SP), Stepping 7
@@ -141,9 +157,22 @@ pub fn handle_cpuid<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
             }
         }
         0x80000000 => {
-            if eax < 0x80000004 {
-                eax = 0x80000004; // Support brand string
-            }
+            eax = 0x80000008;
+            ebx = 0;
+            ecx = 0;
+            edx = 0;
+        }
+        0x80000001 => {
+            eax = 0;
+            ebx = 0;
+            ecx = 1; // LAHF/SAHF in long mode; no nested SVM.
+            edx = (1 << 11) | (1 << 20) | (1 << 27) | (1 << 29);
+        }
+        0x80000007 => {
+            eax = 0;
+            ebx = 0;
+            ecx = 0;
+            edx = 1 << 8; // Virtual TSC has a fixed configured frequency.
         }
         0x80000002..=0x80000004 => {
             let brand = b"Bedrock VM CPU  ";
@@ -180,7 +209,10 @@ pub fn handle_cpuid<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
             edx = 0;
         }
         0x80000008 => {
-            ecx &= 0xFFFFFF00; // Report single core
+            eax = 48 | (48 << 8); // Physical / linear address widths.
+            ebx = 0; // No AMD IRPERF, WBNOINVD or other extended features.
+            ecx = 0; // One core.
+            edx = 0;
         }
         0x16 => {
             // Processor frequency (MHz): fixed, since host values vary with

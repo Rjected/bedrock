@@ -57,6 +57,67 @@ struct bedrock_vcpu {
 
 static DEFINE_PER_CPU(struct bedrock_vcpu, bedrock_pcpu_vcpu);
 
+struct bedrock_svm_cpu {
+    unsigned long hsave;
+    unsigned long host_vmcb;
+    u64 saved_efer;
+};
+static DEFINE_PER_CPU(struct bedrock_svm_cpu, bedrock_pcpu_svm);
+
+/* Runs inside the per-CPU initialization callback with migration disabled. */
+int bedrock_svm_enable(void)
+{
+    struct bedrock_svm_cpu *s = this_cpu_ptr(&bedrock_pcpu_svm);
+    u64 vm_cr;
+    if (rdmsrq_safe(0xc0010114, &vm_cr) || (vm_cr & (1ULL << 4)))
+        return -EOPNOTSUPP;
+    rdmsrl(MSR_EFER, s->saved_efer);
+    if (s->saved_efer & EFER_SVME)
+        return -EBUSY;
+    s->hsave = __get_free_page(GFP_ATOMIC | __GFP_ZERO);
+    s->host_vmcb = __get_free_page(GFP_ATOMIC | __GFP_ZERO);
+    if (!s->hsave || !s->host_vmcb) {
+        if (s->hsave) free_page(s->hsave);
+        if (s->host_vmcb) free_page(s->host_vmcb);
+        s->hsave = s->host_vmcb = 0;
+        return -ENOMEM;
+    }
+    wrmsrl(MSR_EFER, s->saved_efer | EFER_SVME);
+    wrmsrl(0xc0010117, virt_to_phys((void *)s->hsave));
+    return 0;
+}
+
+void bedrock_svm_disable(void)
+{
+    struct bedrock_svm_cpu *s = this_cpu_ptr(&bedrock_pcpu_svm);
+    if (!s->hsave) return;
+    wrmsrl(MSR_EFER, s->saved_efer);
+    wrmsrl(0xc0010117, 0);
+    free_page(s->hsave);
+    free_page(s->host_vmcb);
+    s->hsave = s->host_vmcb = 0;
+}
+
+u64 bedrock_svm_host_vmcb(void)
+{
+    return virt_to_phys((void *)this_cpu_ptr(&bedrock_pcpu_svm)->host_vmcb);
+}
+
+/* SVM requires contiguous 8KB MSRPM and 12KB IOPM buffers. */
+void *bedrock_svm_alloc_bitmap(unsigned int order)
+{
+    unsigned long p = __get_free_pages(GFP_KERNEL, order);
+    if (p) memset((void *)p, 0xff, PAGE_SIZE << order);
+    return (void *)p;
+}
+
+void bedrock_svm_free_bitmap(void *p, unsigned int order)
+{
+    if (p) free_pages((unsigned long)p, order);
+}
+
+u64 bedrock_svm_bitmap_phys(void *p) { return virt_to_phys(p); }
+
 /*
  * Convert a struct page pointer to its physical address.
  * This wraps the page_to_phys() macro.
@@ -479,7 +540,9 @@ EXPORT_SYMBOL_GPL(bedrock_vcpu_set_vmxon_region);
  */
 void bedrock_cr4_set_vmxe(void)
 {
+#ifndef BEDROCK_SVM_ONLY
 	cr4_set_bits(X86_CR4_VMXE);
+#endif
 }
 EXPORT_SYMBOL_GPL(bedrock_cr4_set_vmxe);
 
@@ -489,7 +552,9 @@ EXPORT_SYMBOL_GPL(bedrock_cr4_set_vmxe);
  */
 void bedrock_cr4_clear_vmxe(void)
 {
+#ifndef BEDROCK_SVM_ONLY
 	cr4_clear_bits(X86_CR4_VMXE);
+#endif
 }
 EXPORT_SYMBOL_GPL(bedrock_cr4_clear_vmxe);
 

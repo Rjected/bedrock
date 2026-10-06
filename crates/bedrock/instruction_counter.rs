@@ -64,6 +64,8 @@ fn wrmsr(addr: u32, value: u64) -> Result<(), InstructionCounterError> {
 
 /// Direct MSR-based instruction counter for general-purpose counter 0.
 pub(crate) struct LinuxInstructionCounter {
+    svm: bool,
+    svm_count: u64,
     /// Backing page; the first 16 bytes are the MSR-list entry. None on null
     /// counters.
     msr_entry_page: Option<KernelPage>,
@@ -84,7 +86,8 @@ unsafe impl Send for LinuxInstructionCounter {}
 
 impl LinuxInstructionCounter {
     pub(crate) fn new() -> Self {
-        let msr_entry_page = alloc_zeroed_page().inspect(|page| {
+        let svm = super::svm::supported();
+        let msr_entry_page = if svm { None } else { alloc_zeroed_page() }.inspect(|page| {
             // SAFETY: the page is freshly allocated, zeroed, and not aliased;
             // write a single MSR list entry for IA32_A_PMC0.
             unsafe {
@@ -101,6 +104,8 @@ impl LinuxInstructionCounter {
         });
 
         Self {
+            svm,
+            svm_count: 0,
             msr_entry_page,
             saved_perfevtsel0: 0,
             guest_perf_global_ctrl: 0,
@@ -128,6 +133,9 @@ impl LinuxInstructionCounter {
 }
 
 impl InstructionCounter for LinuxInstructionCounter {
+    fn record_exit(&mut self, reason: u32) {
+        if self.svm && reason == 37 { self.svm_count += 1; }
+    }
     fn prepare(&mut self) -> Result<(), InstructionCounterError> {
         if self.msr_entry_page.is_none() {
             return Ok(());
@@ -160,13 +168,14 @@ impl InstructionCounter for LinuxInstructionCounter {
     }
 
     fn read(&self) -> u64 {
+        if self.svm { return self.svm_count; }
         // Monotonic across run loops: each entry reloads `IA32_PMC0` from this
         // entry and each exit saves it back.
         self.entry_msr_data()
     }
 
     fn is_configured(&self) -> bool {
-        self.msr_entry_page.is_some()
+        self.svm || self.msr_entry_page.is_some()
     }
 
     fn perf_global_ctrl_values(&self) -> Option<(u64, u64)> {

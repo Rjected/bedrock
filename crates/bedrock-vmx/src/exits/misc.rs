@@ -33,6 +33,31 @@ pub fn handle_exception_nmi<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         return ExitHandlerResult::Continue;
     }
 
+    // The SVM stepping backend must intercept guest exceptions before the
+    // processor can save its temporary TF and stop stepping the handler.
+    if C::V::uses_nested_paging() && info.vector != 1 && info.vector != 18 {
+        if info.vector == 14 {
+            ctx.state_mut().vmx_ctx.guest_cr2 = ctx
+                .state()
+                .vmcs
+                .read_natural(VmcsFieldNatural::ExitQualification)
+                .unwrap_or(0);
+        }
+        let error = if info.error_code_valid {
+            Some(
+                ctx.state()
+                    .vmcs
+                    .read32(VmcsField32::VmExitInterruptionErrorCode)
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
+        if let Err(error) = inject_exception(ctx, info, error) {
+            return ExitHandlerResult::Error(error);
+        }
+        return ExitHandlerResult::Continue;
+    }
     // Intercepted guest #PF: reinject it. It's a fault, so RIP is not advanced.
     if info.vector == 14 && ctx.state().intercept_pf {
         let error_code = ctx

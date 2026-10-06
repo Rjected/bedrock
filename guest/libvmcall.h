@@ -4,7 +4,7 @@
  *
  * Any guest code (userspace programs or kernel modules) can include this
  * header to call out to the hypervisor. The library is header-only, so there
- * is nothing to link. Hypercalls are issued with the VMCALL instruction, the
+ * is nothing to link. Hypercalls use VMCALL on Intel and VMMCALL on AMD, with the
  * hypercall number in RAX, arguments in RBX/RCX/RDX/RSI/RDI, and the result
  * returned in RAX.
  *
@@ -187,11 +187,31 @@ typedef unsigned long long vmcall_u64;
 /* hypercalls the named wrappers below don't cover.                          */
 /* ------------------------------------------------------------------------- */
 
+/* CPUID leaf zero is available in both userspace and the kernel. */
+static inline int bedrock_uses_vmmcall(void)
+{
+    unsigned int a, b, c, d;
+    asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x40000000));
+    if (a >= 0x40000001 && b == 0x72646542 && c == 0x566b636f && d == 0x20204d4d) {
+        asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x40000001));
+        return a & 1;
+    }
+    asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0));
+    return b == 0x68747541 && d == 0x69746e65 && c == 0x444d4163;
+}
+
+#define BEDROCK_HYPERCALL_ASM(...) do { \
+    if (bedrock_uses_vmmcall()) \
+        asm volatile("vmmcall" __VA_ARGS__); \
+    else \
+        asm volatile("vmcall" __VA_ARGS__); \
+} while (0)
+
 static inline vmcall_u64 vmcall0(vmcall_u64 nr)
 {
 	vmcall_u64 result;
 
-	asm volatile("vmcall" : "=a"(result) : "a"(nr) : "memory");
+	BEDROCK_HYPERCALL_ASM(: "=a"(result) : "a"(nr) : "memory");
 	return result;
 }
 
@@ -199,7 +219,7 @@ static inline vmcall_u64 vmcall1(vmcall_u64 nr, vmcall_u64 a1)
 {
 	vmcall_u64 result;
 
-	asm volatile("vmcall" : "=a"(result) : "a"(nr), "b"(a1) : "memory");
+	BEDROCK_HYPERCALL_ASM(: "=a"(result) : "a"(nr), "b"(a1) : "memory");
 	return result;
 }
 
@@ -207,7 +227,7 @@ static inline vmcall_u64 vmcall2(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2)
 {
 	vmcall_u64 result;
 
-	asm volatile("vmcall"
+	BEDROCK_HYPERCALL_ASM(
 		     : "=a"(result)
 		     : "a"(nr), "b"(a1), "c"(a2)
 		     : "memory");
@@ -219,7 +239,7 @@ static inline vmcall_u64 vmcall3(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2,
 {
 	vmcall_u64 result;
 
-	asm volatile("vmcall"
+	BEDROCK_HYPERCALL_ASM(
 		     : "=a"(result)
 		     : "a"(nr), "b"(a1), "c"(a2), "d"(a3)
 		     : "memory");
@@ -231,7 +251,7 @@ static inline vmcall_u64 vmcall4(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2,
 {
 	vmcall_u64 result;
 
-	asm volatile("vmcall"
+	BEDROCK_HYPERCALL_ASM(
 		     : "=a"(result)
 		     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4)
 		     : "memory");
@@ -243,7 +263,7 @@ static inline vmcall_u64 vmcall5(vmcall_u64 nr, vmcall_u64 a1, vmcall_u64 a2,
 {
 	vmcall_u64 result;
 
-	asm volatile("vmcall"
+	BEDROCK_HYPERCALL_ASM(
 		     : "=a"(result)
 		     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4), "D"(a5)
 		     : "memory");

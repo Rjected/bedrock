@@ -192,6 +192,9 @@ impl CrAccess for RealCrAccess {
     }
 
     fn clear_vmxe(&self) -> Result<(), CrError> {
+        if super::svm::supported() {
+            return Ok(());
+        }
         // SAFETY: Clearing the VMXE bit in CR4 is safe after VMXOFF has been executed.
         unsafe { c_helpers::bedrock_cr4_clear_vmxe() };
         Ok(())

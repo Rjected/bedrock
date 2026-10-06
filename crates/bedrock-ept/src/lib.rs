@@ -15,6 +15,6 @@ mod traits;
 #[cfg(test)]
 mod tests;
 
-pub use entry::{EptEntry, EptMemoryType, EptPermissions};
+pub use entry::{EptEntry, EptMemoryType, EptPermissions, PageTableFormat};
 pub use table::{EptPageTable, EptRemapError};
 pub use traits::{FrameAllocator, PhysAddr, VirtAddr};

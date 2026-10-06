@@ -16,6 +16,8 @@ mod pebs;
 mod qualifications;
 mod rdrand;
 mod reasons;
+mod svm;
+mod svm_interrupts;
 mod time;
 mod vmcall;
 
@@ -34,6 +36,7 @@ pub use qualifications::{
     RdrandOperandSize,
 };
 pub use reasons::ExitReason;
+pub(crate) use svm::prepare_instruction_exit;
 pub use vmcall::{
     FB_ERR_BAD_ID_LEN, FB_ERR_BAD_SIZE, FB_ERR_BUFFER_NOT_RESIDENT, FB_ERR_ID_NOT_RESIDENT,
     FB_ERR_NO_SLOTS,
@@ -282,6 +285,10 @@ pub fn handle_exit<C: VmContext, K: Kernel, A: CowAllocator<C::CowPage>>(
         ExitReason::Rdseed => handle_rdseed(ctx),
 
         ExitReason::MonitorTrapFlag => ExitHandlerResult::Continue,
+        ExitReason::SvmSoftInterrupt => svm_interrupts::software_interrupt(ctx, allocator),
+        ExitReason::SvmPushf | ExitReason::SvmPopf => {
+            svm::handle_flags(ctx, allocator, reason == ExitReason::SvmPushf)
+        }
 
         ExitReason::Hlt => handle_idle(ctx),
 
@@ -360,6 +367,16 @@ pub fn handle_exit<C: VmContext, K: Kernel, A: CowAllocator<C::CowPage>>(
 
     // Margin-window MTF steps get a separate bucket so `mtf.count` stays
     // reproducible (the determinism harness compares it).
+    if matches!(
+        reason,
+        ExitReason::SvmPushf | ExitReason::SvmPopf | ExitReason::SvmSoftInterrupt
+    ) && result == ExitHandlerResult::Continue
+    {
+        ctx.state_mut().instruction_counter.record_exit(37);
+        let count = ctx.state().instruction_counter.read();
+        ctx.state_mut().last_instruction_count = count;
+        ctx.state_mut().emulated_tsc = count + ctx.state().tsc_offset;
+    }
     let end_tsc = rdtsc();
     let cycles = end_tsc.saturating_sub(start_tsc);
     if reason == ExitReason::MonitorTrapFlag && non_deterministic_exit {

@@ -126,12 +126,27 @@ fn handle_random<C: VmContext>(ctx: &mut C, source: RandomSource) -> ExitHandler
     };
     emit_randomness_event(ctx, &payload, &[]);
 
+    if info.dest_reg == 4 {
+        match ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRsp) {
+            Ok(rsp) => ctx.state_mut().gprs.rsp = rsp,
+            Err(error) => return ExitHandlerResult::Error(error.into()),
+        }
+    }
     write_gpr_by_index(
         &mut ctx.state_mut().gprs,
         info.dest_reg,
         value,
         info.operand_size,
     );
+    if info.dest_reg == 4 {
+        if let Err(error) = ctx
+            .state()
+            .vmcs
+            .write_natural(VmcsFieldNatural::GuestRsp, ctx.state().gprs.rsp)
+        {
+            return ExitHandlerResult::Error(error.into());
+        }
+    }
 
     if let Err(e) = set_cf_flag(ctx, true) {
         return ExitHandlerResult::Error(e);

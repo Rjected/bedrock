@@ -18,6 +18,9 @@ pub enum InstructionCounterError {
 /// `prepare` runs once before the run loop (preemption disabled, on the loop's
 /// CPU), `finish` once after it; `read` may be called after each VM exit.
 pub trait InstructionCounter {
+    /// Software counting backends account for completed hardware steps here.
+    /// Hardware PMU backends already captured their count at VM exit.
+    fn record_exit(&mut self, _reason: u32) {}
     /// Program the host PMU (e.g. `IA32_PERFEVTSEL0`) and reset the counter.
     /// Preemption must be disabled.
     #[inline]

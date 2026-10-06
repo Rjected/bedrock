@@ -208,6 +208,12 @@ pub enum ExitReason {
     /// VMCALL hypercall: guest sent the next chunk of a guest file via
     /// `HYPERCALL_FILE_STORE` (RAX=12).
     VmcallFileStore = 270,
+    /// SVM PUSHF intercept hides the temporary hypervisor trap flag.
+    SvmPushf = 512,
+    /// SVM POPF intercept restores logical guest flags before stepping.
+    SvmPopf = 513,
+    /// SVM INTn intercept, delivered with logical guest flags.
+    SvmSoftInterrupt = 514,
 }
 
 /// Error when converting from raw exit reason value.
@@ -218,6 +224,15 @@ impl TryFrom<u32> for ExitReason {
     type Error = UnknownExitReason;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value == 512 {
+            return Ok(Self::SvmPushf);
+        }
+        if value == 514 {
+            return Ok(Self::SvmSoftInterrupt);
+        }
+        if value == 513 {
+            return Ok(Self::SvmPopf);
+        }
         let basic = value & 0xFFFF;
         match basic {
             0 => Ok(Self::ExceptionNmi),

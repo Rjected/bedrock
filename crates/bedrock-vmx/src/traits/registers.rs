@@ -352,7 +352,11 @@ where
     V: VirtualMachineControlStructure,
     I: InstructionCounter,
 {
-    let gprs = state.gprs;
+    let mut gprs = state.gprs;
+    gprs.rsp = state
+        .vmcs
+        .read_natural(VmcsFieldNatural::GuestRsp)
+        .map_err(VmGetRegistersError::VmcsRead)?;
 
     let vmcs = &state.vmcs;
     let cr0 = vmcs

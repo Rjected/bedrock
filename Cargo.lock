@@ -139,6 +139,10 @@ name = "bedrock-memory"
 version = "0.1.0"
 
 [[package]]
+name = "bedrock-svm"
+version = "0.1.0"
+
+[[package]]
 name = "bedrock-vm"
 version = "0.1.0"
 dependencies = [

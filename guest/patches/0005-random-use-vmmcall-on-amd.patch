@@ -1,0 +1,45 @@
+From: Bedrock <bedrock@example.com>
+Subject: [PATCH 5/5] random: select the SVM hypercall instruction
+
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -453,15 +453,32 @@
+ #define BEDROCK_RANDOM_REPLY_MAX	256
+ 
+ static inline unsigned long bedrock_get_random(void *buf, unsigned long len,
+-					       unsigned long pid)
++                                               unsigned long pid)
+ {
+ 	unsigned long ret;
+-
+-	asm volatile("vmcall"
+-		     : "=a"(ret)
+-		     : "a"(BEDROCK_HYPERCALL_GET_RANDOM),
+-		       "b"((unsigned long)buf), "c"(len), "d"(pid)
+-		     : "memory");
++	u32 a, b, c, d;
++	bool svm;
++
++	asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0));
++	svm = b == 0x68747541 && d == 0x69746e65 && c == 0x444d4163;
++	asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x40000000));
++	if (a >= 0x40000001 && b == 0x72646542 && c == 0x566b636f && d == 0x20204d4d) {
++		asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x40000001));
++		svm = a & 1;
++	}
++	if (svm) {
++		asm volatile("vmmcall"
++			     : "=a"(ret)
++			     : "a"(BEDROCK_HYPERCALL_GET_RANDOM),
++			       "b"((unsigned long)buf), "c"(len), "d"(pid)
++			     : "memory");
++	} else {
++		asm volatile("vmcall"
++			     : "=a"(ret)
++			     : "a"(BEDROCK_HYPERCALL_GET_RANDOM),
++			       "b"((unsigned long)buf), "c"(len), "d"(pid)
++			     : "memory");
++	}
+ 	return ret;
+ }
+ 

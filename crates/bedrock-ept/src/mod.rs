@@ -10,6 +10,6 @@ mod entry;
 mod table;
 mod traits;
 
-pub use entry::{EptMemoryType, EptPermissions};
+pub use entry::{EptMemoryType, EptPermissions, PageTableFormat};
 pub use table::EptPageTable;
 pub use traits::FrameAllocator;

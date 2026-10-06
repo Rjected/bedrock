@@ -10,6 +10,69 @@ use crate::traits::{FrameAllocator, HostPhysAddr, PhysAddr};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::collections::HashMap;
 
+#[test]
+fn npt_permissions_root_and_cow_use_amd_encodings() {
+    use crate::PageTableFormat;
+    let mut allocator = TestAllocator::new();
+    let mut parent =
+        EptPageTable::new_with_format(&mut allocator, PageTableFormat::AmdNpt).unwrap();
+    assert_eq!(parent.eptp() & 0xfff, 0); // N_CR3 has no EPTP walk/type bits
+    let gpa = crate::traits::GuestPhysAddr::new(0x2000);
+    let hpa = HostPhysAddr::new(0x8000);
+    parent
+        .map_4k(
+            &mut allocator,
+            gpa,
+            hpa,
+            EptPermissions::READ_WRITE_EXECUTE,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    let mut child = parent.clone_for_fork(&mut allocator).unwrap();
+    assert_eq!(
+        parent.lookup(&allocator, gpa),
+        Some((hpa, EptPermissions::READ_WRITE_EXECUTE))
+    );
+    assert_eq!(
+        child.lookup(&allocator, gpa),
+        Some((hpa, EptPermissions::READ_EXECUTE))
+    );
+    child
+        .remap_4k(
+            &allocator,
+            gpa,
+            HostPhysAddr::new(0x9000),
+            EptPermissions::READ_WRITE_EXECUTE,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    assert_eq!(
+        child.lookup(&allocator, gpa).unwrap().0,
+        HostPhysAddr::new(0x9000)
+    );
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().0, hpa);
+    let entry = EptEntry::page_entry_with_format(
+        hpa,
+        EptPermissions::READ_EXECUTE,
+        EptMemoryType::WriteBack,
+        PageTableFormat::AmdNpt,
+    );
+    assert_eq!(entry.raw(), 0x8005); // P=1, RW=0, US=1, NX=0
+    let entry = EptEntry::page_entry_with_format(
+        hpa,
+        EptPermissions::from_bits(3),
+        EptMemoryType::WriteBack,
+        PageTableFormat::AmdNpt,
+    );
+    assert_eq!(entry.raw(), (1 << 63) | 0x8007);
+    assert_eq!(
+        entry
+            .permissions_with_format(PageTableFormat::AmdNpt)
+            .bits(),
+        3
+    );
+}
+
 /// A frame that tracks its physical address.
 struct TestFrame {
     phys: HostPhysAddr,

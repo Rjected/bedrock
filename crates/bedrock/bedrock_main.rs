@@ -24,6 +24,8 @@ mod instruction_counter;
 mod machine;
 mod memory;
 mod page;
+mod svm;
+mod svm_core;
 mod vm_file;
 mod vmcs;
 mod vmx;

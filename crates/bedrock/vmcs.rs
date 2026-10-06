@@ -17,10 +17,16 @@ use super::vmx::{
 pub(crate) struct RealVmcs {
     /// Backing page for the VMCS region; freed on drop.
     page: Option<KernelPage>,
+    svm: bool,
+    svm_bitmaps: Option<super::svm::Bitmaps>,
 }
 
 impl RealVmcs {
     /// Get the physical address, panicking if the VMCS is uninitialized.
+    pub(crate) fn svm_phys_addr(&self) -> u64 {
+        self.phys_addr().as_u64()
+    }
+
     fn phys_addr(&self) -> HostPhysAddr {
         self.page
             .as_ref()
@@ -29,6 +35,12 @@ impl RealVmcs {
     }
 
     fn vmread(&self, field: u64) -> VmcsReadResult<u64> {
+        if self.svm {
+            // VM lock excludes hardware execution and concurrent mutation.
+            let v = unsafe { &*(self.vmcs_region_ptr().cast::<super::svm_core::vmcb::Vmcb>()) };
+            return super::svm_core::fields::read(v, field as u32)
+                .map_err(|_| VmcsReadError::InvalidField);
+        }
         let value: u64;
         let rflags: u64;
         // SAFETY: VMREAD is valid when a VMCS is loaded; caller ensures the VMCS is active.
@@ -57,6 +69,11 @@ impl RealVmcs {
     }
 
     fn vmwrite(&self, field: u64, value: u64) -> VmcsWriteResult {
+        if self.svm {
+            let v = unsafe { &mut *(self.vmcs_region_ptr().cast::<super::svm_core::vmcb::Vmcb>()) };
+            return super::svm_core::fields::write(v, field as u32, value)
+                .map_err(|_| VmcsWriteError::InvalidField);
+        }
         let rflags: u64;
         // SAFETY: VMWRITE is valid when a VMCS is loaded; caller ensures the VMCS is active.
         unsafe {
@@ -89,6 +106,9 @@ impl VirtualMachineControlStructure for RealVmcs {
     type M = LinuxMachine;
 
     fn clear(&self) -> Result<(), &'static str> {
+        if self.svm {
+            return Ok(());
+        }
         let addr = self.phys_addr().as_u64();
 
         let rflags: u64;
@@ -137,6 +157,16 @@ impl VirtualMachineControlStructure for RealVmcs {
     }
 
     fn load(&self) -> Result<(), &'static str> {
+        if self.svm {
+            // Rebind after a fork copies its parent's hardware page.
+            let b = self
+                .svm_bitmaps
+                .as_ref()
+                .ok_or("SVM bitmap allocation failed")?;
+            let v = unsafe { &mut *(self.vmcs_region_ptr().cast::<super::svm_core::vmcb::Vmcb>()) };
+            b.bind(v);
+            return Ok(());
+        }
         let addr = self.phys_addr().as_u64();
 
         let rflags: u64;
@@ -225,6 +255,22 @@ impl VirtualMachineControlStructure for RealVmcs {
     }
 
     fn from_parts(page: KernelPage, _revision_id: u32) -> Self {
-        Self { page: Some(page) }
+        let svm = super::svm::supported();
+        let svm_bitmaps = if svm {
+            super::svm::Bitmaps::new()
+        } else {
+            None
+        };
+        if svm {
+            let v = unsafe {
+                &mut *(page.virtual_address().as_u64() as *mut super::svm_core::vmcb::Vmcb)
+            };
+            v.initialize();
+        }
+        Self {
+            page: Some(page),
+            svm,
+            svm_bitmaps,
+        }
     }
 }

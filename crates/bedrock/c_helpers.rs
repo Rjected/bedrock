@@ -44,6 +44,12 @@ pub(crate) struct BedrockVmxCaps {
 
 #[allow(improper_ctypes)]
 extern "C" {
+    pub(crate) fn bedrock_svm_enable() -> i32;
+    pub(crate) fn bedrock_svm_disable();
+    pub(crate) fn bedrock_svm_host_vmcb() -> u64;
+    pub(crate) fn bedrock_svm_alloc_bitmap(order: u32) -> *mut core::ffi::c_void;
+    pub(crate) fn bedrock_svm_free_bitmap(ptr: *mut core::ffi::c_void, order: u32);
+    pub(crate) fn bedrock_svm_bitmap_phys(ptr: *mut core::ffi::c_void) -> u64;
     /// Convert a struct page pointer to its physical address.
     pub(crate) fn bedrock_page_to_phys(page: *mut page) -> phys_addr_t;
 

@@ -54,11 +54,23 @@ pub trait VmxOnRegion {
 pub trait Vmx {
     type M: Machine;
 
+    /// Whether guest-physical translation uses AMD nested-page-table entries.
+    fn uses_nested_paging() -> bool {
+        false
+    }
+
     /// Check if VMX is supported on this machine.
     fn is_supported() -> bool;
 
     /// Initialize VMX operation on all processors.
     fn initialize(machine: &Self::M) -> Result<(), VmxInitError>
+    where
+        Self: Sized,
+    {
+        Self::initialize_vmx(machine)
+    }
+
+    fn initialize_vmx(machine: &Self::M) -> Result<(), VmxInitError>
     where
         Self: Sized,
     {

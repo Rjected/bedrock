@@ -48,13 +48,26 @@
         clippy = true;
       };
 
+      bedrockModuleDebug = import ./nix/module.nix {
+        inherit pkgs kernel rustToolchain;
+        kernelLog = true;
+      };
+
       # Guest kernel with determinism patches (runs under bedrock)
       guestKernel = import ./nix/guest-kernel.nix {
         inherit pkgs linux-src;
       };
+      svmGuestKernel = import ./nix/guest-kernel.nix {
+        inherit pkgs linux-src;
+        svmReference = true;
+      };
 
       # Trivial guest initramfs (boots and immediately shuts down via VMCALL)
       guestInitrd = import ./nix/trivial-initrd.nix { inherit pkgs; };
+      svmGuestInitrd = import ./nix/trivial-initrd.nix {
+        inherit pkgs;
+        initSource = ./guest/svm-test.c;
+      };
 
       # The podman guest initramfs. One generic initrd serves every workload.
       # The workload's compose.yaml / images.tar are downloaded at boot over the
@@ -99,7 +112,7 @@
     in
     {
       packages.${system} = {
-        inherit kernel bedrockModule guestKernel guestInitrd checkStack;
+        inherit kernel bedrockModule bedrockModuleDebug guestKernel svmGuestKernel guestInitrd svmGuestInitrd checkStack;
         clippy-kernel = bedrockModuleClippy;
         check-stack = checkStack;
         bedrock-cli = userland.bedrock-cli;
