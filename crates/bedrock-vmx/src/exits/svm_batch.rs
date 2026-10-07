@@ -602,7 +602,11 @@ fn scalar_store_preserves_guard<C: VmContext>(
         g.rax, g.rcx, g.rdx, g.rbx, rsp, g.rbp, g.rsi, g.rdi, g.r8, g.r9, g.r10, g.r11, g.r12,
         g.r13, g.r14, g.r15,
     ];
-    let Some((address, width)) = store_range(&window.bytes, rip, &gprs, 0) else {
+    let Some((length, _, _)) = safe_len(&window.bytes, true, false) else {
+        return false;
+    };
+    // RIP-relative stores use the actual next RIP, not the fetch-window end.
+    let Some((address, width)) = store_range(&window.bytes[..length], rip, &gprs, 0) else {
         return false;
     };
     let Some(end) = address.checked_add(width - 1) else {
@@ -2543,6 +2547,30 @@ mod tests {
         store.bytes[..2].copy_from_slice(&[0x0f, 0x0b]);
         retain_translation_cache(&mut ctx, None, Some(&store), false);
         assert!(!ctx.state().svm_guard.valid);
+    }
+
+    #[test]
+    fn scalar_rip_relative_stores_use_instruction_end() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        let mut window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        prepare(&mut ctx, true, true, &window).unwrap();
+        window.bytes[..3].copy_from_slice(&[0x48, 0x89, 0x05]);
+        // Eight bytes straddle the table's end. The old window-based address
+        // incorrectly placed this write entirely in unprotected data RAM.
+        window.bytes[3..7].copy_from_slice(&(0x6ffci32 - 0x1007).to_le_bytes());
+        assert!(!scalar_store_preserves_guard(&ctx, &window, false));
+        retain_translation_cache(&mut ctx, None, Some(&window), false);
+        assert!(!ctx.state().svm_guard.valid);
+
+        prepare(&mut ctx, true, true, &window).unwrap();
+        window.bytes[3..7].copy_from_slice(&(0x7000i32 - 0x1007).to_le_bytes());
+        assert!(scalar_store_preserves_guard(&ctx, &window, false));
+        window.bytes[3..7].copy_from_slice(&(0x1000i32 - 0x1007).to_le_bytes());
+        assert!(!scalar_store_preserves_guard(&ctx, &window, true));
+        retain_translation_cache(&mut ctx, None, Some(&window), false);
+        assert!(ctx.state().svm_guard.valid);
+        assert_eq!(ctx.state().svm_guard.code_count, 0);
     }
 
     #[test]
