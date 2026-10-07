@@ -17,6 +17,9 @@
 #include <linux/preempt.h>
 #include <linux/percpu.h>
 #include <linux/xxhash.h>
+#include <linux/perf_event.h>
+#include <asm/perf_event.h>
+#include <asm/cpufeature.h>
 #include <asm/io.h>
 #include <asm/msr.h>
 #include <asm/tlbflush.h>
@@ -63,6 +66,82 @@ struct bedrock_svm_cpu {
     u64 saved_efer;
 };
 static DEFINE_PER_CPU(struct bedrock_svm_cpu, bedrock_pcpu_svm);
+static DEFINE_PER_CPU(struct perf_event *, bedrock_svm_counter);
+
+/* Allocate through perf, rather than stealing a counter from host users. */
+void bedrock_svm_pmu_cleanup(void)
+{
+    int cpu;
+    for_each_possible_cpu(cpu) {
+        struct perf_event *event = per_cpu(bedrock_svm_counter, cpu);
+        if (event) perf_event_release_kernel(event);
+        per_cpu(bedrock_svm_counter, cpu) = NULL;
+    }
+}
+
+int bedrock_svm_pmu_init(void)
+{
+    struct perf_event_attr attr = {
+        .type = PERF_TYPE_RAW,
+        .size = sizeof(attr),
+        .config = 0xd1, /* Retired conditional branches, excluding host IRQ work. */
+        .pinned = 1,
+        .exclude_host = 1, /* AMD GuestOnly, including guest CPL0 and CPL3. */
+    };
+    int cpu;
+    if (!boot_cpu_has(X86_FEATURE_PERFMON_V2)) return -EOPNOTSUPP;
+    for_each_online_cpu(cpu) {
+        struct perf_event *event = perf_event_create_kernel_counter(
+            &attr, cpu, NULL, NULL, NULL);
+        if (IS_ERR(event)) {
+            int error = PTR_ERR(event);
+            bedrock_svm_pmu_cleanup();
+            return error;
+        }
+        per_cpu(bedrock_svm_counter, cpu) = event;
+    }
+    return 0;
+}
+
+u64 bedrock_svm_pmu_mask(void)
+{
+    struct perf_event *event = this_cpu_read(bedrock_svm_counter);
+    if (!event || event->state != PERF_EVENT_STATE_ACTIVE || event->hw.idx < 0
+        || (event->hw.state & PERF_HES_STOPPED))
+        return 0;
+    return BIT_ULL(event->hw.idx);
+}
+
+/* Arm on the pinned caller's CPU, with IRQs disabled. Keep attr.sample_period
+ * zero: this is a counting event, whose rollovers exit SVM through NMI without
+ * perf's sampling-rate throttle. Perf owns and acknowledges the counter. */
+int bedrock_svm_pmu_arm(u64 period, u64 *value)
+{
+    struct perf_event *event = this_cpu_read(bedrock_svm_counter);
+    if (!bedrock_svm_pmu_mask() || !period || period > (1ULL << 30))
+        return -EAGAIN;
+    event->pmu->stop(event, PERF_EF_UPDATE);
+    *value = local64_read(&event->count);
+    event->hw.sample_period = period;
+    event->hw.last_period = period;
+    local64_set(&event->hw.period_left, period);
+    event->pmu->start(event, PERF_EF_RELOAD);
+    return 0;
+}
+
+/* The caller disables migration and IRQs. A pinned event cannot multiplex. */
+int bedrock_svm_pmu_read(u64 *value)
+{
+    struct perf_event *event = this_cpu_read(bedrock_svm_counter);
+    if (!event || event->state != PERF_EVENT_STATE_ACTIVE || event->hw.idx < 0
+        || (event->hw.state & PERF_HES_STOPPED))
+        return -EAGAIN;
+    asm volatile("lfence" ::: "memory");
+    /* Use perf's NMI-safe accounting, including counter reloads on overflow. */
+    event->pmu->read(event);
+    *value = local64_read(&event->count);
+    return 0;
+}
 
 /* Runs inside the per-CPU initialization callback with migration disabled. */
 int bedrock_svm_enable(void)

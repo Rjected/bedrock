@@ -17,7 +17,20 @@ fn run_until(vm: &mut Vm, snapshot: bool) -> Result<u64, Box<dyn std::error::Err
         if start.elapsed() > Duration::from_secs(1800) {
             return Err("Linux integration test timed out".into());
         }
-        let exit = vm.run()?;
+        let exit = match vm.run() {
+            Ok(exit) => exit,
+            Err(error) => {
+                let registers = vm.get_regs()?;
+                eprintln!(
+                    "SVM Linux failure after {:.3}s: rip={:#x}, rax={:#x}, rcx={:#x}",
+                    start.elapsed().as_secs_f64(),
+                    registers.rip,
+                    registers.gprs.rax,
+                    registers.gprs.rcx
+                );
+                return Err(error.into());
+            }
+        };
         if let Some(buffer) = vm.event_buffer() {
             for record in EventStream::new(&buffer[..exit.event_len as usize]) {
                 if record.kind() == EventKind::Serial.as_u16() {

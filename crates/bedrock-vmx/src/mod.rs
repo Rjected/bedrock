@@ -28,6 +28,7 @@ pub use fields::{VmcsField16, VmcsField32, VmcsField64, VmcsFieldNatural};
 pub use handler::VmRef;
 pub use handler::{BedrockHandler, VmEntry};
 pub use traits::{
+    InstructionBatch,
     InveptError, InvvpidError, VirtualMachineControlStructure, VmEntryError, VmRunner,
     VmcsReadError, VmcsReadResult, VmcsWriteError, VmcsWriteResult, Vmx, VmxCapabilities,
     VmxContext, VmxInitError, VmxoffError, VmxonError,

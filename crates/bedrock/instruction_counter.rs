@@ -133,6 +133,9 @@ impl LinuxInstructionCounter {
 }
 
 impl InstructionCounter for LinuxInstructionCounter {
+    fn record_instructions(&mut self, instructions: u64) {
+        if self.svm { self.svm_count += instructions; }
+    }
     fn record_exit(&mut self, reason: u32) {
         if self.svm && reason == 37 { self.svm_count += 1; }
     }

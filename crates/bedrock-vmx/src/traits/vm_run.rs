@@ -282,6 +282,7 @@ where
         }
     }
 
+    let mut force_single_step = false;
     let loop_result = loop {
         let loop_start_tsc = rdtsc();
 
@@ -310,12 +311,37 @@ where
         }
 
         // Split borrow: vmx_ctx mutably, vmcs immutably.
+        let mut instruction_window = None;
         let software_exit = Ctx::V::uses_nested_paging()
-            && super::super::exits::prepare_instruction_exit(ctx, runner, allocator)
-                .map_err(VmRunError::ExitHandler)?;
+            && super::super::exits::prepare_instruction_exit(
+                ctx,
+                runner,
+                allocator,
+                &mut instruction_window,
+            )
+            .map_err(VmRunError::ExitHandler)?;
         if software_exit {
             ctx.sync_gprs_to_vmx_ctx();
         }
+        let mut batch = if Ctx::V::uses_nested_paging() && !software_exit && !force_single_step {
+            instruction_window.as_ref().and_then(|window| {
+                super::super::exits::prepare_instruction_batch(
+                    ctx,
+                    runner.can_count_instructions(),
+                    window,
+                )
+            })
+        } else {
+            None
+        };
+        force_single_step = false;
+        let guard = batch.as_ref().and_then(|batch| {
+            super::super::exits::protect_instruction_batch(ctx, allocator, batch)
+        });
+        if batch.is_some() && guard.is_none() {
+            batch = None;
+        }
+        runner.set_instruction_batch(batch);
         let state = ctx.state_mut();
         // SAFETY: Caller guarantees VMCS is properly configured and loaded,
         // interrupts are disabled, and preemption cannot migrate us.
@@ -324,6 +350,17 @@ where
         } else {
             unsafe { runner.run(&mut state.vmx_ctx, &state.vmcs) }
         };
+        if let Some(guard) = guard {
+            if guard.restore(ctx, allocator) && run_result.is_ok() {
+                // A store attempted to change this batch's code or address
+                // translation. Restore permissions, step it once, and replan.
+                ctx.state()
+                    .vmcs
+                    .write32(VmcsField32::VmExitReason, 37)
+                    .map_err(VmRunError::WriteHostRsp)?;
+                force_single_step = true;
+            }
+        }
 
         if pebs_armed_this_iter {
             pebs_post_vm_exit(ctx, msr);
@@ -350,7 +387,13 @@ where
 
         // Service pending host interrupts; host XCR0 is already restored.
         if let Ok(reason) = ctx.state().vmcs.read32(VmcsField32::VmExitReason) {
-            ctx.state_mut().instruction_counter.record_exit(reason);
+            if let Some(count) = runner.completed_instructions().filter(|_| !software_exit) {
+                ctx.state_mut()
+                    .instruction_counter
+                    .record_instructions(count);
+            } else {
+                ctx.state_mut().instruction_counter.record_exit(reason);
+            }
         }
         let pre_irq_tsc = rdtsc();
         {

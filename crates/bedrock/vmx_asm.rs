@@ -52,16 +52,34 @@ impl VmxContextExt for VmxContext {
 }
 
 /// Kernel `VmRunner` backed by the assembly in vmx_support.S.
-pub(crate) struct RealVmRunner;
+pub(crate) struct RealVmRunner {
+    batch: Option<super::vmx::InstructionBatch>,
+    completed: Option<u64>,
+}
 
 impl RealVmRunner {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            batch: None,
+            completed: None,
+        }
     }
 }
 
 impl VmRunner for RealVmRunner {
     type Vmcs = RealVmcs;
+
+    fn set_instruction_batch(&mut self, batch: Option<super::vmx::InstructionBatch>) {
+        self.batch = batch;
+    }
+
+    fn completed_instructions(&self) -> Option<u64> {
+        self.completed
+    }
+
+    fn can_count_instructions(&self) -> bool {
+        super::svm::supported() && unsafe { super::c_helpers::bedrock_svm_pmu_mask() } != 0
+    }
 
     fn saved_guest_msr(&self, vmcs: &Self::Vmcs, index: u32) -> Option<u64> {
         if !super::svm::supported() {
@@ -83,10 +101,14 @@ impl VmRunner for RealVmRunner {
     }
 
     unsafe fn run(&mut self, ctx: &mut VmxContext, vmcs: &Self::Vmcs) -> Result<(), VmEntryError> {
+        self.completed = None;
         if super::svm::supported() {
             use super::vmx::VirtualMachineControlStructure;
             let v = unsafe { &mut *(vmcs.vmcs_region_ptr().cast::<super::svm_core::vmcb::Vmcb>()) };
-            return unsafe { super::svm::run(ctx, v, vmcs.svm_phys_addr()) };
+            let completed =
+                unsafe { super::svm::run(ctx, v, vmcs.svm_phys_addr(), self.batch.as_ref()) }?;
+            self.completed = Some(completed);
+            return Ok(());
         }
         // SAFETY: Caller guarantees the VMCS is loaded and configured
         // (HOST_RSP = ctx, HOST_RIP = vmx_exit_handler) with interrupts in the

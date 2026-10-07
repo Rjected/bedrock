@@ -21,9 +21,58 @@ pub(super) fn physical<C: VmContext>(ctx: &C, linear: u64) -> Result<GuestPhysAd
         .map_err(|_| ExitError::Fatal("SVM emulation address is not mapped"))
 }
 
+pub(crate) struct InstructionWindow {
+    pub linear: u64,
+    pub physical: GuestPhysAddr,
+    pub bytes: [u8; 256],
+    length: usize,
+}
+
+impl InstructionWindow {
+    fn read<C: VmContext>(ctx: &C) -> Result<Self, ExitError> {
+        let v = &ctx.state().vmcs;
+        let linear = v
+            .read_natural(VmcsFieldNatural::GuestRip)?
+            .wrapping_add(v.read_natural(VmcsFieldNatural::GuestCsBase)?);
+        let physical = physical(ctx, linear)?;
+        let length = (4096 - (linear & 4095) as usize).min(256);
+        let mut window = Self {
+            linear,
+            physical,
+            bytes: [0; 256],
+            length,
+        };
+        ctx.read_guest_memory(physical, &mut window.bytes[..length])
+            .map_err(|_| ExitError::Fatal("SVM instruction fetch failed"))?;
+        Ok(window)
+    }
+
+    fn fetch<C: VmContext>(&self, ctx: &C, offset: usize) -> Result<u8, ExitError> {
+        if offset < self.length {
+            return Ok(self.bytes[offset]);
+        }
+        let mut byte = [0];
+        ctx.read_guest_memory(
+            physical(ctx, self.linear.wrapping_add(offset as u64))?,
+            &mut byte,
+        )
+        .map_err(|_| ExitError::Fatal("SVM instruction fetch failed"))?;
+        Ok(byte[0])
+    }
+}
+
+#[cfg(test)]
+fn prepare_random_exit<C: VmContext>(ctx: &C) -> Result<bool, ExitError> {
+    let window = InstructionWindow::read(ctx).ok();
+    prepare_random_exit_with_window(ctx, window.as_ref())
+}
+
 /// SVM has no RDRAND/RDSEED intercept. Decode before entry and reuse the
 /// existing controlled randomness handlers without executing the host RNG.
-pub(crate) fn prepare_random_exit<C: VmContext>(ctx: &C) -> Result<bool, ExitError> {
+fn prepare_random_exit_with_window<C: VmContext>(
+    ctx: &C,
+    window: Option<&InstructionWindow>,
+) -> Result<bool, ExitError> {
     let v = &ctx.state().vmcs;
     if v.read_natural(VmcsFieldNatural::GuestCr0)? & (1 << 31) != 0
         && v.read64(VmcsField64::GuestIa32Efer)? & (1 << 10) == 0
@@ -40,6 +89,9 @@ pub(crate) fn prepare_random_exit<C: VmContext>(ctx: &C) -> Result<bool, ExitErr
     let rip = v.read_natural(VmcsFieldNatural::GuestRip)?;
     let base = v.read_natural(VmcsFieldNatural::GuestCsBase)?;
     let fetch = |offset: usize| -> Result<u8, ExitError> {
+        if let Some(window) = window {
+            return window.fetch(ctx, offset);
+        }
         let address = physical(ctx, base.wrapping_add(rip).wrapping_add(offset as u64))?;
         let mut byte = [0];
         ctx.read_guest_memory(address, &mut byte)
@@ -112,11 +164,13 @@ pub(crate) fn prepare_instruction_exit<
     ctx: &mut C,
     runner: &R,
     allocator: &mut A,
+    window: &mut Option<InstructionWindow>,
 ) -> Result<bool, ExitError> {
     if super::svm_interrupts::pending_event(ctx, allocator)? {
         return Ok(true);
     }
-    if prepare_random_exit(ctx)? {
+    *window = InstructionWindow::read(ctx).ok();
+    if prepare_random_exit_with_window(ctx, window.as_ref())? {
         return Ok(true);
     }
     let v = &ctx.state().vmcs;
@@ -128,6 +182,9 @@ pub(crate) fn prepare_instruction_exit<
     let base = v.read_natural(VmcsFieldNatural::GuestCsBase)?;
     let long = cs & (1 << 13) != 0;
     let fetch = |offset: usize| -> Result<u8, ExitError> {
+        if let Some(window) = window.as_ref() {
+            return window.fetch(ctx, offset);
+        }
         let address = physical(ctx, base.wrapping_add(rip).wrapping_add(offset as u64))?;
         let mut byte = [0];
         ctx.read_guest_memory(address, &mut byte)

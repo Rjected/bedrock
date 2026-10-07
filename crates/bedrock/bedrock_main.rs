@@ -302,6 +302,7 @@ impl MiscDevice for BedrockFile {
 /// The bedrock kernel module.
 #[pin_data(PinnedDrop)]
 struct Bedrock {
+    _svm_counters: svm::Counters,
     #[pin]
     _miscdev: MiscDeviceRegistration<BedrockFile>,
 }
@@ -315,6 +316,7 @@ impl kernel::InPlaceModule for Bedrock {
 
                 // SAFETY: Called exactly once during module initialization.
                 HANDLER.init();
+                let counters = svm::Counters::new()?;
 
                 let handler = match BedrockHandler::<RealVmx, MAX_TRACKED_VMS>::new(&MACHINE) {
                     Ok(h) => {
@@ -334,6 +336,7 @@ impl kernel::InPlaceModule for Bedrock {
 
                 let miscdev_slot = core::ptr::addr_of_mut!((*slot)._miscdev);
                 register_miscdev_with_mode(c_str!("bedrock"), 0o666).__pinned_init(miscdev_slot)?;
+                core::ptr::addr_of_mut!((*slot)._svm_counters).write(counters);
 
                 log_info!("Bedrock module loaded\n");
 

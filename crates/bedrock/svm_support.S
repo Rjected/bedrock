@@ -69,11 +69,22 @@ SYM_FUNC_START(svm_run_guest)
  push %r13
  push %r12
  push %rbx
- sub $24, %rsp
+ sub $56, %rsp
  mov %rdi, 0(%rsp)
  mov %rsi, 8(%rsp)
  mov %rdx, 16(%rsp)
+ mov %r8, 48(%rsp)
  clgi
+ /* V_INTR_MASKING uses host IF at VMRUN. GIF=0 protects host setup;
+  * VMRUN enables guest GIF, so physical IRQs can terminate a long batch. */
+ sti
+ mov %dr7, %rax
+ mov %rax, 32(%rsp)
+ mov $0x400, %rax
+ mov %rax, %dr7
+ mov %dr0, %rax
+ mov %rax, 24(%rsp)
+ mov %rcx, %dr0
  mov %rdx, %rax
  vmsave %rax
 	mov	VMXCTX_XCR0_MASK(%rdi), %rax
@@ -113,6 +124,21 @@ SYM_FUNC_START(svm_run_guest)
 	xrstor64 (%rcx)
 
 .Lsvm_skip_xsave_entry:
+ /* Preserve host counter enables; only our perf-owned GuestOnly event runs
+  * in the guest. Linux 7 restricts amd_pmu_enable_virt to KVM modules. */
+ cmpq $0, 48(%rsp)
+ je .Lsvm_skip_pmu_entry
+ mov $0xc0000301, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ mov %rax, 40(%rsp)
+ mov 48(%rsp), %rax
+ btr $63, %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+.Lsvm_skip_pmu_entry:
  mov 8(%rsp), %rax
  vmload %rax
  mov VMXCTX_GUEST_RBX(%rdi), %rbx
@@ -131,6 +157,7 @@ SYM_FUNC_START(svm_run_guest)
  mov VMXCTX_GUEST_RDI(%rdi), %rdi
  mov 8(%rsp), %rax
  vmrun %rax
+ cli
  /* RAX on exit is the VMCB physical address, not guest RAX. */
  push %rdi
  mov 8(%rsp), %rax
@@ -150,6 +177,14 @@ SYM_FUNC_START(svm_run_guest)
  mov 0(%rsp), %rcx
  mov %rcx, VMXCTX_GUEST_RDI(%rax)
  add $8, %rsp
+ cmpq $0, 48(%rsp)
+ je .Lsvm_skip_pmu_exit
+ mov $0xc0000301, %ecx
+ mov 40(%rsp), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+.Lsvm_skip_pmu_exit:
  mov 8(%rsp), %rax
  vmsave %rax
  mov 16(%rsp), %rax
@@ -180,8 +215,12 @@ SYM_FUNC_START(svm_run_guest)
 	xrstor64 (%rcx)
 
 .Lsvm_skip_xsave_exit:
+ mov 24(%rsp), %rax
+ mov %rax, %dr0
+ mov 32(%rsp), %rax
+ mov %rax, %dr7
  stgi
- add $24, %rsp
+ add $56, %rsp
  pop %rbx
  pop %r12
  pop %r13

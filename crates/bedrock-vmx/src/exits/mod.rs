@@ -17,6 +17,7 @@ mod qualifications;
 mod rdrand;
 mod reasons;
 mod svm;
+mod svm_batch;
 mod svm_interrupts;
 mod time;
 mod vmcall;
@@ -37,6 +38,8 @@ pub use qualifications::{
 };
 pub use reasons::ExitReason;
 pub(crate) use svm::prepare_instruction_exit;
+pub(crate) use svm_batch::prepare as prepare_instruction_batch;
+pub(crate) use svm_batch::protect as protect_instruction_batch;
 pub use vmcall::{
     FB_ERR_BAD_ID_LEN, FB_ERR_BAD_SIZE, FB_ERR_BUFFER_NOT_RESIDENT, FB_ERR_ID_NOT_RESIDENT,
     FB_ERR_NO_SLOTS,
@@ -51,6 +54,7 @@ use io::handle_io;
 use misc::{dump_triple_fault_state, handle_exception_nmi, handle_xsetbv};
 use msr::{handle_msr_read, handle_msr_write};
 use rdrand::{handle_rdrand, handle_rdseed};
+pub(crate) use svm::InstructionWindow;
 use time::{handle_idle, handle_rdpmc, handle_rdtsc, handle_rdtscp};
 use vmcall::handle_vmcall;
 

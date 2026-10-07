@@ -124,6 +124,8 @@ impl Vmcb {
         }
         // #DB for hypervisor single-stepping; #MC for host error reporting.
         self.write(offset::INTERCEPT_EXCEPTIONS, 4, u32::MAX as u64);
+        // Guest debug-register access must not change host breakpoint state.
+        self.write(0x004, 4, u32::MAX as u64);
         // CR3 and CR8 are already emulated by the common CR handler.
         self.write(offset::INTERCEPT_CR_READ, 2, (1 << 3) | (1 << 8));
         self.write(offset::INTERCEPT_CR_WRITE, 2, (1 << 3) | (1 << 8));

@@ -55,12 +55,25 @@ testing.
 
 The AMD backend implements SVM entry/exit, VMCB state, nested page tables,
 and MSR/I/O intercept bitmaps. The common device, randomness and fork logic is
-shared with the Intel backend. AMD execution currently steps every instruction;
-Intel PEBS registration and acceleration are not implemented on AMD.
+shared with the Intel backend. AMD execution batches verified straight-line
+instructions and bounded REP stores, and uses a perf-owned retired-conditional-
+branch counter for verified loops. Code and translation guards prevent a batch
+from modifying the instructions it has decoded. Unsupported instructions and
+paged stores fall back to instruction stepping. Loop acceleration requires
+AMD PerfMonV2; counter allocation failure disables it.
+
+This is partial acceleration, not an equivalent of Intel's PEBS execution path.
+Linux still spends substantial time in the stepping fallback. Near-native
+execution, with roughly 5% overhead as the target, has not been demonstrated.
+PMI skid can exceed the deadline margin; such a run fails instead of returning
+an incorrect instruction count.
 
 Native validation on an AMD EPYC 4585PX with Ubuntu Linux 7.0.0-38-generic
 includes Linux 6.18 booting to userspace and matching executions of two Linux
-forks. This backend requires SVM and nested paging.
+forks with the reference stepping backend. The accelerated backend passes exact
+Linux checkpoints with matching registers and guest-memory hashes, plus loop
+and REP deadline/fork tests; its complete Linux boot/replay test is still pending.
+This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
 controlled RDRAND/RDSEED, prefixed system-call transitions, interrupt flags,
@@ -70,7 +83,13 @@ page-fault recovery, and IRET stack restoration:
 cargo build --release -p bedrock-vm --examples
 sudo timeout 10 target/release/examples/svm_smoke
 sudo timeout 10 target/release/examples/svm_transitions
+sudo timeout 15 target/release/examples/svm_bench
+sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
 ```
+
+The `native` comparison runs the same register-only loop natively and in a
+long-mode guest three times, and reports median overhead. It measures the
+verified loop path; it does not represent Linux or general guest workloads.
 
 The Linux integration example uses a userspace snapshot, then compares two
 forks' clock syscall, `getrandom`, RDRAND/RDSEED, final registers, and virtual

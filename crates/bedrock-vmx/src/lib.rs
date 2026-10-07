@@ -27,10 +27,10 @@ pub use fields::{VmcsField16, VmcsField32, VmcsField64, VmcsFieldNatural};
 pub use host::HostState;
 pub use registers::GeneralPurposeRegisters;
 pub use traits::{
-    cpu_based, pin_based, secondary_exec, vm_entry, vm_exit, InveptError, InvvpidError,
-    MemoryError, VirtualMachineControlStructure, VmContext, VmEntryError, VmRunner, VmcsReadError,
-    VmcsReadResult, VmcsWriteError, VmcsWriteResult, Vmx, VmxCapabilities, VmxContext,
-    VmxInitError, VmxoffError, VmxonError,
+    cpu_based, pin_based, secondary_exec, vm_entry, vm_exit, InstructionBatch, InveptError,
+    InvvpidError, MemoryError, VirtualMachineControlStructure, VmContext, VmEntryError, VmRunner,
+    VmcsReadError, VmcsReadResult, VmcsWriteError, VmcsWriteResult, Vmx, VmxCapabilities,
+    VmxContext, VmxInitError, VmxoffError, VmxonError,
 };
 
 // VM implementation

@@ -44,6 +44,11 @@ pub(crate) struct BedrockVmxCaps {
 
 #[allow(improper_ctypes)]
 extern "C" {
+    pub(crate) fn bedrock_svm_pmu_init() -> i32;
+    pub(crate) fn bedrock_svm_pmu_cleanup();
+    pub(crate) fn bedrock_svm_pmu_read(value: *mut u64) -> i32;
+    pub(crate) fn bedrock_svm_pmu_arm(period: u64, value: *mut u64) -> i32;
+    pub(crate) fn bedrock_svm_pmu_mask() -> u64;
     pub(crate) fn bedrock_svm_enable() -> i32;
     pub(crate) fn bedrock_svm_disable();
     pub(crate) fn bedrock_svm_host_vmcb() -> u64;
