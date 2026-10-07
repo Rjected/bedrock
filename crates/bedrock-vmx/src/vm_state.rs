@@ -754,6 +754,8 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     /// Conservative scan rejections can remain cached after code changes.
     pub svm_rejected_pages: [u64; 64],
     pub svm_rejected_cursor: usize,
+    /// Recent virtual code pages; approvals are rescanned on every entry.
+    pub svm_recent_pages: [u64; 4],
     /// Emulated TSC: `last_instruction_count + tsc_offset`.
     pub emulated_tsc: u64,
     /// Added to the instruction count; grows when HLT/MWAIT skips to a deadline.
@@ -1005,6 +1007,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
+            svm_recent_pages: [u64::MAX; 4],
             last_instruction_count: 0,
             emulated_tsc: 0,
             tsc_offset: 0,
@@ -1780,6 +1783,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
+            svm_recent_pages: [u64::MAX; 4],
             last_instruction_count: 0,
             emulated_tsc: 0,
             tsc_offset: 0,
@@ -1995,6 +1999,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
+            svm_recent_pages: [u64::MAX; 4],
             last_instruction_count: 0, // Child's counter starts from 0
             emulated_tsc: parent_state.emulated_tsc,
             tsc_offset: parent_state.emulated_tsc,

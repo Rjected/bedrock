@@ -80,18 +80,25 @@ disables it. Forward-only regions stop at their endpoint and can run inside
 the performance-counter interrupt margin when their maximum instruction count
 fits before the next deadline. Backward branches still require that margin.
 Long-mode execution can also run across calls, returns, and store loops within
-a code page that contains no possible RDRAND/RDSEED/RDPID, repeated-string
-encoding, or SYSRET. SYSRET uses the scalar path because it can restore guest
-TF from R11. A temporary NPT guard makes that page read-only and blocks
-instruction fetch from every other page. It also protects the guest page tables
-used to translate the code, so a guest cannot redirect instruction fetch during
-the run. This path requires AMD ROGPT (CPUID 8000000A:EDX[21]); VMCB nested-control
+up to four recently visited code pages. Hardware execution breakpoints stop
+before possible RDRAND/RDSEED/RDPID, repeated-string encodings, and SYSRET;
+their prefix entry points and executable virtual aliases must fit in four
+breakpoint slots. SYSRET uses the scalar path because it can restore guest
+TF from R11. Ambiguous encodings across page boundaries use the fallback.
+A temporary NPT guard makes the selected code pages read-only and blocks
+instruction fetch from every other page. It also protects all reachable guest
+page tables, preventing translation changes during the run. The code and guest
+table frames must fit in a bounded set of twenty pages; larger trees use the
+verified-region fallback. This path requires AMD ROGPT
+(CPUID 8000000A:EDX[21]); VMCB nested-control
 bit 6 makes page-table walks request nested writes only for actual A/D updates.
 Those updates and explicit table writes end the run and use stepping before
 replanning. See [AMD APM, section 15.25.5](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2).
 The counter accounts for all retired instructions;
-a page transition, code write, or intercepted instruction ends the run and is
-replayed with stepping after timer handling. Guest single-step traps use
+a transition outside the guarded pages, code write, or intercepted instruction
+ends the run and is replayed with stepping after timer handling. Guest exceptions
+and software interrupts are delivered through the shared exit handlers.
+Guest single-step traps use
 the scalar path and are reported after retirement. Accepted pages are rescanned
 before each entry;
 only conservative rejections are cached. Page execution requires more than

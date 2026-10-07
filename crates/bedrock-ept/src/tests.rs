@@ -477,3 +477,63 @@ fn page_execution_guard_blocks_other_subtrees_and_restores_cow_and_nx() {
         .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x4000))
         .is_none());
 }
+
+#[test]
+fn multiple_code_pages_remain_executable_and_restore_all_permissions() {
+    use crate::traits::GuestPhysAddr;
+    use crate::PageTableFormat;
+    let mut allocator = TestAllocator::new();
+    let mut ept = EptPageTable::new_with_format(&mut allocator, PageTableFormat::AmdNpt).unwrap();
+    let addresses = [0x1000, 0x2000, 1 << 21, 2 << 21, 3 << 21, 1 << 30, 1 << 39];
+    for (index, &address) in addresses.iter().enumerate() {
+        ept.map_4k(
+            &mut allocator,
+            GuestPhysAddr::new(address),
+            HostPhysAddr::new(0x9000 + index as u64 * 4096),
+            if index == 1 {
+                EptPermissions::READ_EXECUTE
+            } else {
+                EptPermissions::READ_WRITE_EXECUTE
+            },
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    }
+    let before: std::vec::Vec<_> = addresses
+        .iter()
+        .map(|&p| ept.lookup(&allocator, GuestPhysAddr::new(p)))
+        .collect();
+    let selected = [addresses[0], addresses[1], addresses[2], addresses[3]].map(GuestPhysAddr::new);
+    let guard = ept
+        .restrict_execution_to_pages(&allocator, &selected)
+        .unwrap();
+    for (index, &address) in addresses.iter().enumerate() {
+        let permissions = ept
+            .lookup(&allocator, GuestPhysAddr::new(address))
+            .unwrap()
+            .1
+            .bits();
+        assert_eq!(permissions & 4 != 0, index < 4);
+        if index < 4 {
+            assert_eq!(permissions & 2, 0);
+        }
+    }
+    guard.restore(&mut ept, &allocator);
+    for (index, &address) in addresses.iter().enumerate() {
+        assert_eq!(
+            ept.lookup(&allocator, GuestPhysAddr::new(address)),
+            before[index]
+        );
+    }
+    // Four distant paths exceed the bounded table union. Failure is atomic.
+    let distant = [0x1000, 1 << 21, 1 << 30, 1 << 39].map(GuestPhysAddr::new);
+    assert!(ept
+        .restrict_execution_to_pages(&allocator, &distant)
+        .is_none());
+    for (index, &address) in addresses.iter().enumerate() {
+        assert_eq!(
+            ept.lookup(&allocator, GuestPhysAddr::new(address)),
+            before[index]
+        );
+    }
+}

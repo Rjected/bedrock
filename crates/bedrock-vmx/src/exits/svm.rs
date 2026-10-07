@@ -170,6 +170,9 @@ pub(crate) fn prepare_instruction_exit<
         return Ok(true);
     }
     *window = InstructionWindow::read(ctx).ok();
+    if let Some(window) = window.as_ref() {
+        super::svm_batch::remember_page(ctx, window.linear);
+    }
     if prepare_random_exit_with_window(ctx, window.as_ref())? {
         return Ok(true);
     }

@@ -69,7 +69,7 @@ SYM_FUNC_START(svm_run_guest)
  push %r13
  push %r12
  push %rbx
- sub $56, %rsp
+ sub $88, %rsp
  mov %rdi, 0(%rsp)
  mov %rsi, 8(%rsp)
  mov %rdx, 16(%rsp)
@@ -84,7 +84,20 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, %dr7
  mov %dr0, %rax
  mov %rax, 24(%rsp)
- mov %rcx, %dr0
+ mov %dr1, %rax
+ mov %rax, 56(%rsp)
+ mov %dr2, %rax
+ mov %rax, 64(%rsp)
+ mov %dr3, %rax
+ mov %rax, 72(%rsp)
+ mov 0(%rcx), %rax
+ mov %rax, %dr0
+ mov 8(%rcx), %rax
+ mov %rax, %dr1
+ mov 16(%rcx), %rax
+ mov %rax, %dr2
+ mov 24(%rcx), %rax
+ mov %rax, %dr3
  mov %rdx, %rax
  vmsave %rax
 	mov	VMXCTX_XCR0_MASK(%rdi), %rax
@@ -217,10 +230,16 @@ SYM_FUNC_START(svm_run_guest)
 .Lsvm_skip_xsave_exit:
  mov 24(%rsp), %rax
  mov %rax, %dr0
+ mov 56(%rsp), %rax
+ mov %rax, %dr1
+ mov 64(%rsp), %rax
+ mov %rax, %dr2
+ mov 72(%rsp), %rax
+ mov %rax, %dr3
  mov 32(%rsp), %rax
  mov %rax, %dr7
  stgi
- add $56, %rsp
+ add $88, %rsp
  pop %rbx
  pop %r12
  pop %r13

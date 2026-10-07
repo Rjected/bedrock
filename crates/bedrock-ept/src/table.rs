@@ -29,30 +29,35 @@ pub struct EptPageTable<Frame> {
 /// letting another vCPU use these tables; invalidate translations on entry.
 #[must_use]
 pub struct NptExecutionGuard {
-    tables: [HostPhysAddr; 4],
-    indices: [usize; 4],
-    changed_nx: [[u64; 8]; 4],
-    writable: bool,
+    tables: [HostPhysAddr; 8],
+    table_count: usize,
+    changed_nx: [[u64; 8]; 8],
+    leaves: [(u8, u16, bool); 4],
+    leaf_count: usize,
 }
 
 impl NptExecutionGuard {
     pub fn restore<Frame, A: FrameAllocator>(self, ept: &mut EptPageTable<Frame>, allocator: &A) {
         assert_eq!(ept.format, PageTableFormat::AmdNpt);
-        for level in 0..4 {
+        for level in 0..self.table_count {
             let table = allocator
                 .phys_to_virt(self.tables[level])
                 .cast::<EptEntry>();
             for index in 0..512 {
                 if self.changed_nx[level][index / 64] & (1 << (index % 64)) != 0 {
-                    // SAFETY: the guard owns temporary permissions on these
-                    // four live table pages. Preserve hardware A/D updates.
+                    // SAFETY: these live tables are exclusively guarded.
+                    // Preserve hardware A/D updates when restoring NX.
                     unsafe { (*table.add(index)).set_npt_nx(false) };
                 }
             }
         }
-        let leaf = allocator.phys_to_virt(self.tables[3]).cast::<EptEntry>();
-        // SAFETY: mappings remain fixed until this guard is restored.
-        unsafe { (*leaf.add(self.indices[3])).set_npt_writable(self.writable) };
+        for &(table, index, writable) in &self.leaves[..self.leaf_count] {
+            let leaf = allocator
+                .phys_to_virt(self.tables[table as usize])
+                .cast::<EptEntry>();
+            // SAFETY: mappings remain fixed until this guard is restored.
+            unsafe { (*leaf.add(index as usize)).set_npt_writable(writable) };
+        }
     }
 }
 
@@ -168,59 +173,93 @@ impl<Frame> EptPageTable<Frame> {
         allocator: &A,
         page: GuestPhysAddr,
     ) -> Option<NptExecutionGuard> {
-        if self.format != PageTableFormat::AmdNpt {
+        self.restrict_execution_to_pages(allocator, &[page])
+    }
+
+    /// Permit up to four immutable code pages, blocking every other fetch.
+    /// The bounded table union avoids allocation while the VM holds IRQs off.
+    pub fn restrict_execution_to_pages<A: FrameAllocator>(
+        &mut self,
+        allocator: &A,
+        pages: &[GuestPhysAddr],
+    ) -> Option<NptExecutionGuard> {
+        if self.format != PageTableFormat::AmdNpt || pages.is_empty() || pages.len() > 4 {
             return None;
         }
-        let address = VirtAddr::new(page.as_u64());
-        let indices = [
-            address.pml4_index(),
-            address.pdpt_index(),
-            address.pd_index(),
-            address.pt_index(),
-        ];
-        let mut tables = [self.pml4_phys; 4];
-        // Validate the entire path before making any changes. Large leaves
-        // are unsupported by this 4KB page-table implementation.
-        let mut writable = false;
-        for level in 0..4 {
-            let table = allocator.phys_to_virt(tables[level]).cast::<EptEntry>();
-            // SAFETY: tables are owned by this EPT; every index is < 512.
-            let entry = unsafe { *table.add(indices[level]) };
-            if !entry.is_present()
-                || entry.raw() & (1 << 63) != 0
-                || (level < 3 && entry.raw() & (1 << 7) != 0)
-            {
-                return None;
-            }
-            if level < 3 {
-                tables[level + 1] = entry.addr();
-            } else {
-                writable = entry.raw() & 2 != 0;
-            }
-        }
         let mut guard = NptExecutionGuard {
-            tables,
-            indices,
-            changed_nx: [[0; 8]; 4],
-            writable,
+            tables: [self.pml4_phys; 8],
+            table_count: 0,
+            changed_nx: [[0; 8]; 8],
+            leaves: [(0, 0, false); 4],
+            leaf_count: pages.len(),
         };
-        for level in 0..4 {
-            let table = allocator.phys_to_virt(tables[level]).cast::<EptEntry>();
-            for index in 0..512 {
-                if index == indices[level] {
-                    continue;
+        // First validate every path without mutating permissions. The masks
+        // temporarily record selected edges, then become restoration masks.
+        for (page_index, page) in pages.iter().enumerate() {
+            let address = VirtAddr::new(page.as_u64());
+            let indices = [
+                address.pml4_index(),
+                address.pdpt_index(),
+                address.pd_index(),
+                address.pt_index(),
+            ];
+            let mut physical = self.pml4_phys;
+            for (level, index) in indices.into_iter().enumerate() {
+                let slot = match guard.tables[..guard.table_count]
+                    .iter()
+                    .position(|&p| p == physical)
+                {
+                    Some(slot) => slot,
+                    None => {
+                        if guard.table_count == guard.tables.len() {
+                            return None;
+                        }
+                        let slot = guard.table_count;
+                        guard.tables[slot] = physical;
+                        guard.table_count += 1;
+                        slot
+                    }
+                };
+                let table = allocator.phys_to_virt(physical).cast::<EptEntry>();
+                // SAFETY: validated tables are owned by this EPT, index <512.
+                let entry = unsafe { *table.add(index) };
+                if !entry.is_present()
+                    || entry.raw() & (1 << 63) != 0
+                    || (level < 3 && entry.raw() & (1 << 7) != 0)
+                {
+                    return None;
                 }
-                // SAFETY: table is exclusively borrowed through this EPT.
-                let entry = unsafe { &mut *table.add(index) };
-                if entry.is_present() && entry.raw() & (1 << 63) == 0 {
-                    entry.set_npt_nx(true);
-                    guard.changed_nx[level][index / 64] |= 1 << (index % 64);
+                guard.changed_nx[slot][index / 64] |= 1 << (index % 64);
+                if level == 3 {
+                    guard.leaves[page_index] = (slot as u8, index as u16, entry.raw() & 2 != 0);
+                } else {
+                    physical = entry.addr();
                 }
             }
         }
-        let table = allocator.phys_to_virt(tables[3]).cast::<EptEntry>();
-        // SAFETY: the selected leaf was checked before modification.
-        unsafe { (*table.add(indices[3])).set_npt_writable(false) };
+        for slot in 0..guard.table_count {
+            let table = allocator
+                .phys_to_virt(guard.tables[slot])
+                .cast::<EptEntry>();
+            for index in 0..512 {
+                let mask = 1 << (index % 64);
+                let selected = guard.changed_nx[slot][index / 64] & mask != 0;
+                guard.changed_nx[slot][index / 64] &= !mask;
+                // SAFETY: exclusive EPT access; every path was validated above.
+                let entry = unsafe { &mut *table.add(index) };
+                if !selected && entry.is_present() && entry.raw() & (1 << 63) == 0 {
+                    entry.set_npt_nx(true);
+                    guard.changed_nx[slot][index / 64] |= mask;
+                }
+            }
+        }
+        for &(slot, index, _) in &guard.leaves[..guard.leaf_count] {
+            let table = allocator
+                .phys_to_virt(guard.tables[slot as usize])
+                .cast::<EptEntry>();
+            // SAFETY: all selected leaves were validated before mutation.
+            unsafe { (*table.add(index as usize)).set_npt_writable(false) };
+        }
         Some(guard)
     }
 

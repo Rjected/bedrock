@@ -43,7 +43,11 @@ pub struct InstructionBatch {
     pub count: usize,
     pub repeat: Option<RepeatBatch>,
     pub counted_loop: Option<CountedLoopBatch>,
-    pub pages: [u64; 5],
+    pub pages: [u64; 20],
+    pub code_page_count: usize,
+    /// Execution traps for otherwise unsafe entry points in permitted pages.
+    pub page_breakpoints: [u64; 4],
+    pub page_breakpoint_count: usize,
     pub page_count: usize,
     pub accesses_memory: bool,
     pub writes_memory: bool,

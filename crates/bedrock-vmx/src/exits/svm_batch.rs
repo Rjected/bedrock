@@ -417,6 +417,67 @@ fn collect_code_tables<C: VmContext>(
     Some(())
 }
 
+fn collect_translation_tree<C: VmContext>(ctx: &C, batch: &mut InstructionBatch) -> Option<()> {
+    let root = ctx
+        .state()
+        .vmcs
+        .read_natural(VmcsFieldNatural::GuestCr3)
+        .ok()?
+        & 0x000f_ffff_ffff_f000;
+    if batch.pages[..batch.code_page_count].contains(&root) {
+        return None;
+    }
+    let mut levels = [0u8; 20];
+    let mut cursor = batch.page_count;
+    batch.pages[cursor] = root;
+    levels[cursor] = 4;
+    batch.page_count += 1;
+    let mut bytes = [0u8; 512];
+    while cursor < batch.page_count {
+        let level = levels[cursor];
+        let table = batch.pages[cursor];
+        if level > 1 {
+            for offset in (0..4096).step_by(512) {
+                ctx.read_guest_memory(GuestPhysAddr::new(table + offset), &mut bytes)
+                    .ok()?;
+                for entry in bytes.chunks_exact(8) {
+                    let entry = u64::from_le_bytes(entry.try_into().ok()?);
+                    if entry & 1 == 0 {
+                        continue;
+                    }
+                    if entry & (1 << 7) != 0 {
+                        if level == 4 {
+                            return None;
+                        }
+                        continue;
+                    }
+                    let child = entry & 0x000f_ffff_ffff_f000;
+                    if batch.pages[..batch.code_page_count].contains(&child) {
+                        return None;
+                    }
+                    if let Some(index) = batch.pages[..batch.page_count]
+                        .iter()
+                        .position(|&p| p == child)
+                    {
+                        if levels[index] != level - 1 {
+                            return None;
+                        }
+                        continue;
+                    }
+                    if batch.page_count == batch.pages.len() {
+                        return None;
+                    }
+                    batch.pages[batch.page_count] = child;
+                    levels[batch.page_count] = level - 1;
+                    batch.page_count += 1;
+                }
+            }
+        }
+        cursor += 1;
+    }
+    Some(())
+}
+
 #[derive(Default)]
 struct StorePlan {
     destinations: [u64; 8],
@@ -517,6 +578,7 @@ fn forbidden_page_bytes(bytes: &[u8]) -> bool {
     false
 }
 
+#[cfg(test)]
 fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
     // Stream the scan to avoid a 4KB buffer on the 8KB kernel stack. Carry
     // enough bytes to recognize any legal prefix chain between chunks.
@@ -536,6 +598,197 @@ fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
     bytes[16..32].copy_from_slice(&first);
     // A guest can map this same physical page at adjacent virtual addresses.
     (!forbidden_page_bytes(&bytes[..32])).then_some(())
+}
+
+#[derive(Clone, Copy)]
+struct PageHazards {
+    offsets: [u16; 4],
+    count: usize,
+}
+
+fn hazardous_entry(bytes: &[u8]) -> bool {
+    let mut repeat = false;
+    for index in 0..15 {
+        let Some(&byte) = bytes.get(index) else {
+            return false;
+        };
+        if matches!(
+            byte,
+            0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0x40..=0x4f | 0xf2 | 0xf3
+        ) {
+            repeat |= matches!(byte, 0xf2 | 0xf3);
+            continue;
+        }
+        return (repeat && matches!(byte, 0xa4..=0xa7 | 0xaa..=0xaf))
+            || bytes[index..].starts_with(&[0x0f, 0x07])
+            || (bytes[index..].starts_with(&[0x0f, 0xc7])
+                && bytes.get(index + 2).is_some_and(|&b| b >= 0xf0));
+    }
+    false
+}
+
+fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
+    let mut result = PageHazards {
+        offsets: [0; 4],
+        count: 0,
+    };
+    let mut bytes = [0u8; 272];
+    for offset in (0..4096).step_by(256) {
+        ctx.read_guest_memory(GuestPhysAddr::new(physical + offset), &mut bytes[16..])
+            .ok()?;
+        for index in 0..bytes.len() {
+            let position = offset as i64 + index as i64 - 16;
+            let byte = bytes[index];
+            let marker = (byte == 0x0f
+                && (bytes[index..].starts_with(&[0x0f, 0x07])
+                    || (bytes[index..].starts_with(&[0x0f, 0xc7])
+                        && bytes.get(index + 2).is_some_and(|&b| b >= 0xf0))))
+                || (matches!(byte, 0xf2 | 0xf3) && hazardous_entry(&bytes[index..]));
+            if position < 0 || position >= 4096 || !marker {
+                continue;
+            }
+            let mut first = index;
+            while first > 0
+                && index - first < 14
+                && matches!(
+                    bytes[first - 1],
+                    0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0x40
+                        ..=0x4f | 0xf2 | 0xf3
+                )
+            {
+                first -= 1;
+            }
+            for entry in first..=index {
+                let position = offset as i64 + entry as i64 - 16;
+                if position < 0 || !hazardous_entry(&bytes[entry..]) {
+                    continue;
+                }
+                let position = position as u16;
+                if result.offsets[..result.count].contains(&position) {
+                    continue;
+                }
+                if result.count == result.offsets.len() {
+                    return None;
+                }
+                result.offsets[result.count] = position;
+                result.count += 1;
+            }
+        }
+        bytes.copy_within(256..272, 0);
+    }
+    // Wrapping aliases and crossings to other permitted pages stay on the
+    // conservative path. Interior hazards are covered at every prefix entry.
+    page_boundary_safe(ctx, physical, physical)?;
+    Some(result)
+}
+
+fn collect_page_breakpoints<C: VmContext>(ctx: &C, batch: &mut InstructionBatch) -> Option<()> {
+    let mut hazards = [PageHazards {
+        offsets: [0; 4],
+        count: 0,
+    }; 4];
+    for (index, hazard) in hazards.iter_mut().enumerate().take(batch.code_page_count) {
+        *hazard = page_hazards(ctx, batch.pages[index])?;
+    }
+    batch.page_breakpoint_count = 0;
+    if hazards[..batch.code_page_count]
+        .iter()
+        .all(|h| h.count == 0)
+    {
+        return Some(());
+    }
+    // Enumerate executable virtual aliases. NPT alone protects physical pages;
+    // a hardware breakpoint must cover every virtual entry to hazardous bytes.
+    #[derive(Clone, Copy)]
+    struct Walk {
+        table: u64,
+        base: u64,
+        level: u8,
+    }
+    let mut walks = [Walk {
+        table: 0,
+        base: 0,
+        level: 0,
+    }; 64];
+    walks[0] = Walk {
+        table: ctx
+            .state()
+            .vmcs
+            .read_natural(VmcsFieldNatural::GuestCr3)
+            .ok()?
+            & 0x000f_ffff_ffff_f000,
+        base: 0,
+        level: 4,
+    };
+    let mut count = 1;
+    let mut cursor = 0;
+    let mut bytes = [0u8; 512];
+    batch.page_breakpoint_count = 0;
+    while cursor < count {
+        let walk = walks[cursor];
+        let shift = 12 + 9 * (walk.level - 1);
+        for offset in (0..4096).step_by(512) {
+            ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes)
+                .ok()?;
+            for (part, entry) in bytes.chunks_exact(8).enumerate() {
+                let entry = u64::from_le_bytes(entry.try_into().ok()?);
+                if entry & 1 == 0 || entry & (1 << 63) != 0 {
+                    continue;
+                }
+                let base = walk.base | ((offset / 8 + part as u64) << shift);
+                let physical = entry & 0x000f_ffff_ffff_f000;
+                if walk.level == 1 || entry & (1 << 7) != 0 {
+                    let physical = physical & !((1u64 << shift) - 1);
+                    for (index, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
+                        let page = batch.pages[index];
+                        if page < physical || page - physical >= 1 << shift {
+                            continue;
+                        }
+                        let virtual_page = base + (page - physical);
+                        let virtual_page = if virtual_page & (1 << 47) != 0 {
+                            virtual_page | (!0u64 << 48)
+                        } else {
+                            virtual_page
+                        };
+                        for &offset in &hazard.offsets[..hazard.count] {
+                            let address = virtual_page + u64::from(offset);
+                            if batch.page_breakpoints[..batch.page_breakpoint_count]
+                                .contains(&address)
+                            {
+                                continue;
+                            }
+                            if batch.page_breakpoint_count == 4 {
+                                return None;
+                            }
+                            batch.page_breakpoints[batch.page_breakpoint_count] = address;
+                            batch.page_breakpoint_count += 1;
+                        }
+                    }
+                } else {
+                    if count == walks.len() {
+                        return None;
+                    }
+                    walks[count] = Walk {
+                        table: physical,
+                        base,
+                        level: walk.level - 1,
+                    };
+                    count += 1;
+                }
+            }
+        }
+        cursor += 1;
+    }
+    Some(())
+}
+
+fn page_boundary_safe<C: VmContext>(ctx: &C, left: u64, right: u64) -> Option<()> {
+    let mut bytes = [0u8; 32];
+    ctx.read_guest_memory(GuestPhysAddr::new(left + 4080), &mut bytes[..16])
+        .ok()?;
+    ctx.read_guest_memory(GuestPhysAddr::new(right), &mut bytes[16..])
+        .ok()?;
+    (!forbidden_page_bytes(&bytes)).then_some(())
 }
 
 // A counted MOV-store loop can use entry-time range validation when RDI
@@ -719,14 +972,96 @@ pub(crate) fn prepare<C: VmContext>(
         && instruction_budget(ctx) > InstructionBatch::COUNTER_DEADLINE_MARGIN
         && !ctx.state().svm_rejected_pages.contains(&page)
     {
-        allow_page = page_safe(ctx, page).is_some();
+        allow_page = page_hazards(ctx, page).is_some();
         if !allow_page {
             let state = ctx.state_mut();
             state.svm_rejected_pages[state.svm_rejected_cursor] = page;
             state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
         }
     }
-    prepare_verified(ctx, can_loop, allow_page, window)
+    let prepared = prepare_verified(ctx, can_loop, allow_page, window);
+    if allow_page && !prepared.as_ref().is_some_and(|b| b.page_execution) {
+        let state = ctx.state_mut();
+        state.svm_rejected_pages[state.svm_rejected_cursor] = page;
+        state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
+    }
+    let mut batch = prepared?;
+    if batch.page_execution {
+        let current = window.linear & !4095;
+        let recent = ctx.state().svm_recent_pages;
+        let mut updated = [u64::MAX; 4];
+        updated[0] = current;
+        let mut next = 1;
+        for linear in recent {
+            if linear == u64::MAX || linear == current {
+                continue;
+            }
+            if next < updated.len() {
+                updated[next] = linear;
+                next += 1;
+            }
+            if batch.code_page_count == 4 || batch.page_count == batch.pages.len() {
+                continue;
+            }
+            let Some(physical) = super::svm::physical(ctx, linear)
+                .ok()
+                .map(|p| p.as_u64() & !4095)
+            else {
+                continue;
+            };
+            // Translation tables can never become executable code. Duplicated
+            // physical code aliases are already covered by the guarded tree.
+            if batch.pages[..batch.page_count].contains(&physical)
+                || ctx.state().svm_rejected_pages.contains(&physical)
+                || page_hazards(ctx, physical).is_none()
+            {
+                continue;
+            }
+            if batch.pages[..batch.code_page_count].iter().any(|&page| {
+                page_boundary_safe(ctx, page, physical).is_none()
+                    || page_boundary_safe(ctx, physical, page).is_none()
+            }) {
+                continue;
+            }
+            batch.pages.copy_within(
+                batch.code_page_count..batch.page_count,
+                batch.code_page_count + 1,
+            );
+            batch.pages[batch.code_page_count] = physical;
+            batch.code_page_count += 1;
+            batch.page_count += 1;
+        }
+        ctx.state_mut().svm_recent_pages = updated;
+        while collect_page_breakpoints(ctx, &mut batch).is_none() {
+            if batch.code_page_count == 1 {
+                let state = ctx.state_mut();
+                state.svm_rejected_pages[state.svm_rejected_cursor] = page;
+                state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
+                return prepare_verified(ctx, can_loop, false, window);
+            }
+            batch.pages.copy_within(
+                batch.code_page_count..batch.page_count,
+                batch.code_page_count - 1,
+            );
+            batch.code_page_count -= 1;
+            batch.page_count -= 1;
+        }
+    }
+    Some(batch)
+}
+
+pub(crate) fn remember_page<C: VmContext>(ctx: &mut C, linear: u64) {
+    let page = linear & !4095;
+    let recent = &mut ctx.state_mut().svm_recent_pages;
+    if recent[0] == page {
+        return;
+    }
+    let position = recent
+        .iter()
+        .position(|&p| p == page)
+        .unwrap_or(recent.len() - 1);
+    recent.copy_within(0..position, 1);
+    recent[0] = page;
 }
 
 fn instruction_budget<C: VmContext>(ctx: &C) -> u64 {
@@ -803,7 +1138,10 @@ fn prepare_verified<C: VmContext>(
         count: 0,
         repeat: None,
         counted_loop: None,
-        pages: [0; 5],
+        pages: [0; 20],
+        code_page_count: 1,
+        page_breakpoints: [0; 4],
+        page_breakpoint_count: 0,
         page_count: 1,
         accesses_memory: false,
         writes_memory: false,
@@ -822,7 +1160,9 @@ fn prepare_verified<C: VmContext>(
         batch.accesses_memory = true;
         batch.writes_memory = true;
         if paged {
-            collect_code_tables(ctx, &mut batch, linear)?;
+            if collect_translation_tree(ctx, &mut batch).is_none() {
+                return prepare_verified(ctx, can_loop, false, window);
+            }
         }
         return Some(batch);
     }
@@ -1027,7 +1367,7 @@ fn prepare_verified<C: VmContext>(
 }
 
 pub(crate) struct BatchGuard {
-    saved: [Option<(GuestPhysAddr, HostPhysAddr, EptPermissions)>; 5],
+    saved: [Option<(GuestPhysAddr, HostPhysAddr, EptPermissions)>; 20],
     execution: Option<NptExecutionGuard>,
 }
 
@@ -1037,7 +1377,7 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
     batch: &InstructionBatch,
 ) -> Option<BatchGuard> {
     let mut guard = BatchGuard {
-        saved: [None; 5],
+        saved: [None; 20],
         execution: None,
     };
     if !batch.accesses_memory {
@@ -1070,10 +1410,14 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
         guard.saved[index] = Some((gpa, host, permissions));
     }
     if batch.page_execution {
+        let mut pages = [GuestPhysAddr::new(0); 4];
+        for (target, &page) in pages.iter_mut().zip(&batch.pages[..batch.code_page_count]) {
+            *target = GuestPhysAddr::new(page);
+        }
         guard.execution = ctx
             .state_mut()
             .ept
-            .restrict_execution_to_page(allocator, GuestPhysAddr::new(batch.pages[0]));
+            .restrict_execution_to_pages(allocator, &pages[..batch.code_page_count]);
         if guard.execution.is_none() {
             guard.restore(ctx, allocator);
             return None;
@@ -1095,6 +1439,7 @@ impl BatchGuard {
             // once with stepping and unrestricted execute permissions.
         }
         let v = &ctx.state().vmcs;
+        let delivered_exception = matches!(v.read32(VmcsField32::VmExitReason).ok(), Some(0 | 514));
         let write_fault = v.read32(VmcsField32::VmExitReason).ok() == Some(48)
             && v.read_natural(VmcsFieldNatural::ExitQualification)
                 .unwrap_or(0)
@@ -1115,7 +1460,9 @@ impl BatchGuard {
                 .remap_4k(allocator, gpa, host, permissions, EptMemoryType::WriteBack)
                 .expect("SVM batch mapping disappeared");
         }
-        page_execution || retry_single
+        // Exceptions are delivered by the common handler after accounting.
+        // A trap may have advanced RIP, so stepping would lose the exception.
+        (page_execution && !delivered_exception) || retry_single
     }
 }
 
@@ -1378,6 +1725,103 @@ mod tests {
     }
 
     #[test]
+    fn page_sets_revalidate_contents_and_cross_page_prefixes() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        ctx.state_mut().svm_recent_pages[0] = 0x2000;
+        let b = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(b.code_page_count, 2);
+        assert_eq!(&b.pages[..2], &[0x1000, 0x2000]);
+        // Each page is safe alone, but either virtual adjacency could execute
+        // RDRAND across their physical boundary. Exclude the optional page.
+        ctx.memory[0x1ffe..0x2000].copy_from_slice(&[0x0f, 0xc7]);
+        ctx.memory[0x2000] = 0xf0;
+        assert!(page_safe(&ctx, 0x1000).is_some());
+        assert!(page_safe(&ctx, 0x2000).is_some());
+        assert_eq!(
+            prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .code_page_count,
+            1
+        );
+        ctx.memory[0x1ffe..0x2003].fill(0x90);
+        ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        let b = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(b.code_page_count, 2);
+        assert_eq!(&b.page_breakpoints[..b.page_breakpoint_count], &[0x2100]);
+    }
+
+    #[test]
+    fn page_execution_guards_tables_outside_the_code_translation_path() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        // A second PML4 branch and a separate data-translation hierarchy.
+        for (address, entry) in [(0x3008, 0x8007u64), (0x8000, 0x9007), (0x9000, 0xa007)] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let b = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(b.page_execution);
+        for table in [0x3000, 0x4000, 0x5000, 0x6000, 0x8000, 0x9000, 0xa000] {
+            assert!(b.pages[..b.page_count].contains(&table));
+        }
+        // A code page reused as an unrelated page table cannot run freely.
+        ctx.memory[0x9000..0x9008].copy_from_slice(&0x1007u64.to_le_bytes());
+        assert!(!prepare(&mut ctx, true, true, &window).is_some_and(|b| b.page_execution));
+    }
+
+    #[test]
+    fn unsafe_entries_cover_prefixes_and_every_executable_alias() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1100..0x1105].copy_from_slice(&[0x66, 0x48, 0x0f, 0xc7, 0xf0]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let b = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(b.page_execution);
+        for address in [0x1100, 0x1101, 0x1102] {
+            assert!(b.page_breakpoints[..b.page_breakpoint_count].contains(&address));
+        }
+        ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
+        // Three hazards, two executable aliases exceed four debug registers.
+        assert!(
+            !prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
+        ctx.memory[0x6048..0x6050].copy_from_slice(&(0x1007u64 | (1 << 63)).to_le_bytes());
+        ctx.state_mut().svm_rejected_pages.fill(u64::MAX);
+        assert!(
+            prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
+        ctx.memory[0x1100..0x1105].copy_from_slice(&[0xf3, 0x66, 0x48, 0xa4, 0x90]);
+        let b = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(&b.page_breakpoints[..b.page_breakpoint_count], &[0x1100]);
+    }
+
+    #[test]
+    fn hazard_prefixes_are_found_across_scan_chunks() {
+        let mut ctx = paged_context(&[0x90]);
+        for offset in [128, 254, 255, 256, 510, 511, 768, 4000] {
+            for (bytes, expected) in [
+                (&[0x66, 0x48, 0x0f, 0xc7, 0xf0][..], &[0, 1, 2][..]),
+                (&[0xf3, 0x66, 0x48, 0xa4], &[0]),
+                (&[0x48, 0x0f, 0x07], &[0, 1]),
+            ] {
+                ctx.memory[0x1000..0x2000].fill(0x90);
+                ctx.memory[0x1000 + offset..0x1000 + offset + bytes.len()].copy_from_slice(bytes);
+                let hazards = page_hazards(&ctx, 0x1000).unwrap();
+                assert_eq!(hazards.count, expected.len());
+                for &prefix in expected {
+                    assert!(hazards.offsets[..hazards.count].contains(&((offset + prefix) as u16)));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn forward_store_paths_require_addresses_stable_on_every_path() {
         // A store preceding a branch and another optional store are safe.
         let mut ctx = paged_context(&[
@@ -1632,7 +2076,10 @@ mod tests {
             count: 4,
             repeat: None,
             counted_loop: None,
-            pages: [0; 5],
+            pages: [0; 20],
+            code_page_count: 1,
+            page_breakpoints: [0; 4],
+            page_breakpoint_count: 0,
             page_count: 0,
             accesses_memory: false,
             writes_memory: false,
@@ -1694,7 +2141,10 @@ mod tests {
             count: 2,
             repeat: None,
             counted_loop: None,
-            pages: [0; 5],
+            pages: [0; 20],
+            code_page_count: 1,
+            page_breakpoints: [0; 4],
+            page_breakpoint_count: 0,
             page_count: 0,
             accesses_memory: false,
             writes_memory: false,

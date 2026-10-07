@@ -45,6 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_paged_stores()?;
     test_self_modifying()?;
     test_guarded_code_and_translation_writes()?;
+    test_page_rng_breakpoints()?;
+    test_data_translation_write()?;
     test_debug_registers()?;
     test_hardware_loop()?;
     test_hardware_control_flow()?;
@@ -465,7 +467,9 @@ fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
         code.extend([0x4c, 0x8b, 0x4f, 0xf8, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
         // Unreachable RNG bytes reject whole-page execution. The decoded
         // loop must accelerate independently of unrelated page contents.
-        vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        for offset in [0x1800, 0x1820, 0x1840, 0x1860, 0x1880] {
+            vm.memory_mut()?[offset..offset + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
     }
     vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
     let mut regs = Regs::long_mode();
@@ -947,6 +951,104 @@ fn test_debug_registers() -> Result<(), Box<dyn std::error::Error>> {
         break;
     }
     println!("SVM_DEBUG_REGISTER_ISOLATION_PASS");
+    Ok(())
+}
+
+fn test_page_rng_breakpoints() -> Result<(), Box<dyn std::error::Error>> {
+    for target in [0x1100u64, 0x1120, 0x1140, 0x1160, 0x201100] {
+        let alias = target >= 0x200000;
+        let mut vm = Vm::create(4 * 1024 * 1024)?;
+        vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+        // A/D bits are already set, so the hardware walk does not stop the
+        // run before its debug-register trap reaches the real RNG instruction.
+        for (address, entry) in [(0x3000, 0x4027u64), (0x4000, 0x5027), (0x5000, 0xe7)] {
+            vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        vm.memory_mut()?[0x1000..0x2000].fill(0x90);
+        vm.memory_mut()?[0x1000] = 0xe9;
+        vm.memory_mut()?[0x1001..0x1005]
+            .copy_from_slice(&((target as i64 - 0x1005) as i32).to_le_bytes());
+        if alias {
+            vm.memory_mut()?[0x5008..0x5010].copy_from_slice(&0xe7u64.to_le_bytes());
+            vm.memory_mut()?[0x1100..0x110c].copy_from_slice(&[
+                0x48, 0x0f, 0xc7, 0xf0, 0x48, 0x89, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9,
+            ]);
+        } else {
+            for offset in [0x1100, 0x1120, 0x1140, 0x1160] {
+                vm.memory_mut()?[offset..offset + 10]
+                    .copy_from_slice(&[0x0f, 0xc7, 0xf0, 0x89, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+            }
+        }
+        let mut regs = Regs::long_mode();
+        regs.control_regs.cr3 = Cr3::new(0x3000);
+        regs.rip = 0x1000;
+        regs.gprs.rsp = 0x8000;
+        vm.set_regs(&regs)?;
+        let mut random_exits = 0;
+        loop {
+            let exit = vm.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            if exit.exit_reason == 57 {
+                random_exits += 1;
+                assert_eq!(exit.emulated_tsc, 1);
+                vm.set_rdrand_value(0x1234)?;
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, 3);
+            assert_eq!(vm.get_regs()?.gprs.rbx, 0x1234);
+            assert_eq!(random_exits, 1);
+            break;
+        }
+    }
+    println!("SVM_PAGE_RNG_BREAKPOINTS_PASS");
+    Ok(())
+}
+
+fn test_data_translation_write() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [
+        (0x3000, 0x4027u64),
+        (0x3008, 0x8027),
+        (0x4000, 0x5027),
+        (0x5000, 0xe7),
+        (0x8000, 0x9027),
+        (0x9000, 0xa027),
+        (0xa000, 0xc027),
+        (0xc000, 0x11111111),
+        (0xd000, 0x22222222),
+    ] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    vm.memory_mut()?[0x1000..0x100e].copy_from_slice(&[
+        0x48, 0x8b, 0x1e, // mov rbx,[rsi]: prime the unrelated data translation
+        0x48, 0x89, 0x07, // mov [rdi],rax: replace its PTE
+        0x48, 0x8b, 0x16, // mov rdx,[rsi]: must use the replacement mapping
+        0x31, 0xc0, 0x0f, 0x01, 0xd9,
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x10000;
+    regs.gprs.rsi = 1 << 39;
+    regs.gprs.rdi = 0xa000;
+    regs.gprs.rax = 0xd067;
+    vm.set_regs(&regs)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 258);
+        assert_eq!(exit.emulated_tsc, 4);
+        let r = vm.get_regs()?;
+        assert_eq!(r.gprs.rbx, 0x11111111);
+        assert_eq!(r.gprs.rdx, 0x22222222);
+        break;
+    }
+    println!("SVM_DATA_TRANSLATION_WRITE_PASS");
     Ok(())
 }
 

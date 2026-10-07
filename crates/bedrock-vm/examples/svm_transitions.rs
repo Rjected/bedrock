@@ -12,6 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_iret()?;
     test_page_fault()?;
     test_guest_debug_trap()?;
+    test_guest_breakpoint_trap()?;
     Ok(())
 }
 
@@ -281,5 +282,59 @@ fn test_guest_debug_trap() -> Result<(), Box<dyn std::error::Error>> {
         break;
     }
     println!("SVM_GUEST_DEBUG_TRAP_PASS");
+    Ok(())
+}
+
+fn test_guest_breakpoint_trap() -> Result<(), Box<dyn std::error::Error>> {
+    for guarded in [false, true] {
+        let mut vm = Vm::create(2 * 1024 * 1024)?;
+        for (address, entry) in [
+            (0x3000, 0x4027u64),
+            (0x4000, 0x5027),
+            (0x5000, 0xe7),
+            (0x6008, 0x00af9b000000ffff),
+            (0x6010, 0x00cf93000000ffff),
+        ] {
+            vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        vm.memory_mut()?[0x1000..0x1009]
+            .copy_from_slice(&[0xcc, 0x48, 0xff, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+        vm.memory_mut()?[0x2000..0x2009].copy_from_slice(&[
+            0x48, 0x8b, 0x34, 0x24, // mov rsi,[rsp]: saved return RIP
+            0x49, 0xff, 0xc0, // inc r8
+            0x48, 0xcf, // iretq
+        ]);
+        vm.memory_mut()?[0x7030..0x7040]
+            .copy_from_slice(&[0, 0x20, 8, 0, 0, 0x8e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        if guarded {
+            for offset in [0x1800, 0x1820, 0x1840, 0x1860, 0x1880] {
+                vm.memory_mut()?[offset..offset + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+            }
+        }
+        let mut regs = Regs::long_mode();
+        regs.control_regs.cr3 = Cr3::new(0x3000);
+        regs.segment_regs.cs = SegmentRegister::new(8, 0xa09b, u32::MAX, 0);
+        regs.segment_regs.ss = SegmentRegister::new(0x10, 0xc093, u32::MAX, 0);
+        regs.descriptor_tables.gdtr = Gdtr::new(0x6000, 0x17);
+        regs.descriptor_tables.idtr = Idtr::new(0x7000, 0xfff);
+        regs.rip = 0x1000;
+        regs.gprs.rsp = 0x8000;
+        vm.set_regs(&regs)?;
+        loop {
+            let exit = vm.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, 6);
+            let r = vm.get_regs()?;
+            assert_eq!(r.gprs.rbx, 1);
+            assert_eq!(r.gprs.r8, 1);
+            assert_eq!(r.gprs.rsi, 0x1001);
+            assert_eq!(r.gprs.rsp, 0x8000);
+            break;
+        }
+    }
+    println!("SVM_GUEST_BREAKPOINT_TRAP_PASS");
     Ok(())
 }

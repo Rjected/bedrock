@@ -131,7 +131,7 @@ extern "C" {
         ctx: *mut VmxContext,
         guest_pa: u64,
         host_pa: u64,
-        breakpoint: u64,
+        breakpoints: *const u64,
         pmu_mask: u64,
     ) -> i32;
 }
@@ -154,18 +154,21 @@ pub(crate) unsafe fn run(
     if let Some(counted) = batch.and_then(|b| b.counted_loop) {
         ctx.guest_rcx = counted.iterations;
     }
-    let breakpoint = if let Some(batch) = batch {
-        if batch.page_execution || batch.endpoint_intercepted {
-            0 // The endpoint itself exits through an unconditional SVM intercept.
-        } else {
-            v.write(o::DR7, 8, 0x401); // DR0 local execution breakpoint.
-            v.write(o::DR6, 8, original_dr6 & !0x400f);
-            batch.endpoint() + v.read(o::CS + 8, 8)
-        }
+    let mut breakpoints = [0u64; 4];
+    if let Some(batch) = batch {
+        let count = if batch.page_execution {
+            breakpoints = batch.page_breakpoints;
+            batch.page_breakpoint_count
+        } else if batch.endpoint_intercepted { 0 }
+        else {
+            breakpoints[0] = batch.endpoint() + v.read(o::CS + 8, 8);
+            1
+        };
+        v.write(o::DR7, 8, 0x400 | (0..count).fold(0u64, |mask, i| mask | (1 << (i * 2))));
+        v.write(o::DR6, 8, original_dr6 & !0x400f);
     } else {
         v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) | (1 << 8));
-        0
-    };
+    }
     let host_pa = unsafe { c_helpers::bedrock_svm_host_vmcb() };
     let mut before = 0;
     let counting = batch.is_some_and(|b| b.uses_counter);
@@ -181,7 +184,7 @@ pub(crate) unsafe fn run(
         0
     };
     unsafe {
-        svm_run_guest(ctx, pa, host_pa, breakpoint, guest_mask);
+        svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), guest_mask);
     }
     let mut after = 0;
     let pmu_ready = pmu_ready && unsafe { c_helpers::bedrock_svm_pmu_read(&mut after) } == 0;
@@ -216,12 +219,17 @@ pub(crate) unsafe fn run(
     }
     if let Some(batch) = batch.filter(|b| b.page_execution) {
         // Free execution starts with TF and guest breakpoints disabled.
-        // SYSRET pages are excluded because it can restore guest TF mid-run.
-        if code == 0x41 {
+        // Guarded unsafe entries stop before they can restore guest TF mid-run.
+        let trapped = code == 0x41 && v.read(o::DR6, 8) & 15 != 0
+            && batch.page_breakpoints[..batch.page_breakpoint_count].contains(&v.read(o::RIP, 8));
+        if code == 0x41 && !trapped {
             kernel::pr_err!("SVM page execution unexpected debug trap: rip={:#x} dr6={:#x}\n",
                 v.read(o::RIP, 8), v.read(o::DR6, 8));
             return Err(VmEntryError::VmEntryFailed);
         }
+        v.write(o::DR7, 8, original_dr7);
+        v.write(o::DR6, 8, original_dr6);
+        if trapped { v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) & !(1 << 16)); }
         let count = if pmu_ready { exits::retired_instructions(before, after, code) }
             else { None }.ok_or_else(|| {
                 kernel::pr_err!("SVM page execution invalid count: ready={} before={} after={} code={:#x} rip={:#x}\n",
@@ -238,9 +246,17 @@ pub(crate) unsafe fn run(
             // boundary must still acknowledge it through the host handler.
             unsafe { core::arch::asm!("int $2", options(nomem, nostack)); }
         }
-        // Preserve architectural TF/RF/DR6: this path never installed a
-        // breakpoint or hypervisor TF. Restore NPT permissions and replay the
-        // intercepted instruction after accounting/timers, using scalar mode.
+        // Guest exceptions retain their exit information: trap-style exits
+        // can already have advanced RIP and must not be replaced by stepping.
+        if (0x40..=0x5f).contains(&code) && !trapped {
+            let e = exits::decode(code, v.read(o::EXIT_INFO1, 8), v.read(o::EXIT_INFO2, 8),
+                v.read(o::RIP, 8), v.read(o::NEXT_RIP, 8), false)
+                .map_err(|_| VmEntryError::VmEntryFailed)?;
+            fields::record_exit(v, &e);
+            return Ok(count);
+        }
+        // Replay an intercept or a guarded unsafe entry after accounting and
+        // timers. Guest debug state was restored above before exposing it.
         let e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
             .map_err(|_| VmEntryError::VmEntryFailed)?;
         fields::record_exit(v, &e);
