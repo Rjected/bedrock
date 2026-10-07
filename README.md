@@ -256,6 +256,17 @@ had V_NMI_PENDING set, and most were nested-page faults. The guest IRPERF and
 programmable counters agreed at those exits. Adding one instruction to their
 count failed on the first replay, so the overflow race needs a more precise
 accounting fix.
+The forked 8.0–8.1-million replay also exposes a native REP interaction:
+the published backend diverged in a 10,000-instruction checkpoint test,
+whereas disabling native REP batches matched 1,024 replays. Rejecting only
+REP batches shorter than 16 iterations or only deadline-truncated batches
+still diverged. A copy-on-write nested-page fault precedes one `REP MOVSL`
+in each child, but pre-copying its destination pages before native execution
+also diverged. Guest IRPERF reports one retirement for a native three-iteration
+REP batch, so it cannot replace RCX-delta accounting. A direct REP completion
+test now compares a stepped child against a native child, including final
+clocks and registers, and checks parent-memory isolation; it passes. The intermittent Linux mismatch
+remains unresolved, and native REP stays enabled pending a precise fix.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.

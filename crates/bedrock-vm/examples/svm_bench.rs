@@ -943,8 +943,11 @@ fn test_repeat() -> Result<(), Box<dyn std::error::Error>> {
     hash.write(vm.memory()?);
     let parent_hash = hash.finish();
     let mut results = Vec::new();
-    for _ in 0..2 {
+    for replay in 0..2 {
         let child = vm.fork()?;
+        if replay == 0 {
+            child.set_single_step_range(17, 10_005)?;
+        }
         loop {
             let exit = child.run()?;
             if exit.exit_reason == 256 || exit.exit_reason == 262 {
@@ -959,11 +962,17 @@ fn test_repeat() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         let exits = child.get_exit_stats()?.total_exit_count();
-        assert!(
-            exits < 100,
-            "REP copy should use bounded native chunks: {exits} exits"
-        );
-        println!("SVM_REP_NATIVE_EXITS count={exits}");
+        if replay != 0 {
+            assert!(
+                exits < 100,
+                "REP copy should use bounded native chunks: {exits} exits"
+            );
+        }
+        if replay == 0 {
+            println!("SVM_REP_REFERENCE_EXITS count={exits}");
+        } else {
+            println!("SVM_REP_NATIVE_EXITS count={exits}");
+        }
     }
     assert_eq!(results[0], results[1]);
     let mut hash = DefaultHasher::new();
