@@ -294,14 +294,12 @@ pub(crate) unsafe fn run(
             .map_err(|_| VmEntryError::VmEntryFailed)?;
         e.qualification = InstructionBatch::PAGE_EXECUTION_BOUNDARY;
         if code == 0x400 && v.read(o::EXIT_INFO1, 8) & 0x13 == 0x11
-            && v.read(o::EXIT_INFO2, 8) & 4095 == v.read(o::RIP, 8) & 4095
             && !batch.pages[..batch.code_page_count].contains(&(v.read(o::EXIT_INFO2, 8) & !4095)) {
-            // A present, non-writing fetch hit the temporary NX guard. No
-            // Only a fetch at the instruction start can replan directly: a
-            // split instruction still needs unrestricted scalar execution.
-            // No instruction retired on the new page; fresh planning validates
-            // its contents and translations before the next hardware entry.
+            // A present, non-writing fetch hit the temporary NX guard. Save
+            // its physical page so restore can distinguish a new instruction
+            // from a split fetch, which still needs scalar replay.
             e.qualification |= InstructionBatch::PAGE_FETCH_BOUNDARY;
+            e.guest_physical_address = v.read(o::EXIT_INFO2, 8);
         }
         fields::record_exit(v, &e);
         return Ok(count);

@@ -262,6 +262,11 @@ These runs cover the reproduced discrepancy, not every possible PMU exit.
 Native REP continues to use RCX-delta accounting: guest IRPERF reports one
 retirement for a native three-iteration REP batch. A direct REP completion
 test compares a stepped child against a native child and passes.
+Checking the physical page of RIP when an NPT fetch guard fires lets a new
+code page replan without a scalar replay, while a split instruction still
+steps. The full Linux integration run passes at 20.71 seconds and 1.83 million
+exits; 1,024 sensitive fork replays from 8 to 8.1 million instructions also
+match the stepped reference with this change.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.

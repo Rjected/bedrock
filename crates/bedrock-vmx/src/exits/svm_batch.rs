@@ -2095,6 +2095,7 @@ impl BatchGuard {
         }
         let v = &ctx.state().vmcs;
         let delivered_exception = matches!(v.read32(VmcsField32::VmExitReason).ok(), Some(0 | 514));
+        let fault_page = v.read64(VmcsField64::GuestPhysicalAddr).unwrap_or(0) & !4095;
         let fetch_boundary = v.read32(VmcsField32::VmExitReason).ok() == Some(37)
             && v.read_natural(VmcsFieldNatural::ExitQualification)
                 .ok()
@@ -2102,19 +2103,23 @@ impl BatchGuard {
             && super::svm::InstructionWindow::read(ctx)
                 .ok()
                 .is_some_and(|window| {
+                    // The GPA must name the page containing RIP. If the fault
+                    // is for the next page of a split instruction, replay it
+                    // with unrestricted scalar execution instead.
+                    let starts_on_fault_page = window.physical.as_u64() & !4095 == fault_page;
                     // Entry stores often need scalar replay for A/D or table
                     // writes anyway. Replanning first only adds another guard.
-                    window.bytes[0] == 0xc3
-                        || relative_branch(&window.bytes, true, false).is_some()
-                        || safe_len(&window.bytes, true, false)
-                            .is_some_and(|(_, _, writes)| !writes)
+                    starts_on_fault_page
+                        && (window.bytes[0] == 0xc3
+                            || relative_branch(&window.bytes, true, false).is_some()
+                            || safe_len(&window.bytes, true, false)
+                                .is_some_and(|(_, _, writes)| !writes))
                 });
         let write_fault = v.read32(VmcsField32::VmExitReason).ok() == Some(48)
             && v.read_natural(VmcsFieldNatural::ExitQualification)
                 .unwrap_or(0)
                 & 2
                 != 0;
-        let fault_page = v.read64(VmcsField64::GuestPhysicalAddr).unwrap_or(0) & !4095;
         let retry_single = write_fault
             && ctx.state().svm_guard.saved[..self.saved_count]
                 .iter()
