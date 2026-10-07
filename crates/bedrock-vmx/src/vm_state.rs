@@ -45,6 +45,42 @@ pub(crate) struct SvmGuardScratch {
     pub page_plans: [SvmPagePlan; 128],
     pub code_epoch: u64,
     pub tree_generation: u64,
+    pub gate_host_writes: [u64; 32],
+    pub gate_host_write_count: usize,
+    pub gate_host_write_all: bool,
+    pub gate_tables: [u64; 128],
+    pub gate_guards: [SvmGuardSaved; 128],
+    pub gate_count: usize,
+    pub gate_root: u64,
+    pub gate_ready: bool,
+    pub gate_dirty: bool,
+}
+
+impl SvmGuardScratch {
+    pub fn note_gate_host_write(&mut self, guest: u64, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let Some(last) = guest.checked_add(len as u64 - 1) else {
+            self.gate_host_write_all = true;
+            return;
+        };
+        let mut page = guest & !4095;
+        while page <= last {
+            if !self.gate_host_writes[..self.gate_host_write_count].contains(&page) {
+                if self.gate_host_write_count == self.gate_host_writes.len() {
+                    self.gate_host_write_all = true;
+                    return;
+                }
+                self.gate_host_writes[self.gate_host_write_count] = page;
+                self.gate_host_write_count += 1;
+            }
+            let Some(next) = page.checked_add(4096) else {
+                break;
+            };
+            page = next;
+        }
+    }
 }
 
 pub(crate) struct SvmPagePlan {
@@ -880,6 +916,7 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     pub svm_rejected_cursor: usize,
     /// Recent virtual code pages; immutable hazard scans live in `svm_guard`.
     pub svm_recent_pages: [u64; SVM_CODE_PAGE_CAPACITY],
+    pub svm_gate_scalar_page: Option<u64>,
     pub(crate) svm_guard: VmallocBox<SvmGuardScratch>,
     /// Emulated TSC: `last_instruction_count + tsc_offset`.
     pub emulated_tsc: u64,
@@ -1133,6 +1170,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
+            svm_gate_scalar_page: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
@@ -1910,6 +1948,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
+            svm_gate_scalar_page: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
@@ -2127,6 +2166,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
+            svm_gate_scalar_page: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0, // Child's counter starts from 0
             emulated_tsc: parent_state.emulated_tsc,

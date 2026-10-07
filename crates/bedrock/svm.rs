@@ -102,6 +102,8 @@ impl Bitmaps {
     }
     pub(crate) fn bind(&self, v: &mut Vmcb) {
         let features = features();
+        // The global gate excludes every active translation-table page from
+        // trusted code, so ROGPT can update table A/D bits under write guards.
         v.configure_nested_features(features);
         // Flush this guest's ASID rather than every host/guest translation.
         v.write(
@@ -190,9 +192,13 @@ pub(crate) unsafe fn run(
         if pmu_mask == 0
             || unsafe { c_helpers::bedrock_svm_pmu_arm(batch.counter_period(), &mut host_count) } != 0
         {
+            kernel::pr_err!("SVM PMU arm failed: mask={:#x} period={} rip={:#x}\n", pmu_mask, batch.counter_period(), entry_rip);
             return Err(VmEntryError::VmEntryFailed);
         }
-        Some(PmcEntry::prepare(v, batch.counter_period()).ok_or(VmEntryError::VmEntryFailed)?)
+        Some(PmcEntry::prepare(v, batch.counter_period()).ok_or_else(|| {
+            kernel::pr_err!("SVM PMC prepare failed: rip={:#x} period={} event={:#x} int={:#x} misc={:#x}\n", entry_rip, batch.counter_period(), v.read(o::EVENT_INJECTION, 4), v.read(o::INT_CONTROL, 4), v.read(o::INTERCEPT_MISC1, 4));
+            VmEntryError::VmEntryFailed
+        })?)
     } else {
         None
     };
@@ -218,8 +224,10 @@ pub(crate) unsafe fn run(
     }
     let mut host_count = 0;
     let pmu_ready = !counting || unsafe { c_helpers::bedrock_svm_pmu_read(&mut host_count) } == 0;
+    let overflow_nmi = counter.as_ref().is_some_and(|_| PmcEntry::overflow_nmi(v));
     let retired = counter.and_then(|counter| counter.finish(v));
     if !pmu_ready {
+        kernel::pr_err!("SVM PMU read failed: rip={:#x} code={:#x}\n", entry_rip, v.read(o::EXIT_CODE, 8));
         return Err(VmEntryError::VmEntryFailed);
     }
     #[cfg(kernel_log)]
@@ -238,6 +246,44 @@ pub(crate) unsafe fn run(
     ctx.guest_rax = v.read(o::RAX, 8);
     ctx.guest_cr2 = v.read(o::CR2, 8);
     let code = v.read(o::EXIT_CODE, 8);
+    if let Some(batch) = batch.filter(|b| b.global_execution) {
+        v.write(o::DR7, 8, original_dr7);
+        v.write(o::DR6, 8, original_dr6);
+        v.write(o::RFLAGS, 8, (v.read(o::RFLAGS, 8) & !(1 << 8)) | original_tf);
+        let count = retired.ok_or_else(|| {
+            kernel::pr_err!("SVM global retired unavailable: entry={:#x} rip={:#x} code={:#x} raw={:#x} pmc={:#x} status={:#x}\n", entry_rip, v.read(o::RIP, 8), code, v.read(o::INSTR_RETIRED_CTR, 8), v.read(o::PERF_CTR0, 8), v.read(o::PERF_GLOBAL_STATUS, 8));
+            VmEntryError::VmEntryFailed
+        })?;
+        if count > batch.instruction_budget {
+            kernel::pr_err!("SVM global gate exceeded deadline: count={} budget={} code={:#x}\n",
+                count, batch.instruction_budget, code);
+            return Err(VmEntryError::VmEntryFailed);
+        }
+        if code == 0x61 {
+            unsafe { core::arch::asm!("int $2", options(nomem, nostack)); }
+        }
+        let replay = (0x20..=0x3f).contains(&code) || matches!(code, 0x66 | 0x6a | 0x74);
+        let mut e = if overflow_nmi || code == 0x61 || replay {
+            let mut e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
+                .map_err(|_| VmEntryError::VmEntryFailed)?;
+            e.qualification = InstructionBatch::PAGE_EXECUTION_BOUNDARY
+                | if replay { InstructionBatch::PAGE_SCALAR_REPLAY } else { 0 };
+            e
+        } else {
+            exits::decode(code, v.read(o::EXIT_INFO1, 8), v.read(o::EXIT_INFO2, 8),
+                v.read(o::RIP, 8), v.read(o::NEXT_RIP, 8), false)
+                .map_err(|error| {
+                    kernel::pr_err!("SVM global decode failed: error={:?} code={:#x} entry={:#x} rip={:#x}\n", error, code, entry_rip, v.read(o::RIP, 8));
+                    VmEntryError::VmEntryFailed
+                })?
+        };
+        if code == 0x400 {
+            e.guest_physical_address = v.read(o::EXIT_INFO2, 8);
+        }
+        fields::record_exit(v, &e);
+        let _ = fields::write(v, 0x4016, 0);
+        return Ok(count);
+    }
     #[cfg(kernel_log)]
     {
         static STEPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

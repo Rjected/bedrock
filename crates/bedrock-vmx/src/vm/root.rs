@@ -84,7 +84,11 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> R
                 allocator,
                 guest_phys,
                 host_phys,
-                EptPermissions::READ_WRITE_EXECUTE,
+                if format == PageTableFormat::AmdNpt {
+                    EptPermissions::READ_WRITE
+                } else {
+                    EptPermissions::READ_WRITE_EXECUTE
+                },
                 EptMemoryType::WriteBack,
             )
             .map_err(RootVmError::EptMapping)?;
@@ -175,6 +179,7 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> V
 
         // SAFETY: We've verified the offset and length are within bounds above.
         let dst = unsafe { self.memory.as_mut_ptr().add(offset) };
+        self.state.svm_guard.note_gate_host_write(gpa.as_u64(), buf.len());
         // SAFETY: dst points within guest memory, buf is a valid slice,
         // and we verified offset + buf.len() <= memory.size() above.
         unsafe {

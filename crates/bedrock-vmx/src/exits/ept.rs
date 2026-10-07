@@ -41,6 +41,57 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
         return handle_ioapic_access(ctx, guest_phys, qual);
     }
 
+    if C::V::uses_nested_paging() {
+        let page = guest_phys & !4095;
+        if qual.execute {
+            let gate = &ctx.state().svm_guard;
+            let may_trust = gate.gate_ready
+                && !gate.gate_dirty
+                && !gate.gate_tables[..gate.gate_count].contains(&page);
+            let safe = may_trust && super::svm_batch::globally_safe_code(ctx, page);
+            if safe {
+                if ctx
+                    .state_mut()
+                    .ept
+                    .trust_npt_code_4k(allocator, GuestPhysAddr::new(page))
+                    .is_some()
+                {
+                    ctx.state_mut().svm_gate_scalar_page = None;
+                    return ExitHandlerResult::Continue;
+                }
+            } else {
+                ctx.state_mut().svm_gate_scalar_page = Some(page);
+                return ExitHandlerResult::Continue;
+            }
+        }
+        if qual.write && super::svm_batch::release_global_table_write(ctx, allocator, page) {
+            let scalar_page = super::svm::InstructionWindow::read(ctx)
+                .ok()
+                .map(|window| window.physical.as_u64() & !4095);
+            ctx.state_mut().svm_gate_scalar_page = scalar_page;
+            return ExitHandlerResult::Continue;
+        }
+        if qual.write
+            && ctx
+                .state()
+                .ept
+                .npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
+        {
+            if ctx
+                .state_mut()
+                .ept
+                .invalidate_npt_code_4k(allocator, GuestPhysAddr::new(page))
+                .is_some()
+            {
+                let scalar_page = super::svm::InstructionWindow::read(ctx)
+                    .ok()
+                    .map(|window| window.physical.as_u64() & !4095);
+                ctx.state_mut().svm_gate_scalar_page = scalar_page;
+                return ExitHandlerResult::Continue;
+            }
+        }
+    }
+
     // CoW fault: write to a non-writable page (forked VMs start pages R+X).
     if qual.write && !qual.writable {
         if let Some(result) = ctx.handle_cow_fault(GuestPhysAddr::new(guest_phys), allocator) {

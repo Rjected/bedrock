@@ -432,18 +432,22 @@ fn collect_code_tables<C: VmContext>(
 }
 
 fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch) -> Option<()> {
+    collect_translation_tree_pages(ctx, &batch.pages[..batch.code_page_count])
+}
+
+fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64]) -> Option<()> {
     let root = ctx
         .state()
         .vmcs
         .read_natural(VmcsFieldNatural::GuestCr3)
         .ok()?
         & 0x000f_ffff_ffff_f000;
-    if batch.pages[..batch.code_page_count].contains(&root) {
+    if code_pages.contains(&root) {
         return None;
     }
     let scratch = &ctx.state().svm_guard;
     if scratch.valid && scratch.root == root {
-        return (!batch.pages[..batch.code_page_count]
+        return (!code_pages
             .iter()
             .any(|page| scratch.tables[..scratch.count].contains(page)))
         .then_some(());
@@ -482,7 +486,7 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
                         continue;
                     }
                     let child = entry & 0x000f_ffff_ffff_f000;
-                    if batch.pages[..batch.code_page_count].contains(&child) {
+                    if code_pages.contains(&child) {
                         return None;
                     }
                     let scratch = &mut ctx.state_mut().svm_guard;
@@ -509,6 +513,111 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
     }
     ctx.state_mut().svm_guard.valid = true;
     Some(())
+}
+
+pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+) {
+    if ctx.state().svm_gate_scalar_page.is_some() {
+        return;
+    }
+    let Some(root) = ctx
+        .state()
+        .vmcs
+        .read_natural(VmcsFieldNatural::GuestCr3)
+        .ok()
+        .map(|root| root & 0x000f_ffff_ffff_f000)
+    else {
+        return;
+    };
+    if ctx.state().svm_guard.gate_ready
+        && !ctx.state().svm_guard.gate_dirty
+        && ctx.state().svm_guard.gate_root == root
+    {
+        return;
+    }
+    let old_count = ctx.state().svm_guard.gate_count;
+    for index in 0..old_count {
+        let saved = ctx.state().svm_guard.gate_guards[index];
+        if saved.valid {
+            saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
+        }
+        ctx.state_mut().svm_guard.gate_guards[index].valid = false;
+    }
+    ctx.state_mut().svm_guard.gate_count = 0;
+    ctx.state_mut().svm_guard.gate_ready = false;
+    ctx.state_mut().svm_guard.gate_dirty = false;
+    ctx.state_mut().svm_guard.gate_root = root;
+    let paged = ctx
+        .state()
+        .vmcs
+        .read_natural(VmcsFieldNatural::GuestCr0)
+        .ok()
+        .is_some_and(|cr0| cr0 & (1 << 31) != 0);
+    if !paged {
+        ctx.state_mut().svm_guard.gate_ready = true;
+        return;
+    }
+    ctx.state_mut().svm_guard.valid = false;
+    if collect_translation_tree_pages(ctx, &[]).is_none() {
+        return;
+    }
+    let count = ctx.state().svm_guard.count;
+    for index in 0..count {
+        let page = ctx.state().svm_guard.tables[index];
+        let gpa = GuestPhysAddr::new(page);
+        ctx.state_mut().svm_guard.gate_tables[index] = page;
+        ctx.state_mut().svm_guard.gate_guards[index].valid = false;
+        let _ = ctx.state_mut().ept.invalidate_npt_code_4k(allocator, gpa);
+        match ctx.state_mut().ept.restrict_write_4k(allocator, gpa) {
+            Ok(Some(write_guard)) => {
+                ctx.state_mut().svm_guard.gate_guards[index] =
+                    super::super::vm_state::SvmGuardSaved {
+                        guest: page,
+                        write_guard,
+                        valid: true,
+                    };
+            }
+            Ok(None) => {}
+            Err(_) => {
+                for restore in 0..index {
+                    let saved = ctx.state().svm_guard.gate_guards[restore];
+                    if saved.valid {
+                        saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
+                        ctx.state_mut().svm_guard.gate_guards[restore].valid = false;
+                    }
+                }
+                return;
+            }
+        }
+    }
+    ctx.state_mut().svm_guard.gate_count = count;
+    ctx.state_mut().svm_guard.gate_ready = true;
+}
+
+pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+    page: u64,
+) -> bool {
+    if !ctx.state().svm_guard.gate_ready {
+        return false;
+    }
+    let Some(index) = ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
+        .iter()
+        .position(|&table| table == page)
+    else {
+        return false;
+    };
+    let saved = ctx.state().svm_guard.gate_guards[index];
+    if !saved.valid {
+        return false;
+    }
+    saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
+    ctx.state_mut().svm_guard.gate_guards[index].valid = false;
+    ctx.state_mut().svm_guard.gate_dirty = true;
+    true
 }
 
 /// The table proof covers every reachable frame, so A/D updates cannot change
@@ -619,6 +728,11 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
     window: Option<&super::svm::InstructionWindow>,
     software: bool,
 ) {
+    if batch.is_some_and(|batch| batch.global_execution) {
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.state_mut().svm_guard.code_count = 0;
+        return;
+    }
     if !ctx.state().svm_guard.valid {
         ctx.state_mut().svm_guard.code_count = 0;
         return;
@@ -1054,6 +1168,72 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
         return None;
     }
     Some(result)
+}
+
+/// A globally executable page must be safe at every entry byte, including
+/// joins with any other executable page. Unknown pages remain NX until this
+/// proof succeeds and their NPT leaves become write-protected.
+pub(crate) fn globally_safe_code<C: VmContext>(ctx: &C, physical: u64) -> bool {
+    let Some(hazards) = page_hazards(ctx, physical) else {
+        return false;
+    };
+    hazards.count == 0
+        && hazards.edge & 15 == 15
+        && hazards.boundary[31] != 0x0f
+        && hazards.boundary[30..] != [0x0f, 0xc7]
+}
+
+pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &C,
+    allocator: &A,
+    can_count: bool,
+    window: &super::svm::InstructionWindow,
+) -> Option<InstructionBatch> {
+    let state = ctx.state();
+    let v = &state.vmcs;
+    let page = window.physical.as_u64() & !4095;
+    if !can_count
+        || !state.svm_guard.gate_ready
+        || state.svm_guard.gate_dirty
+        || !state.ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
+        || state.mtf_enabled
+        || v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
+        || v.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0
+        || v.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
+    {
+        return None;
+    }
+    let budget = instruction_budget(ctx);
+    if budget <= InstructionBatch::COUNTER_DEADLINE_MARGIN {
+        return None;
+    }
+    let mut batch = InstructionBatch {
+        start: v.read_natural(VmcsFieldNatural::GuestRip).ok()?,
+        offsets: [0; 65],
+        count: 0,
+        repeat: None,
+        counted_loop: None,
+        pages: [0; 68],
+        code_page_count: 1,
+        page_breakpoints: [0; 4],
+        page_breakpoint_count: 0,
+        branch_exits: [0; 3],
+        branch_exit_count: 0,
+        branch_exit_counts: [0; 3],
+        page_count: 1,
+        accesses_memory: false,
+        writes_memory: false,
+        validated_stores: false,
+        guarded_stores: false,
+        uses_counter: true,
+        counter_bounded: false,
+        page_execution: true,
+        global_execution: true,
+        endpoint_intercepted: false,
+        instruction_budget: budget,
+    };
+    batch.pages[0] = page;
+    Some(batch)
 }
 
 fn collect_page_breakpoints<C: VmContext>(
@@ -1969,6 +2149,7 @@ fn prepare_verified<C: VmContext>(
         uses_counter: false,
         counter_bounded: true,
         page_execution: false,
+        global_execution: false,
         endpoint_intercepted: false,
         instruction_budget: budget,
     };
@@ -2292,6 +2473,9 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
         saved_count: 0,
         execution: None,
     };
+    if batch.global_execution {
+        return Some(guard);
+    }
     if !batch.accesses_memory && batch.branch_exit_count == 0 {
         return Some(guard);
     }
@@ -4048,6 +4232,7 @@ mod tests {
             uses_counter: true,
             counter_bounded: false,
             page_execution: false,
+            global_execution: false,
             endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };
@@ -4117,6 +4302,7 @@ mod tests {
             uses_counter: false,
             counter_bounded: true,
             page_execution: false,
+            global_execution: false,
             endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };

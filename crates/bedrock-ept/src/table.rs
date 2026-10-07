@@ -44,6 +44,26 @@ pub struct NptWriteGuard {
     root: HostPhysAddr,
     table: HostPhysAddr,
     index: u16,
+    host: HostPhysAddr,
+}
+
+/// One scalar AMD entry may fetch from an otherwise non-executable page.
+#[must_use]
+pub struct NptExecuteGuard {
+    root: HostPhysAddr,
+    table: HostPhysAddr,
+    index: u16,
+    was_nx: bool,
+}
+
+impl NptExecuteGuard {
+    pub fn restore<Frame, A: FrameAllocator>(self, ept: &mut EptPageTable<Frame>, allocator: &A) {
+        assert_eq!(ept.format, PageTableFormat::AmdNpt);
+        assert_eq!(ept.pml4_phys, self.root);
+        let table = allocator.phys_to_virt(self.table).cast::<EptEntry>();
+        // SAFETY: the leaf mapping stays fixed until the guest entry returns.
+        unsafe { (*table.add(self.index as usize)).set_npt_nx(self.was_nx) };
+    }
 }
 
 impl NptWriteGuard {
@@ -53,7 +73,10 @@ impl NptWriteGuard {
         let table = allocator.phys_to_virt(self.table).cast::<EptEntry>();
         // SAFETY: the owned leaf table and mapping stay fixed while guarded.
         // Only originally writable leaves receive a guard. Keep hardware A/D.
-        unsafe { (*table.add(self.index as usize)).set_npt_writable(true) };
+        let leaf = unsafe { &mut *table.add(self.index as usize) };
+        if leaf.addr() == self.host {
+            leaf.set_npt_writable(true);
+        }
     }
 }
 
@@ -61,7 +84,7 @@ struct NptExecutionScratch {
     tables: [HostPhysAddr; NptExecutionGuard::MAX_TABLES],
     table_count: usize,
     changed_nx: [[u64; 8]; NptExecutionGuard::MAX_TABLES],
-    leaves: [(u8, u16, bool); NptExecutionGuard::MAX_PAGES],
+    leaves: [(u8, u16, bool, bool); NptExecutionGuard::MAX_PAGES],
     leaf_count: usize,
     cached_tables: [HostPhysAddr; NptExecutionGuard::MAX_TABLES],
     cached_executable: [[u64; 8]; NptExecutionGuard::MAX_TABLES],
@@ -92,12 +115,15 @@ impl NptExecutionGuard {
                 }
             }
         }
-        for &(table, index, writable) in &self.saved.leaves[..self.saved.leaf_count] {
+        for &(table, index, writable, was_nx) in &self.saved.leaves[..self.saved.leaf_count] {
             let leaf = allocator
                 .phys_to_virt(self.saved.tables[table as usize])
                 .cast::<EptEntry>();
             // SAFETY: mappings remain fixed until this guard is restored.
-            unsafe { (*leaf.add(index as usize)).set_npt_writable(writable) };
+            unsafe {
+                (*leaf.add(index as usize)).set_npt_writable(writable);
+                (*leaf.add(index as usize)).set_npt_nx(was_nx);
+            };
         }
         ept.execution_workspace = Some(self.saved);
     }
@@ -286,14 +312,14 @@ impl<Frame> EptPageTable<Frame> {
                     // SAFETY: validated tables are owned by this EPT, index <512.
                     let entry = unsafe { *table.add(index) };
                     if !entry.is_present()
-                        || entry.raw() & (1 << 63) != 0
-                        || (level < 3 && entry.raw() & (1 << 7) != 0)
+                        || (level < 3 && (entry.raw() & (1 << 63) != 0 || entry.raw() & (1 << 7) != 0))
                     {
                         return None;
                     }
                     guard.changed_nx[slot][index / 64] |= 1 << (index % 64);
                     if level == 3 {
-                        guard.leaves[page_index] = (slot as u8, index as u16, entry.raw() & 2 != 0);
+                        guard.leaves[page_index] = (slot as u8, index as u16,
+                            entry.raw() & 2 != 0, entry.raw() & (1 << 63) != 0);
                     } else {
                         physical = entry.addr();
                     }
@@ -348,12 +374,15 @@ impl<Frame> EptPageTable<Frame> {
                 }
             }
         }
-        for &(slot, index, _) in &guard.leaves[..guard.leaf_count] {
+        for &(slot, index, _, _) in &guard.leaves[..guard.leaf_count] {
             let table = allocator
                 .phys_to_virt(guard.tables[slot as usize])
                 .cast::<EptEntry>();
             // SAFETY: all selected leaves were validated before mutation.
-            unsafe { (*table.add(index as usize)).set_npt_writable(false) };
+            unsafe {
+                (*table.add(index as usize)).set_npt_writable(false);
+                (*table.add(index as usize)).set_npt_nx(false);
+            };
         }
         Some(NptExecutionGuard { saved: guard })
     }
@@ -392,11 +421,136 @@ impl<Frame> EptPageTable<Frame> {
                     root: self.pml4_phys,
                     table: physical,
                     index: index as u16,
+                    host: entry.addr(),
                 }));
             }
             physical = entry.addr();
         }
         unreachable!()
+    }
+
+    fn npt_leaf_4k<A: FrameAllocator>(
+        &self,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> Option<(HostPhysAddr, u16)> {
+        if self.format != PageTableFormat::AmdNpt {
+            return None;
+        }
+        let address = VirtAddr::new(guest.as_u64());
+        let indices = [
+            address.pml4_index(),
+            address.pdpt_index(),
+            address.pd_index(),
+            address.pt_index(),
+        ];
+        let mut physical = self.pml4_phys;
+        for (level, index) in indices.into_iter().enumerate() {
+            let table = allocator.phys_to_virt(physical).cast::<EptEntry>();
+            // SAFETY: NPT tables are owned by self and index is within 0..512.
+            let entry = unsafe { &*table.add(index) };
+            if !entry.is_present() || (level < 3 && entry.raw() & (1 << 7) != 0) {
+                return None;
+            }
+            if level == 3 {
+                return Some((physical, index as u16));
+            }
+            physical = entry.addr();
+        }
+        None
+    }
+
+    pub fn npt_trusted_code_4k<A: FrameAllocator>(
+        &self,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> bool {
+        let Some((table, index)) = self.npt_leaf_4k(allocator, guest) else {
+            return false;
+        };
+        let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
+        // SAFETY: validated NPT leaf in the owned table.
+        unsafe { (*leaf.add(index as usize)).raw() & (1 << 9) != 0 }
+    }
+
+    pub fn trust_npt_code_4k<A: FrameAllocator>(
+        &mut self,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> Option<()> {
+        let (table, index) = self.npt_leaf_4k(allocator, guest)?;
+        let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
+        // SAFETY: the guest is stopped while changing its NPT leaf.
+        unsafe { (*leaf.add(index as usize)).set_npt_trusted_code(true) };
+        Some(())
+    }
+
+    pub fn invalidate_npt_code_4k<A: FrameAllocator>(
+        &mut self,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> Option<()> {
+        let (table, index) = self.npt_leaf_4k(allocator, guest)?;
+        let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
+        // SAFETY: the guest is stopped while changing its NPT leaf.
+        unsafe { (*leaf.add(index as usize)).set_npt_trusted_code(false) };
+        Some(())
+    }
+
+    /// Host userspace can edit mapped RAM between RUN calls. Revoke every
+    /// trusted code proof before the guest resumes after such an interval.
+    pub fn invalidate_all_npt_code<A: FrameAllocator>(&mut self, allocator: &A) {
+        if self.format != PageTableFormat::AmdNpt {
+            return;
+        }
+        let pml4 = allocator.phys_to_virt(self.pml4_phys).cast::<EptEntry>();
+        for a in 0..512 {
+            // SAFETY: every index is within an owned NPT page.
+            let pml4e = unsafe { &*pml4.add(a) };
+            if !pml4e.is_present() {
+                continue;
+            }
+            let pdpt = allocator.phys_to_virt(pml4e.addr()).cast::<EptEntry>();
+            for b in 0..512 {
+                let pdpte = unsafe { &*pdpt.add(b) };
+                if !pdpte.is_present() {
+                    continue;
+                }
+                let pd = allocator.phys_to_virt(pdpte.addr()).cast::<EptEntry>();
+                for c in 0..512 {
+                    let pde = unsafe { &*pd.add(c) };
+                    if !pde.is_present() {
+                        continue;
+                    }
+                    let pt = allocator.phys_to_virt(pde.addr()).cast::<EptEntry>();
+                    for d in 0..512 {
+                        let leaf = unsafe { &mut *pt.add(d) };
+                        if leaf.raw() & (1 << 9) != 0 {
+                            leaf.set_npt_trusted_code(false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn allow_npt_execute_4k<A: FrameAllocator>(
+        &mut self,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> Option<NptExecuteGuard> {
+        let (table, index) = self.npt_leaf_4k(allocator, guest)?;
+        let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
+        // SAFETY: the guest is stopped while changing its NPT leaf.
+        let entry = unsafe { &mut *leaf.add(index as usize) };
+        let was_nx = entry.raw() & (1 << 63) != 0;
+        entry.set_npt_nx(false);
+        Some(NptExecuteGuard {
+            root: self.pml4_phys,
+            table,
+            index,
+            was_nx,
+        })
     }
 
     /// Map a 4KB guest physical page to a host physical page.
@@ -412,15 +566,20 @@ impl<Frame> EptPageTable<Frame> {
         self.execution_generation = self.execution_generation.wrapping_add(1);
         let guest_virt = VirtAddr::new(guest_phys.as_u64());
 
+        let table_perms = if self.format == PageTableFormat::AmdNpt {
+            EptPermissions::READ_WRITE_EXECUTE
+        } else {
+            perms
+        };
         let pml4_entry =
             self.get_or_create_entry(allocator, self.pml4_phys, guest_virt.pml4_index())?;
-        let pdpt_phys = self.ensure_table(allocator, pml4_entry, perms)?;
+        let pdpt_phys = self.ensure_table(allocator, pml4_entry, table_perms)?;
 
         let pdpt_entry = self.get_or_create_entry(allocator, pdpt_phys, guest_virt.pdpt_index())?;
-        let pd_phys = self.ensure_table(allocator, pdpt_entry, perms)?;
+        let pd_phys = self.ensure_table(allocator, pdpt_entry, table_perms)?;
 
         let pd_entry = self.get_or_create_entry(allocator, pd_phys, guest_virt.pd_index())?;
-        let pt_phys = self.ensure_table(allocator, pd_entry, perms)?;
+        let pt_phys = self.ensure_table(allocator, pd_entry, table_perms)?;
 
         let pt_entry = self.get_entry_mut(allocator, pt_phys, guest_virt.pt_index());
         // SAFETY: pt_entry points to a valid, aligned EptEntry within an allocated PT
@@ -486,6 +645,11 @@ impl<Frame> EptPageTable<Frame> {
             return Err(EptRemapError::NotMapped);
         }
 
+        let perms = if self.format == PageTableFormat::AmdNpt {
+            EptPermissions::from_bits(perms.bits() & !4)
+        } else {
+            perms
+        };
         let replacement =
             EptEntry::page_entry_with_format(new_host_phys, perms, mem_type, self.format);
         // Writability and HPA changes do not change executable-entry masks.
@@ -699,9 +863,16 @@ impl<Frame> EptPageTable<Frame> {
                         }
 
                         let host_phys = src_pte.addr();
+                        let perms = if self.format == PageTableFormat::AmdNpt {
+                            EptPermissions::from_bits(
+                                src_pte.permissions_with_format(self.format).bits() & !2,
+                            )
+                        } else {
+                            EptPermissions::READ_EXECUTE
+                        };
                         let new_entry = EptEntry::page_entry_with_format(
                             host_phys,
-                            EptPermissions::READ_EXECUTE,
+                            perms,
                             EptMemoryType::WriteBack,
                             self.format,
                         );

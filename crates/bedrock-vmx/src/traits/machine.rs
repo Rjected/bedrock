@@ -64,6 +64,8 @@ pub struct InstructionBatch {
     pub counter_bounded: bool,
     /// Run freely within an immutable code page guarded by nested paging.
     pub page_execution: bool,
+    /// SVM code-gate execution can cross any trusted NPT code page.
+    pub global_execution: bool,
     pub endpoint_intercepted: bool,
     pub instruction_budget: u64,
 }
@@ -248,6 +250,7 @@ impl InstructionBatch {
     /// Synthetic page-execution stops can depend on host interrupts or NPT
     /// state. They are distinct from an exact hardware single-step.
     pub(crate) const PAGE_EXECUTION_BOUNDARY: u64 = 1 << 62;
+    pub(crate) const PAGE_SCALAR_REPLAY: u64 = 1 << 61;
 
     // AMD PMC overflow interrupts are asynchronous. Leave room for their
     // delivery before an exact deadline, then fail closed if one arrives late.

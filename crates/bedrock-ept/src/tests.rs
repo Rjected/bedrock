@@ -114,6 +114,50 @@ fn npt_permissions_root_and_cow_use_amd_encodings() {
     );
 }
 
+#[test]
+fn npt_code_gate_keeps_unknown_and_remapped_pages_nonexecutable() {
+    use crate::traits::GuestPhysAddr;
+    let mut allocator = TestAllocator::new();
+    let mut parent =
+        EptPageTable::new_with_format(&mut allocator, crate::PageTableFormat::AmdNpt).unwrap();
+    let gpa = GuestPhysAddr::new(0x2000);
+    parent
+        .map_4k(
+            &mut allocator,
+            gpa,
+            HostPhysAddr::new(0x8000),
+            EptPermissions::READ_WRITE,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
+    assert!(!parent.npt_trusted_code_4k(&allocator, gpa));
+
+    parent.trust_npt_code_4k(&allocator, gpa).unwrap();
+    assert!(parent.npt_trusted_code_4k(&allocator, gpa));
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_EXECUTE);
+    parent.invalidate_npt_code_4k(&allocator, gpa).unwrap();
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
+
+    let execute = parent.allow_npt_execute_4k(&allocator, gpa).unwrap();
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE_EXECUTE);
+    execute.restore(&mut parent, &allocator);
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
+
+    let mut child = parent.clone_for_fork(&mut allocator).unwrap();
+    assert_eq!(child.lookup(&allocator, gpa).unwrap().1, EptPermissions::from_bits(1));
+    child
+        .remap_4k(
+            &allocator,
+            gpa,
+            HostPhysAddr::new(0x9000),
+            EptPermissions::READ_WRITE_EXECUTE,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    assert_eq!(child.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
+}
+
 /// A frame that tracks its physical address.
 struct TestFrame {
     phys: HostPhysAddr,
@@ -511,9 +555,12 @@ fn page_execution_guard_blocks_other_subtrees_and_restores_cow_and_nx() {
         ept.lookup(&allocator, GuestPhysAddr::new(0x2000)),
         before[1]
     );
-    assert!(ept
+    let guard = ept
         .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x3000))
-        .is_none());
+        .unwrap();
+    assert_eq!(ept.lookup(&allocator, GuestPhysAddr::new(0x3000)).unwrap().1.bits(), 5);
+    guard.restore(&mut ept, &allocator);
+    assert_eq!(ept.lookup(&allocator, GuestPhysAddr::new(0x3000)), before[5]);
     assert!(ept
         .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x4000))
         .is_none());

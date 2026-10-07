@@ -20,6 +20,9 @@ impl EptPermissions {
     /// Read, write, and execute permissions.
     pub const READ_WRITE_EXECUTE: Self = Self(0b111);
 
+    /// Read and write, with instruction fetch denied.
+    pub const READ_WRITE: Self = Self(0b011);
+
     /// Read and execute (no write): COW pages in forked VMs.
     pub const READ_EXECUTE: Self = Self(0b101);
 
@@ -146,6 +149,24 @@ impl EptEntry {
 
     pub(crate) fn set_npt_writable(&mut self, writable: bool) {
         self.0 = (self.0 & !2) | if writable { 2 } else { 0 };
+    }
+
+    pub(crate) fn set_npt_trusted_code(&mut self, trusted: bool) {
+        // Bits 9 and 10 are software-available NPT leaf bits. Bit 10 remembers
+        // original writability so COW leaves remain read-only on invalidation.
+        if trusted {
+            if self.0 & (1 << 9) != 0 {
+                return;
+            }
+            self.0 = (self.0 | (1 << 9)) | ((self.0 & 2) << 9);
+            self.set_npt_writable(false);
+            self.set_npt_nx(false);
+        } else if self.0 & (1 << 9) != 0 {
+            let writable = self.0 & (1 << 10) != 0;
+            self.0 &= !((1 << 9) | (1 << 10));
+            self.set_npt_writable(writable);
+            self.set_npt_nx(true);
+        }
     }
 
     pub const fn raw(&self) -> u64 {

@@ -286,9 +286,38 @@ where
     if Ctx::V::uses_nested_paging() {
         // Userspace may have changed RAM between RUN calls.
         ctx.state_mut().svm_guard.valid = false;
+        ctx.state_mut().ept.invalidate_all_npt_code(allocator);
+        ctx.state_mut().svm_gate_scalar_page = None;
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        ctx.state_mut().svm_guard.gate_host_write_count = 0;
+        ctx.state_mut().svm_guard.gate_host_write_all = false;
     }
     let loop_result = loop {
         let loop_start_tsc = rdtsc();
+
+        if Ctx::V::uses_nested_paging() {
+            if ctx.state().svm_guard.gate_host_write_all {
+                ctx.state_mut().ept.invalidate_all_npt_code(allocator);
+                ctx.state_mut().svm_guard.gate_dirty = true;
+            } else {
+                let count = ctx.state().svm_guard.gate_host_write_count;
+                for index in 0..count {
+                    let page = ctx.state().svm_guard.gate_host_writes[index];
+                    if ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
+                        .contains(&page)
+                    {
+                        ctx.state_mut().svm_guard.gate_dirty = true;
+                    }
+                    let _ = ctx
+                        .state_mut()
+                        .ept
+                        .invalidate_npt_code_4k(allocator, GuestPhysAddr::new(page));
+                }
+            }
+            ctx.state_mut().svm_guard.gate_host_write_count = 0;
+            ctx.state_mut().svm_guard.gate_host_write_all = false;
+            super::super::exits::refresh_global_tree(ctx, allocator);
+        }
 
         ctx.sync_gprs_to_vmx_ctx();
 
@@ -327,19 +356,69 @@ where
         if software_exit {
             ctx.sync_gprs_to_vmx_ctx();
         }
-        let mut batch = if Ctx::V::uses_nested_paging() && !software_exit && !force_single_step {
+        let scalar_page = ctx.state().svm_gate_scalar_page;
+        let mut batch = if Ctx::V::uses_nested_paging()
+            && !software_exit
+            && !force_single_step
+            && scalar_page.is_none()
+        {
             instruction_window.as_ref().and_then(|window| {
-                super::super::exits::prepare_instruction_batch(
+                super::super::exits::prepare_global(
                     ctx,
+                    allocator,
                     runner.can_count_instructions(),
-                    runner.can_guard_page_tables(),
                     window,
                 )
             })
+        } else if Ctx::V::uses_nested_paging()
+            && !software_exit
+            && !force_single_step
+            && scalar_page.is_some()
+        {
+            if scalar_page.is_some_and(|page| ctx.state().ept.npt_trusted_code_4k(
+                allocator, GuestPhysAddr::new(page))) {
+                None
+            } else {
+                instruction_window.as_ref().and_then(|window| {
+                    super::super::exits::prepare_instruction_batch(
+                        ctx,
+                        runner.can_count_instructions(),
+                        runner.can_guard_page_tables(),
+                        window,
+                    )
+                })
+            }
         } else {
             None
         };
         force_single_step = false;
+        let scalar_execute = if !software_exit {
+            scalar_page
+                .map(|page| {
+                    let page = instruction_window.as_ref()
+                        .map_or(page, |window| window.physical.as_u64() & !4095);
+                    ctx.state_mut()
+                        .ept
+                        .allow_npt_execute_4k(allocator, GuestPhysAddr::new(page))
+                        .ok_or(VmRunError::ExitHandler(
+                            super::super::exits::ExitError::Fatal("SVM scalar code page is unmapped"),
+                        ))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let scalar_next_execute = if !software_exit && scalar_page.is_some() {
+            instruction_window.as_ref().and_then(|window| {
+                (window.linear & 4095 >= 4096 - 15)
+                    .then(|| window.following_page(ctx).ok())
+                    .flatten()
+                    .and_then(|page| ctx.state_mut().ept.allow_npt_execute_4k(
+                        allocator, GuestPhysAddr::new(page.as_u64() & !4095)))
+            })
+        } else {
+            None
+        };
         let guard = batch.as_ref().and_then(|batch| {
             super::super::exits::protect_instruction_batch(ctx, allocator, batch)
         });
@@ -368,6 +447,15 @@ where
         };
         let post_guest_tsc = rdtsc();
         ctx.state_mut().exit_stats.guest_cycles += post_guest_tsc.saturating_sub(pre_guest_tsc);
+        if run_result.is_ok()
+            && batch.as_ref().is_some_and(|batch| batch.global_execution)
+            && ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
+                .ok().is_some_and(|qual| qual & super::super::traits::InstructionBatch::PAGE_SCALAR_REPLAY != 0)
+        {
+            ctx.state_mut().svm_gate_scalar_page =
+                super::super::exits::InstructionWindow::read(ctx).ok()
+                    .map(|window| window.physical.as_u64() & !4095);
+        }
         if let Some(guard) = guard {
             if guard.restore(ctx, allocator) && run_result.is_ok() {
                 // A store attempted to change this batch's code or address
@@ -377,6 +465,17 @@ where
                     .write32(VmcsField32::VmExitReason, 37)
                     .map_err(VmRunError::WriteHostRsp)?;
                 force_single_step = true;
+            }
+        }
+        if let Some(execute) = scalar_next_execute {
+            execute.restore(&mut ctx.state_mut().ept, allocator);
+        }
+        if let Some(execute) = scalar_execute {
+            execute.restore(&mut ctx.state_mut().ept, allocator);
+            if batch.as_ref().is_none_or(|batch| !batch.page_execution)
+                && runner.completed_instructions().is_some_and(|count| count != 0)
+            {
+                ctx.state_mut().svm_gate_scalar_page = None;
             }
         }
 

@@ -16,6 +16,11 @@ pub struct PmcEntry {
 }
 
 impl PmcEntry {
+    pub fn overflow_nmi(v: &Vmcb) -> bool {
+        v.read(o::EXIT_CODE, 8) == 0x4d
+            && v.read(o::EXIT_INT_INFO, 4) & 0x800007ff == 0x80000202
+            && v.read(o::PERF_GLOBAL_STATUS, 8) & 1 != 0
+    }
     /// Native PUSHF observes logical flags only when neither stepping TF nor
     /// debug-resume RF is active. The caller must guard code/table writes.
     /// finish restores the original PUSHF intercept on every counted exit.
@@ -100,9 +105,7 @@ impl PmcEntry {
         } else {
             raw
         };
-        let overflow_nmi = code == 0x4d
-            && v.read(o::EXIT_INT_INFO, 4) & 0x800007ff == 0x80000202
-            && v.read(o::PERF_GLOBAL_STATUS, 8) & 1 != 0;
+        let overflow_nmi = Self::overflow_nmi(v);
         let immediate_breakpoint = raw == 0
             && !self.entry_rf
             && code == 0x41

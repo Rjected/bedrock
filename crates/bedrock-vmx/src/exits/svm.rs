@@ -29,7 +29,11 @@ pub(crate) struct InstructionWindow {
 }
 
 impl InstructionWindow {
-    pub(super) fn read<C: VmContext>(ctx: &C) -> Result<Self, ExitError> {
+    pub(crate) fn following_page<C: VmContext>(&self, ctx: &C) -> Result<GuestPhysAddr, ExitError> {
+        physical(ctx, (self.linear & !4095).wrapping_add(4096))
+    }
+
+    pub(crate) fn read<C: VmContext>(ctx: &C) -> Result<Self, ExitError> {
         let v = &ctx.state().vmcs;
         let linear = v
             .read_natural(VmcsFieldNatural::GuestRip)?

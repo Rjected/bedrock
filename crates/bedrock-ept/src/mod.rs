@@ -11,5 +11,5 @@ mod table;
 mod traits;
 
 pub use entry::{EptMemoryType, EptPermissions, PageTableFormat};
-pub use table::{EptPageTable, NptExecutionGuard, NptWriteGuard};
+pub use table::{EptPageTable, NptExecuteGuard, NptExecutionGuard, NptWriteGuard};
 pub use traits::FrameAllocator;

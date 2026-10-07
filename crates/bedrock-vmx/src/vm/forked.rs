@@ -314,6 +314,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         let page_offset = (gpa.as_u64() & 0xFFF) as usize;
 
         if let Some(cow_page) = self.cow_pages.get_mut(page_gpa) {
+            self.state.svm_guard.note_gate_host_write(gpa.as_u64(), buf.len());
             let cow_ptr = cow_page.virtual_address().as_u64() as *mut u8;
             let available_in_page = PAGE_SIZE - page_offset;
 
@@ -417,6 +418,8 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             return None;
         }
 
+        self.state.svm_guard.gate_dirty = true;
+
         // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a leaf's
         // HPA. EPT-violation auto-invalidation only covers the faulting linear
         // address; combined mappings for other GVAs of this GPA (e.g. a
@@ -505,6 +508,8 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                 continue;
             }
 
+            self.state.svm_guard.gate_dirty = true;
+
             // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a
             // leaf's HPA. See the matching comment in handle_cow_fault.
             let _ = <<V::M as Machine>::V as Vmx>::invept_single_context(self.state.ept.eptp());
@@ -577,6 +582,8 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             );
             return;
         }
+
+        self.state.svm_guard.gate_dirty = true;
 
         // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a leaf's
         // HPA. See the matching comment in handle_cow_fault.
