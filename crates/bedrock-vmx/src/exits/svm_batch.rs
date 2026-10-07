@@ -682,14 +682,11 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
     Some(result)
 }
 
-fn collect_page_breakpoints<C: VmContext>(ctx: &C, batch: &mut InstructionBatch) -> Option<()> {
-    let mut hazards = [PageHazards {
-        offsets: [0; 4],
-        count: 0,
-    }; 4];
-    for (index, hazard) in hazards.iter_mut().enumerate().take(batch.code_page_count) {
-        *hazard = page_hazards(ctx, batch.pages[index])?;
-    }
+fn collect_page_breakpoints<C: VmContext>(
+    ctx: &C,
+    batch: &mut InstructionBatch,
+    hazards: &[PageHazards; 4],
+) -> Option<()> {
     batch.page_breakpoint_count = 0;
     if hazards[..batch.code_page_count]
         .iter()
@@ -964,6 +961,12 @@ pub(crate) fn prepare<C: VmContext>(
 ) -> Option<InstructionBatch> {
     let page = window.physical.as_u64() & !4095;
     let mut allow_page = false;
+    // Reuse scans only within this preparation, while the guest is stopped.
+    // Every subsequent hardware entry still validates the current contents.
+    let mut hazards = [PageHazards {
+        offsets: [0; 4],
+        count: 0,
+    }; 4];
     let v = &ctx.state().vmcs;
     let long = v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) != 0;
     if long
@@ -972,7 +975,10 @@ pub(crate) fn prepare<C: VmContext>(
         && instruction_budget(ctx) > InstructionBatch::COUNTER_DEADLINE_MARGIN
         && !ctx.state().svm_rejected_pages.contains(&page)
     {
-        allow_page = page_hazards(ctx, page).is_some();
+        if let Some(hazard) = page_hazards(ctx, page) {
+            hazards[0] = hazard;
+            allow_page = true;
+        }
         if !allow_page {
             let state = ctx.state_mut();
             state.svm_rejected_pages[state.svm_rejected_cursor] = page;
@@ -1013,10 +1019,12 @@ pub(crate) fn prepare<C: VmContext>(
             // physical code aliases are already covered by the guarded tree.
             if batch.pages[..batch.page_count].contains(&physical)
                 || ctx.state().svm_rejected_pages.contains(&physical)
-                || page_hazards(ctx, physical).is_none()
             {
                 continue;
             }
+            let Some(hazard) = page_hazards(ctx, physical) else {
+                continue;
+            };
             if batch.pages[..batch.code_page_count].iter().any(|&page| {
                 page_boundary_safe(ctx, page, physical).is_none()
                     || page_boundary_safe(ctx, physical, page).is_none()
@@ -1028,11 +1036,12 @@ pub(crate) fn prepare<C: VmContext>(
                 batch.code_page_count + 1,
             );
             batch.pages[batch.code_page_count] = physical;
+            hazards[batch.code_page_count] = hazard;
             batch.code_page_count += 1;
             batch.page_count += 1;
         }
         ctx.state_mut().svm_recent_pages = updated;
-        while collect_page_breakpoints(ctx, &mut batch).is_none() {
+        while collect_page_breakpoints(ctx, &mut batch, &hazards).is_none() {
             if batch.code_page_count == 1 {
                 let state = ctx.state_mut();
                 state.svm_rejected_pages[state.svm_rejected_cursor] = page;
