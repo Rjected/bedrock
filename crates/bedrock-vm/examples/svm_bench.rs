@@ -18,11 +18,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
     }
-    if args.len() == 3 {
-        return linux_checkpoint(&args[1], &args[2]);
+    if args.len() == 3 || args.len() == 4 {
+        let target = args
+            .get(3)
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or(1_000_000);
+        return linux_checkpoint(&args[1], &args[2], target);
     }
     if args.len() != 1 {
-        return Err("Usage: svm_bench [native | native-branches | stores | VMLINUX INITRD]".into());
+        return Err(
+            "Usage: svm_bench [native | native-branches | stores | VMLINUX INITRD [INSTRUCTIONS]]"
+                .into(),
+        );
     }
     test_repeat()?;
     test_paged_stores()?;
@@ -31,6 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_hardware_loop()?;
     test_hardware_control_flow()?;
     test_endpoint_deadline()?;
+    test_forward_deadline()?;
+    test_forward_stores()?;
     const LOOPS: u16 = 4096;
     const EXPECTED: u64 = 1 + LOOPS as u64 * 66 + 1;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
@@ -278,6 +288,143 @@ fn test_endpoint_deadline() -> Result<(), Box<dyn std::error::Error>> {
         break;
     }
     println!("SVM_INTERCEPT_ENDPOINT_DEADLINE_PASS");
+    Ok(())
+}
+
+fn test_forward_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    // The branch skips one MOV on the taken path. Test every deadline on
+    // both paths, including a stop before the snapshot endpoint.
+    for taken in [false, true] {
+        let mut reference = None;
+        for stop in 1..=4 {
+            let mut vm = Vm::create(2 * 1024 * 1024)?;
+            vm.memory_mut()?[0x1000..0x100a]
+                .copy_from_slice(&[0x90, 0x74, 3, 0xbb, 0x34, 0x12, 0x90, 0x0f, 0x01, 0xd9]);
+            let mut regs = Regs::real_mode();
+            regs.segment_regs.cs = SegmentRegister::new(0, 0x9b, 0xffff, 0);
+            regs.rip = 0x1000;
+            regs.gprs.rsp = 0x8000;
+            regs.gprs.rax = 1;
+            if taken {
+                regs.rflags |= 1 << 6;
+            }
+            vm.set_regs(&regs)?;
+            // The taken path has three instructions before the endpoint.
+            let target = if taken { stop.min(3) } else { stop };
+            vm.set_stop_at_tsc(Some(target))?;
+            loop {
+                let exit = vm.run()?;
+                if exit.exit_reason == 256 {
+                    continue;
+                }
+                assert_eq!(exit.exit_reason, 259);
+                assert_eq!(exit.emulated_tsc, target);
+                let rip = match (taken, target) {
+                    (_, 1) => 0x1001,
+                    (false, 2) => 0x1003,
+                    (true, 2) | (false, 3) => 0x1006,
+                    _ => 0x1007,
+                };
+                assert_eq!(vm.get_regs()?.rip, rip);
+                break;
+            }
+            // Resume two forks and compare their final architectural state.
+            for _ in 0..2 {
+                let child = vm.fork()?;
+                child.set_stop_at_tsc(None)?;
+                loop {
+                    let exit = child.run()?;
+                    if exit.exit_reason == 256 {
+                        continue;
+                    }
+                    assert_eq!(exit.exit_reason, 260);
+                    assert_eq!(exit.emulated_tsc, if taken { 3 } else { 4 });
+                    let r = child.get_regs()?;
+                    assert_eq!(r.gprs.rbx, if taken { 0 } else { 0x1234 });
+                    let result = (r.rip, r.rflags, r.gprs.rbx);
+                    if let Some(expected) = reference {
+                        assert_eq!(result, expected);
+                    } else {
+                        reference = Some(result);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    println!("SVM_FORWARD_DEADLINE_FORK_PASS");
+    Ok(())
+}
+
+fn test_forward_stores() -> Result<(), Box<dyn std::error::Error>> {
+    const VALUE: u64 = 0x123456789abcdef0;
+    for taken in [false, true] {
+        for stop in 1..=4 {
+            let mut vm = Vm::create(2 * 1024 * 1024)?;
+            for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+                vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+            }
+            let code = [
+                0x48, 0x89, 0x07, 0x74, 4, 0x48, 0x89, 0x47, 8, 0x90, 0x4c, 0x8b, 0x07, 0x4c, 0x8b,
+                0x4f, 8, 0x31, 0xc0, 0x0f, 0x01, 0xd9,
+            ];
+            vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+            let mut regs = Regs::long_mode();
+            regs.control_regs.cr3 = Cr3::new(0x3000);
+            regs.rip = 0x1000;
+            regs.gprs.rsp = 0x8000;
+            regs.gprs.rdi = 0x7000;
+            regs.gprs.rax = VALUE;
+            if taken {
+                regs.rflags |= 1 << 6;
+            }
+            vm.set_regs(&regs)?;
+            vm.set_stop_at_tsc(Some(stop))?;
+            loop {
+                let exit = vm.run()?;
+                if exit.exit_reason == 256 {
+                    continue;
+                }
+                assert_eq!(exit.exit_reason, 259);
+                assert_eq!(exit.emulated_tsc, stop);
+                let rip = match (taken, stop) {
+                    (_, 1) => 0x1003,
+                    (false, 2) => 0x1005,
+                    (true, 2) | (false, 3) => 0x1009,
+                    (true, 3) | (false, 4) => 0x100a,
+                    _ => 0x100d,
+                };
+                assert_eq!(vm.get_regs()?.rip, rip);
+                break;
+            }
+            assert_eq!(&vm.memory()?[0x7000..0x7008], &VALUE.to_le_bytes());
+            let second = if !taken && stop >= 3 { VALUE } else { 0 };
+            assert_eq!(&vm.memory()?[0x7008..0x7010], &second.to_le_bytes());
+            let mut hash = DefaultHasher::new();
+            hash.write(vm.memory()?);
+            let parent = hash.finish();
+            for _ in 0..2 {
+                let child = vm.fork()?;
+                child.set_stop_at_tsc(None)?;
+                loop {
+                    let exit = child.run()?;
+                    if exit.exit_reason == 256 {
+                        continue;
+                    }
+                    assert_eq!(exit.exit_reason, 258);
+                    assert_eq!(exit.emulated_tsc, if taken { 6 } else { 7 });
+                    let r = child.get_regs()?;
+                    assert_eq!(r.gprs.r8, VALUE);
+                    assert_eq!(r.gprs.r9, if taken { 0 } else { VALUE });
+                    break;
+                }
+            }
+            let mut hash = DefaultHasher::new();
+            hash.write(vm.memory()?);
+            assert_eq!(hash.finish(), parent);
+        }
+    }
+    println!("SVM_FORWARD_STORE_DEADLINE_FORK_PASS");
     Ok(())
 }
 
@@ -565,7 +712,11 @@ fn test_debug_registers() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn linux_checkpoint(kernel: &str, initrd: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn linux_checkpoint(
+    kernel: &str,
+    initrd: &str,
+    target: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = VmBuilder::new()
         .memory_mb(128)
         .tsc_frequency(100_000_000)
@@ -578,7 +729,7 @@ fn linux_checkpoint(kernel: &str, initrd: &str) -> Result<(), Box<dyn std::error
             .cmdline("console=ttyS0 nopti nokaslr mitigations=off audit=0")
             .initramfs(&initrd),
     )?;
-    vm.set_stop_at_tsc(Some(1_000_000))?;
+    vm.set_stop_at_tsc(Some(target))?;
     let start = Instant::now();
     loop {
         if start.elapsed().as_secs() >= 10 {
@@ -589,7 +740,7 @@ fn linux_checkpoint(kernel: &str, initrd: &str) -> Result<(), Box<dyn std::error
             continue;
         }
         assert_eq!(exit.exit_reason, 259, "unexpected Linux guest exit");
-        assert_eq!(exit.emulated_tsc, 1_000_000);
+        assert_eq!(exit.emulated_tsc, target);
         let seconds = start.elapsed().as_secs_f64();
         let stats = vm.get_exit_stats()?;
         println!(

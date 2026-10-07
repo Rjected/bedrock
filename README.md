@@ -63,8 +63,13 @@ use RCX accounting. Code and translation guards prevent a batch
 from modifying the instructions it has decoded. Long-mode MOV stores and PUSH
 can join a batch when their address registers retain their entry values and
 their destinations cannot rewrite the code or subsequent store translations.
+These stores can also join forward-only branches when their address registers
+are stable across every decoded path.
 Unsupported instructions and other stores fall back to instruction stepping.
-Loop acceleration requires AMD PerfMonV2; counter allocation failure disables it.
+Control-flow acceleration requires AMD PerfMonV2; counter allocation failure
+disables it. Forward-only regions stop at their endpoint and can run inside
+the performance-counter interrupt margin when their maximum instruction count
+fits before the next deadline. Backward branches still require that margin.
 Regions ending at an unconditional SVM intercept omit the execution breakpoint,
 then replay that intercept after timer and deadline handling at the boundary.
 
@@ -100,6 +105,9 @@ long-mode guest nine times, with matching code alignment, and reports median
 wall and thread CPU time. `native-branches` uses a loop with varying instruction
 counts on its two paths. These comparisons measure the
 verified loop path; it does not represent Linux or general guest workloads.
+`svm_bench VMLINUX INITRD [INSTRUCTIONS]` stops Linux at an exact instruction
+checkpoint (one million by default), reports its registers and RAM hash, and
+limits each check to ten seconds.
 
 The Linux integration example uses a userspace snapshot, then compares two
 forks' clock syscall, `getrandom`, RDRAND/RDSEED, final registers, and virtual

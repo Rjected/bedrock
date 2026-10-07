@@ -305,7 +305,9 @@ pub(crate) unsafe fn run(
             }
             let count = exits::retired_instructions(before, after, code)
                 .ok_or(VmEntryError::VmEntryFailed)?;
-            if count > batch.instruction_budget {
+            if count > batch.instruction_budget
+                || (batch.counter_bounded && count > batch.count as u64)
+            {
                 kernel::pr_err!(
                     "SVM PMU exceeded budget: count={} budget={} code={:#x}\n",
                     count,

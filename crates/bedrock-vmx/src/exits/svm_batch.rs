@@ -553,6 +553,7 @@ pub(crate) fn prepare<C: VmContext>(
         writes_memory: false,
         validated_stores: false,
         uses_counter: false,
+        counter_bounded: true,
         endpoint_intercepted: false,
         instruction_budget: budget,
     };
@@ -601,15 +602,18 @@ pub(crate) fn prepare<C: VmContext>(
     while batch.repeat.is_none() && batch.count < limit.min(64) {
         // Relative transfers may only enter decoded boundaries or the
         // endpoint. The retired-instruction counter accounts for their paths.
-        if can_loop
-            && budget >= InstructionBatch::COUNTER_DEADLINE_MARGIN
-            && !(paged && batch.writes_memory)
-        {
+        if can_loop {
             let tail = &bytes[offset..available];
             if let Some((length, displacement)) = relative_branch(tail, long, default32) {
                 let end = offset + length;
                 let target = end as i64 + displacement;
-                if target < 0 || target > available as i64 {
+                let backward = target < end as i64;
+                if target < 0
+                    || target > available as i64
+                    || (backward
+                        && (budget < InstructionBatch::COUNTER_DEADLINE_MARGIN
+                            || (paged && batch.writes_memory)))
+                {
                     break;
                 }
                 if branch_count == 0 {
@@ -621,6 +625,7 @@ pub(crate) fn prepare<C: VmContext>(
                 batch.count += 1;
                 batch.offsets[batch.count] = end as u16;
                 batch.uses_counter = true;
+                batch.counter_bounded &= !backward;
                 if offset == available {
                     break;
                 }
@@ -632,7 +637,7 @@ pub(crate) fn prepare<C: VmContext>(
             break;
         };
         if paged && writes {
-            if !long || batch.uses_counter {
+            if !long || (batch.uses_counter && !batch.counter_bounded) {
                 break;
             }
             let instruction = &bytes[offset..offset + length];
@@ -928,7 +933,53 @@ mod tests {
         assert!(!b.uses_counter);
         assert_eq!(b.count, 2);
         let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
-        assert!(!planned(&ctx).unwrap().uses_counter); // Paged stores need straight-line addresses.
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
+    }
+
+    #[test]
+    fn forward_store_paths_require_addresses_stable_on_every_path() {
+        // A store preceding a branch and another optional store are safe.
+        let mut ctx = paged_context(&[
+            0x48, 0x89, 0x07, 0x74, 4, 0x48, 0x89, 0x47, 8, 0x90, 0x0f, 0x01, 0xd9,
+        ]);
+        ctx.state_mut().stop_at_tsc = Some(4);
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
+        assert_eq!(b.count, 4);
+        // An optional address change invalidates stores after the merge.
+        let ctx = paged_context(&[0x90, 0x90, 0x74, 4, 0x48, 0x83, 0xc7, 8, 0x48, 0x89, 0x07]);
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter && b.counter_bounded);
+        assert_eq!(b.count, 4); // Stops before the store with a changed address.
+        assert!(!b.writes_memory);
+        // Store loops require a range proof for every iteration.
+        let ctx = paged_context(&[0x48, 0x89, 0x07, 0x90, 0x75, 0xfa]);
+        let b = planned(&ctx).unwrap();
+        assert!(!b.uses_counter);
+        assert_eq!(b.count, 2);
+    }
+
+    #[test]
+    fn forward_regions_use_the_endpoint_inside_the_interrupt_margin() {
+        let mut ctx = paged_context(&[0x90, 0x74, 1, 0x90, 0x90, 0x0f, 0x01, 0xd9]);
+        ctx.state_mut().stop_at_tsc = Some(4);
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter && b.counter_bounded && b.endpoint_intercepted);
+        assert_eq!(b.count, 4);
+        assert_eq!(b.counter_period(), 1 << 30);
+        // A smaller deadline truncates the region before its branch target.
+        ctx.state_mut().stop_at_tsc = Some(2);
+        assert!(planned(&ctx).is_none());
+        // Backward edges still require an interrupt-latency margin.
+        let mut ctx = paged_context(&[0x90, 0x90, 0x75, 0xfc, 0x0f, 0x01, 0xd9]);
+        ctx.state_mut().stop_at_tsc = Some(4);
+        let b = planned(&ctx).unwrap();
+        assert!(!b.uses_counter);
+        assert_eq!(b.count, 2);
+        ctx.state_mut().stop_at_tsc = Some(100_000);
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter && !b.counter_bounded);
     }
 
     #[test]
@@ -1146,6 +1197,7 @@ mod tests {
             writes_memory: false,
             validated_stores: false,
             uses_counter: true,
+            counter_bounded: false,
             endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };
@@ -1205,6 +1257,7 @@ mod tests {
             writes_memory: false,
             validated_stores: false,
             uses_counter: false,
+            counter_bounded: true,
             endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };

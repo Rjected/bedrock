@@ -48,6 +48,8 @@ pub struct InstructionBatch {
     pub writes_memory: bool,
     pub validated_stores: bool,
     pub uses_counter: bool,
+    /// Every transfer moves forward, bounding retirements by `count`.
+    pub counter_bounded: bool,
     pub endpoint_intercepted: bool,
     pub instruction_budget: u64,
 }
@@ -64,6 +66,11 @@ impl InstructionBatch {
     pub const COUNTER_DEADLINE_MARGIN: u64 = 65536;
 
     pub fn counter_period(&self) -> u64 {
+        if self.counter_bounded {
+            // The endpoint stops execution before the deadline. Count without
+            // requesting an overflow interrupt in this short region.
+            return 1 << 30;
+        }
         self.instruction_budget
             .saturating_sub(Self::COUNTER_DEADLINE_MARGIN)
             .clamp(1, 1 << 30)
