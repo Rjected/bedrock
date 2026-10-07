@@ -29,6 +29,22 @@ pub fn retired_instructions(before: u64, after: u64, code: u64) -> Option<u64> {
         .checked_sub(1 + u64::from(code == 0x61))
 }
 
+/// A pending host NMI can exit immediately after VMRUN, without the additional
+/// physical-NMI retirement tick. Accept this zero-work case only when RIP also
+/// proves that entry did not advance the guest; keep rejecting other underflows.
+pub fn retired_instructions_at(
+    before: u64,
+    after: u64,
+    code: u64,
+    entry_rip: u64,
+    exit_rip: u64,
+) -> Option<u64> {
+    if code == 0x61 && after.checked_sub(before) == Some(1) && entry_rip == exit_rip {
+        return Some(0);
+    }
+    retired_instructions(before, after, code)
+}
+
 pub fn decode(
     code: u64,
     info1: u64,
@@ -221,6 +237,27 @@ mod tests {
         assert_eq!(retired_instructions(100, 101, 0x61), None);
         assert_eq!(retired_instructions(100, 99, 0x41), None);
     }
+    #[test]
+    fn immediate_host_nmi_requires_entry_only_tick_and_unchanged_rip() {
+        assert_eq!(
+            retired_instructions_at(100, 101, 0x61, 0x1000, 0x1000),
+            Some(0)
+        );
+        assert_eq!(
+            retired_instructions_at(100, 101, 0x61, 0x1000, 0x1001),
+            None
+        );
+        assert_eq!(
+            retired_instructions_at(100, 100, 0x61, 0x1000, 0x1000),
+            None
+        );
+        assert_eq!(retired_instructions_at(100, 99, 0x61, 0x1000, 0x1000), None);
+        assert_eq!(
+            retired_instructions_at(100, 112, 0x61, 0x1000, 0x1008),
+            Some(10)
+        );
+    }
+
     #[test]
     fn io_decode_preserves_direction_size_port_and_string_flags() {
         let e = decode(

@@ -145,6 +145,7 @@ pub(crate) unsafe fn run(
 ) -> Result<u64, VmEntryError> {
     v.write(o::RAX, 8, ctx.guest_rax);
     v.write(o::CR2, 8, ctx.guest_cr2);
+    let entry_rip = v.read(o::RIP, 8);
     let original_tf = v.read(o::RFLAGS, 8) & (1 << 8);
     let original_dr7 = v.read(o::DR7, 8);
     let original_dr6 = v.read(o::DR6, 8);
@@ -230,10 +231,10 @@ pub(crate) unsafe fn run(
         v.write(o::DR7, 8, original_dr7);
         v.write(o::DR6, 8, original_dr6);
         if trapped { v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) & !(1 << 16)); }
-        let count = if pmu_ready { exits::retired_instructions(before, after, code) }
+        let count = if pmu_ready { exits::retired_instructions_at(before, after, code, entry_rip, v.read(o::RIP, 8)) }
             else { None }.ok_or_else(|| {
-                kernel::pr_err!("SVM page execution invalid count: ready={} before={} after={} code={:#x} rip={:#x}\n",
-                    pmu_ready, before, after, code, v.read(o::RIP, 8));
+                kernel::pr_err!("SVM page execution invalid count: ready={} before={} after={} code={:#x} entry_rip={:#x} rip={:#x}\n",
+                    pmu_ready, before, after, code, entry_rip, v.read(o::RIP, 8));
                 VmEntryError::VmEntryFailed
             })?;
         if count > batch.instruction_budget {
@@ -400,7 +401,7 @@ pub(crate) unsafe fn run(
                 kernel::pr_err!("SVM PMU invalid boundary: ready={} before={} after={} rip={:#x} code={:#x} batch={:?}\n", pmu_ready, before, after, v.read(o::RIP,8), code, batch);
                 return Err(VmEntryError::VmEntryFailed);
             }
-            let count = exits::retired_instructions(before, after, code)
+            let count = exits::retired_instructions_at(before, after, code, entry_rip, v.read(o::RIP, 8))
                 .ok_or(VmEntryError::VmEntryFailed)?;
             if count > batch.instruction_budget
                 || (batch.counter_bounded && count > batch.count as u64)
