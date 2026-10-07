@@ -103,7 +103,8 @@ pub struct ExitStats {
     pub other: ExitStatEntry,
     /// Total cycles in VM run loop (including guest time).
     pub total_run_cycles: u64,
-    /// Total cycles in guest mode (actual VMX non-root execution).
+    /// Cycles in the VM runner, including its entry/exit wrapper but excluding
+    /// batch planning and permission restoration.
     pub guest_cycles: u64,
     /// Cycles spent in run loop setup before VM entry.
     pub vmentry_overhead_cycles: u64,
@@ -315,7 +316,7 @@ impl fmt::Display for ExitStatsReport<'_> {
         )?;
         writeln!(
             f,
-            "  Guest execution:    {:>16} cycles ({:>5.1}% of run loop, {:>5.1}% of wall clock)",
+            "  VM runner / guest:  {:>16} cycles ({:>5.1}% of run loop, {:>5.1}% of wall clock)",
             format_count(stats.guest_cycles),
             pct(stats.guest_cycles, run),
             cycles_to_wall_pct(stats.guest_cycles)

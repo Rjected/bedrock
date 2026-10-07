@@ -16,5 +16,5 @@ mod traits;
 mod tests;
 
 pub use entry::{EptEntry, EptMemoryType, EptPermissions, PageTableFormat};
-pub use table::{EptPageTable, EptRemapError, NptExecutionGuard};
+pub use table::{EptPageTable, EptRemapError, NptExecutionGuard, NptWriteGuard};
 pub use traits::{FrameAllocator, PhysAddr, VirtAddr};

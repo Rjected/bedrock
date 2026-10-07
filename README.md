@@ -80,7 +80,7 @@ disables it. Forward-only regions stop at their endpoint and can run inside
 the performance-counter interrupt margin when their maximum instruction count
 fits before the next deadline. Backward branches still require that margin.
 Long-mode execution can also run across calls, returns, and store loops within
-up to four recently visited code pages. Hardware execution breakpoints stop
+up to sixteen recently visited code pages. Hardware execution breakpoints stop
 before possible RDRAND/RDSEED/RDPID, repeated-string encodings, and SYSRET;
 their prefix entry points and executable virtual aliases must fit in four
 breakpoint slots. Alias enumeration uses a preallocated workspace of 512
@@ -108,10 +108,15 @@ within a RUN while guarded execution protects their bytes or scalar stores are
 proven disjoint from the cached pages. Pages omitted from a guard lose their
 scan approval before execution; emulation and a new RUN revoke approvals.
 Alias proofs are reused while the table-frame proof remains valid, with
-selected physical pages and hazard offsets as the cache key. Cross-page
-boundaries are checked on each preparation.
+hazardous physical pages and hazard offsets as the cache key, independent of
+selection order and ordinary code pages. Cached edge summaries check cross-page
+boundaries on each preparation. Optional pages that cannot fit the four
+breakpoints are omitted before alias enumeration.
+NPT permission guards reuse a heap workspace and cached executable-entry masks;
+write guards restore leaf permissions directly without another table walk.
 Page execution requires more than
-65,536 instructions before the next deadline.
+4,096 instructions before the next deadline. This margin has been exercised on
+the validation host; it is not a calibrated bound for every AMD processor.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions, or MOV/PUSH stores proven disjoint from table
 frames preserve its shape. Unproven writes,
@@ -134,8 +139,9 @@ Linux checkpoints with matching registers and guest-memory hashes, plus loop
 and REP deadline/fork tests. Its complete Linux integration test also passes:
 boot to a userspace snapshot, matching clock/randomness/registers/instruction
 counts in two children, and isolation of the parent's memory.
-Fresh boots on the same accelerated build currently differ in virtual time
-later in initialization; full-boot reproducibility remains an unresolved issue.
+Fresh boots on the same accelerated build currently diverge at the 100-million
+instruction checkpoint despite matching 50-million checkpoints; full-boot
+reproducibility remains an unresolved issue.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
@@ -188,7 +194,13 @@ hash, registers, virtual TSC, and both children's results.
 For a shorter reproducibility check, run `svm_bench VMLINUX INITRD INSTRUCTIONS
 repeat`; it compares the RAM hash and registers at an exact instruction
 deadline. `BEDROCK_CHECKPOINT_TIMEOUT_SECONDS` overrides its default 10-second
-limit when checking a later checkpoint.
+limit when checking a later checkpoint. `BEDROCK_CHECKPOINT_RNG_SEED` sets the
+checkpoint's deterministic RNG seed; use `42` with the integration example's
+initrd to match its inputs. `BEDROCK_CHECKPOINT_INTERVAL` records intermediate
+checkpoints in each boot; with `repeat`, the first mismatch is reported. These
+extra stops change where execution is replanned, so also check a single deadline
+when investigating a divergence. Each integration root reports its elapsed time,
+snapshot instruction count, and RAM hash after the fork checks.
 
 This reference kernel disables ftrace and ORC metadata to reduce boot-time
 stepping. The integration test uses a 100 MHz virtual TSC: a very low frequency

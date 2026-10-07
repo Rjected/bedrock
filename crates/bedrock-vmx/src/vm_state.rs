@@ -7,8 +7,15 @@ use super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+#[cfg(not(feature = "cargo"))]
+use crate::ept::NptWriteGuard;
+#[cfg(feature = "cargo")]
+use bedrock_ept::NptWriteGuard;
+
 type DeviceStatesBox = HeapBox<DeviceStates>;
 type ExitStatsBox = HeapBox<AllExitStats>;
+
+pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 16;
 
 /// Preallocated AMD guard workspace. Planning and permission restoration run
 /// with IRQs disabled and must neither allocate nor grow the kernel stack.
@@ -18,19 +25,19 @@ pub(crate) struct SvmGuardScratch {
     pub count: usize,
     pub root: u64,
     pub valid: bool,
-    pub code: [SvmCodeProof; 4],
+    pub code: [SvmCodeProof; SVM_CODE_PAGE_CAPACITY],
     pub code_count: usize,
     pub code_cursor: usize,
-    pub saved: [SvmGuardSaved; 132],
+    pub saved: [SvmGuardSaved; 128 + SVM_CODE_PAGE_CAPACITY],
     pub aliases: [SvmAliasWalk; 512],
     pub alias_proof: SvmAliasProof,
 }
 
 pub(crate) struct SvmAliasProof {
     pub valid: bool,
-    pub pages: [u64; 4],
-    pub offsets: [[u16; 4]; 4],
-    pub counts: [usize; 4],
+    pub pages: [u64; SVM_CODE_PAGE_CAPACITY],
+    pub offsets: [[u16; 4]; SVM_CODE_PAGE_CAPACITY],
+    pub counts: [usize; SVM_CODE_PAGE_CAPACITY],
     pub page_count: usize,
     pub breakpoints: [u64; 4],
     pub breakpoint_count: usize,
@@ -46,6 +53,8 @@ pub(crate) struct SvmAliasWalk {
 #[derive(Clone, Copy)]
 pub(crate) struct SvmCodeProof {
     pub page: u64,
+    pub boundary: [u8; 32],
+    pub edge: u16,
     pub offsets: [u16; 4],
     pub count: usize,
 }
@@ -53,8 +62,7 @@ pub(crate) struct SvmCodeProof {
 #[derive(Clone, Copy)]
 pub(crate) struct SvmGuardSaved {
     pub guest: u64,
-    pub host: u64,
-    pub permissions: u64,
+    pub write_guard: NptWriteGuard,
     pub valid: bool,
 }
 
@@ -62,7 +70,7 @@ pub(crate) struct SvmGuardSaved {
 fn box_svm_guard() -> VmallocBox<SvmGuardScratch> {
     extern crate alloc;
     let mut boxed = alloc::boxed::Box::<SvmGuardScratch>::new_uninit();
-    // SAFETY: integers and bools admit zero; there are no references or enums.
+    // SAFETY: integers, bools, and the integer-only write guards admit zero; there are no references or enums.
     unsafe {
         boxed.as_mut_ptr().write_bytes(0, 1);
         boxed.assume_init()
@@ -74,7 +82,7 @@ fn box_svm_guard() -> VmallocBox<SvmGuardScratch> {
     let mut boxed: kernel::alloc::KVBox<core::mem::MaybeUninit<SvmGuardScratch>> =
         kernel::alloc::KVBox::new_uninit(kernel::alloc::flags::GFP_KERNEL)
             .expect("Failed to allocate AMD guard workspace");
-    // SAFETY: integers and bools admit zero; there are no references or enums.
+    // SAFETY: integers, bools, and the integer-only write guards admit zero; there are no references or enums.
     unsafe {
         boxed.as_mut_ptr().write_bytes(0, 1);
         boxed.assume_init()
@@ -624,7 +632,8 @@ pub struct AllExitStats {
     pub other: ExitStats,
     /// Total cycles in VM run loop (including guest time).
     pub total_run_cycles: u64,
-    /// Total cycles in guest mode (actual VMX non-root execution).
+    /// Cycles in the VM runner, including its entry/exit wrapper but excluding
+    /// batch planning and permission restoration.
     pub guest_cycles: u64,
     /// Cycles spent in run loop setup before VM entry (VMCS updates, GPR sync).
     pub vmentry_overhead_cycles: u64,
@@ -826,7 +835,7 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     pub svm_rejected_pages: [u64; 64],
     pub svm_rejected_cursor: usize,
     /// Recent virtual code pages; immutable hazard scans live in `svm_guard`.
-    pub svm_recent_pages: [u64; 4],
+    pub svm_recent_pages: [u64; SVM_CODE_PAGE_CAPACITY],
     pub(crate) svm_guard: VmallocBox<SvmGuardScratch>,
     /// Emulated TSC: `last_instruction_count + tsc_offset`.
     pub emulated_tsc: u64,
@@ -1079,7 +1088,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
-            svm_recent_pages: [u64::MAX; 4],
+            svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
@@ -1856,7 +1865,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
-            svm_recent_pages: [u64::MAX; 4],
+            svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
@@ -2073,7 +2082,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
-            svm_recent_pages: [u64::MAX; 4],
+            svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
             svm_guard: box_svm_guard(),
             last_instruction_count: 0, // Child's counter starts from 0
             emulated_tsc: parent_state.emulated_tsc,

@@ -39,10 +39,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let first = linux_checkpoint(&args[1], &args[2], target)?;
         if repeat_checkpoint {
             let second = linux_checkpoint(&args[1], &args[2], target)?;
-            assert_eq!(
-                first, second,
-                "Fresh Linux checkpoints diverged at {target}"
-            );
+            assert_eq!(first.len(), second.len());
+            for (first, second) in first.iter().zip(&second) {
+                assert_eq!(
+                    first, second,
+                    "Fresh Linux checkpoints diverged at {}",
+                    first.tsc
+                );
+                println!("SVM_LINUX_FRESH_CHECKPOINT_MATCH tsc={}", first.tsc);
+            }
             println!("SVM_LINUX_FRESH_CHECKPOINT_PASS tsc={target}");
         }
         return Ok(());
@@ -1115,6 +1120,7 @@ fn test_data_translation_write() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct LinuxCheckpoint {
+    tsc: u64,
     memory_hash: u64,
     registers: [u64; 22],
 }
@@ -1123,11 +1129,24 @@ fn linux_checkpoint(
     kernel: &str,
     initrd: &str,
     target: u64,
-) -> Result<LinuxCheckpoint, Box<dyn std::error::Error>> {
-    let mut vm = VmBuilder::new()
-        .memory_mb(128)
-        .tsc_frequency(100_000_000)
-        .build()?;
+) -> Result<Vec<LinuxCheckpoint>, Box<dyn std::error::Error>> {
+    let interval = std::env::var("BEDROCK_CHECKPOINT_INTERVAL")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(target);
+    if interval == 0 || target == 0 {
+        return Err("Checkpoint target and interval must be nonzero".into());
+    }
+    let mut next = interval.min(target);
+    let mut checkpoints = Vec::new();
+    let mut builder = VmBuilder::new().memory_mb(128).tsc_frequency(100_000_000);
+    if let Ok(seed) = std::env::var("BEDROCK_CHECKPOINT_RNG_SEED") {
+        let seed = seed.parse()?;
+        builder = builder.rdrand(RdrandConfig::seeded_rng(seed));
+        println!("SVM_LINUX_CHECKPOINT_CONFIG rng_seed={seed} tsc_frequency=100000000");
+    }
+    let mut vm = builder.build()?;
     let kernel = std::fs::read(kernel)?;
     let initrd = std::fs::read(initrd)?;
     let (entry, end) = load_kernel(vm.memory_mut()?, &kernel)?;
@@ -1136,7 +1155,7 @@ fn linux_checkpoint(
             .cmdline("console=ttyS0 nopti nokaslr mitigations=off audit=0")
             .initramfs(&initrd),
     )?;
-    vm.set_stop_at_tsc(Some(target))?;
+    vm.set_stop_at_tsc(Some(next))?;
     let timeout = Duration::from_secs(
         std::env::var("BEDROCK_CHECKPOINT_TIMEOUT_SECONDS")
             .ok()
@@ -1154,7 +1173,7 @@ fn linux_checkpoint(
             continue;
         }
         assert_eq!(exit.exit_reason, 259, "unexpected Linux guest exit");
-        assert_eq!(exit.emulated_tsc, target);
+        assert_eq!(exit.emulated_tsc, next);
         let seconds = start.elapsed().as_secs_f64();
         let stats = vm.get_exit_stats()?;
         println!(
@@ -1167,7 +1186,7 @@ fn linux_checkpoint(
         let mut hash = DefaultHasher::new();
         hash.write(vm.memory()?);
         println!(
-            "SVM_LINUX_CHECKPOINT_PASS seconds={seconds:.6} memory_hash={:016x}",
+            "SVM_LINUX_CHECKPOINT_PASS tsc={next} seconds={seconds:.6} memory_hash={:016x}",
             hash.finish()
         );
         let r = vm.get_regs()?;
@@ -1201,9 +1220,15 @@ fn linux_checkpoint(
             r.control_regs.cr4.bits(),
         ];
         println!("REGISTERS {registers:x?}");
-        return Ok(LinuxCheckpoint {
+        checkpoints.push(LinuxCheckpoint {
+            tsc: next,
             memory_hash: hash.finish(),
             registers,
         });
+        if next == target {
+            return Ok(checkpoints);
+        }
+        next = next.saturating_add(interval).min(target);
+        vm.set_stop_at_tsc(Some(next))?;
     }
 }

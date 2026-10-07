@@ -355,6 +355,9 @@ where
             );
         }
         runner.set_instruction_batch(batch);
+        let pre_guest_tsc = rdtsc();
+        ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
+            pre_guest_tsc.saturating_sub(pre_entry_tsc);
         let state = ctx.state_mut();
         // SAFETY: Caller guarantees VMCS is properly configured and loaded,
         // interrupts are disabled, and preemption cannot migrate us.
@@ -363,6 +366,8 @@ where
         } else {
             unsafe { runner.run(&mut state.vmx_ctx, &state.vmcs) }
         };
+        let post_guest_tsc = rdtsc();
+        ctx.state_mut().exit_stats.guest_cycles += post_guest_tsc.saturating_sub(pre_guest_tsc);
         if let Some(guard) = guard {
             if guard.restore(ctx, allocator) && run_result.is_ok() {
                 // A store attempted to change this batch's code or address
@@ -387,7 +392,8 @@ where
         let _ = msr.write_msr(msr::IA32_KERNEL_GS_BASE, host_kernel_gs_base);
 
         let post_exit_tsc = rdtsc();
-        ctx.state_mut().exit_stats.guest_cycles += post_exit_tsc.saturating_sub(pre_entry_tsc);
+        ctx.state_mut().exit_stats.vmexit_overhead_cycles +=
+            post_exit_tsc.saturating_sub(post_guest_tsc);
 
         // Prior instructions must complete before RDPMC (SDM Vol 3A §10.3 fn 3).
         // LFENCE rather than CPUID, which exits to L0 under nested virt.

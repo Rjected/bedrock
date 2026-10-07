@@ -96,6 +96,7 @@ struct RootReplay {
 }
 
 fn run_linux(kernel: &[u8], initrd: &[u8]) -> Result<RootReplay, Box<dyn std::error::Error>> {
+    let start = Instant::now();
     let mut root = VmBuilder::new()
         .memory_mb(128)
         .tsc_frequency(100_000_000)
@@ -149,6 +150,12 @@ fn run_linux(kernel: &[u8], initrd: &[u8]) -> Result<RootReplay, Box<dyn std::er
     println!(
         "SVM_LINUX_FORK_REPLAY_PASS shutdown_tsc={} report={:02x?}",
         results[0].0, results[0].1
+    );
+    println!(
+        "SVM_LINUX_ROOT_PASS seconds={:.6} snapshot_tsc={} memory_hash={:016x}",
+        start.elapsed().as_secs_f64(),
+        snapshot_tsc,
+        parent_hash
     );
     Ok(RootReplay {
         snapshot_tsc,

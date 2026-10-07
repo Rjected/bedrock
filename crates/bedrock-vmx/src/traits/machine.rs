@@ -187,7 +187,7 @@ impl InstructionBatch {
 
     // Interrupt latency is not precise on AMD. Leave a conservative margin
     // for stepping, then fail closed if an interrupt still arrives too late.
-    pub const COUNTER_DEADLINE_MARGIN: u64 = 65536;
+    pub const COUNTER_DEADLINE_MARGIN: u64 = 4096;
 
     pub fn counter_period(&self) -> u64 {
         if self.counter_bounded {

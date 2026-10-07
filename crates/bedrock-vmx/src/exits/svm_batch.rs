@@ -4,12 +4,15 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
+use super::super::vm_state::SVM_CODE_PAGE_CAPACITY;
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 #[cfg(feature = "cargo")]
 use bedrock_ept::NptExecutionGuard;
+
+const _: () = assert!(SVM_CODE_PAGE_CAPACITY <= NptExecutionGuard::MAX_PAGES);
 
 /// Unknown instructions and control transfers terminate a batch. The flags
 /// distinguish memory access from stores, including implicit stack accesses.
@@ -720,6 +723,8 @@ fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
 
 #[derive(Clone, Copy)]
 struct PageHazards {
+    boundary: [u8; 32],
+    edge: u16,
     offsets: [u16; 4],
     count: usize,
 }
@@ -735,6 +740,8 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
         .find(|p| p.page == physical)
     {
         return Some(PageHazards {
+            boundary: proof.boundary,
+            edge: proof.edge,
             offsets: proof.offsets,
             count: proof.count,
         });
@@ -752,6 +759,8 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
     };
     cache.code[index] = super::super::vm_state::SvmCodeProof {
         page: physical,
+        boundary: hazards.boundary,
+        edge: hazards.edge,
         offsets: hazards.offsets,
         count: hazards.count,
     };
@@ -784,6 +793,8 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
     // the kernel stack. The carry covers every legal instruction prefix chain.
     const CHUNK: usize = 512;
     let mut result = PageHazards {
+        boundary: [0; 32],
+        edge: 0,
         offsets: [0; 4],
         count: 0,
     };
@@ -794,6 +805,9 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
             &mut bytes[16..],
         )
         .ok()?;
+        if offset == 0 {
+            result.boundary[..16].copy_from_slice(&bytes[16..32]);
+        }
         for index in 0..bytes.len() {
             let position = offset as i64 + index as i64 - 16;
             let byte = bytes[index];
@@ -836,14 +850,21 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
     }
     // Wrapping aliases and crossings to other permitted pages stay on the
     // conservative path. Interior hazards are covered at every prefix entry.
-    page_boundary_safe(ctx, physical, physical)?;
+    result.boundary[16..].copy_from_slice(&bytes[..16]);
+    result.edge = summarize_edge(&result.boundary);
+    if forbidden_page_bytes(&result.boundary[..16])
+        || forbidden_page_bytes(&result.boundary[16..])
+        || !hazard_boundary_safe(&result, &result)
+    {
+        return None;
+    }
     Some(result)
 }
 
 fn collect_page_breakpoints<C: VmContext>(
     ctx: &mut C,
     batch: &mut InstructionBatch,
-    hazards: &[PageHazards; 4],
+    hazards: &[PageHazards; SVM_CODE_PAGE_CAPACITY],
 ) -> Option<()> {
     batch.page_breakpoint_count = 0;
     if hazards[..batch.code_page_count]
@@ -853,15 +874,27 @@ fn collect_page_breakpoints<C: VmContext>(
         return Some(());
     }
     let proof = &ctx.state().svm_guard.alias_proof;
+    // Only hazardous pages require alias breakpoints. Their physical set is
+    // independent of the order and membership of ordinary selected code pages.
+    let hazard_pages = hazards[..batch.code_page_count]
+        .iter()
+        .filter(|h| h.count != 0)
+        .count();
     if ctx.state().svm_guard.valid
         && proof.valid
-        && proof.page_count == batch.code_page_count
-        && proof.pages[..proof.page_count] == batch.pages[..batch.code_page_count]
+        && proof.page_count == hazard_pages
         && hazards[..batch.code_page_count]
             .iter()
             .enumerate()
             .all(|(i, h)| {
-                proof.counts[i] == h.count && proof.offsets[i][..h.count] == h.offsets[..h.count]
+                h.count == 0
+                    || proof.pages[..proof.page_count]
+                        .iter()
+                        .position(|&page| page == batch.pages[i])
+                        .is_some_and(|slot| {
+                            proof.counts[slot] == h.count
+                                && proof.offsets[slot][..h.count] == h.offsets[..h.count]
+                        })
             })
     {
         batch.page_breakpoints = proof.breakpoints;
@@ -944,24 +977,64 @@ fn collect_page_breakpoints<C: VmContext>(
     }
     let proof = &mut ctx.state_mut().svm_guard.alias_proof;
     proof.valid = true;
-    proof.page_count = batch.code_page_count;
-    proof.pages[..batch.code_page_count].copy_from_slice(&batch.pages[..batch.code_page_count]);
+    proof.page_count = hazard_pages;
+    let mut slot = 0;
     for (i, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
-        proof.offsets[i] = hazard.offsets;
-        proof.counts[i] = hazard.count;
+        if hazard.count == 0 {
+            continue;
+        }
+        proof.pages[slot] = batch.pages[i];
+        proof.offsets[slot] = hazard.offsets;
+        proof.counts[slot] = hazard.count;
+        slot += 1;
     }
     proof.breakpoints = batch.page_breakpoints;
     proof.breakpoint_count = batch.page_breakpoint_count;
     Some(())
 }
 
-fn page_boundary_safe<C: VmContext>(ctx: &C, left: u64, right: u64) -> Option<()> {
-    let mut bytes = [0u8; 32];
-    ctx.read_guest_memory(GuestPhysAddr::new(left + 4080), &mut bytes[..16])
-        .ok()?;
-    ctx.read_guest_memory(GuestPhysAddr::new(right), &mut bytes[16..])
-        .ok()?;
-    (!forbidden_page_bytes(&bytes)).then_some(())
+fn edge_prefix(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0x40..=0x4f | 0xf2 | 0xf3
+    )
+}
+
+// Cache the first opcode after leading prefixes and the distance to the
+// nearest REP prefix in the trailing prefix chain. Fifteen means no usable
+// trailing REP or a leading chain too long to continue a legal instruction.
+fn summarize_edge(boundary: &[u8; 32]) -> u16 {
+    let leading = boundary[..16]
+        .iter()
+        .position(|&b| !edge_prefix(b))
+        .unwrap_or(15);
+    let mut trailing_rep = 15;
+    for (i, &byte) in boundary[16..].iter().rev().take(14).enumerate() {
+        if !edge_prefix(byte) {
+            break;
+        }
+        if matches!(byte, 0xf2 | 0xf3) {
+            trailing_rep = i + 1;
+            break;
+        }
+    }
+    (u16::from(boundary[leading]) << 8) | ((leading as u16) << 4) | trailing_rep as u16
+}
+
+fn hazard_boundary_safe(left: &PageHazards, right: &PageHazards) -> bool {
+    // Each half was scanned when its page proof was built. Only opcodes or
+    // REP prefix chains straddling the boundary need to be checked here.
+    let first = right.boundary[0];
+    let last = left.boundary[31];
+    if (last == 0x0f && first == 0x07)
+        || (left.boundary[30] == 0x0f && last == 0xc7 && first >= 0xf0)
+        || (last == 0x0f && first == 0xc7 && right.boundary[1] >= 0xf0)
+    {
+        return false;
+    }
+    let distance = left.edge & 15;
+    let leading = (right.edge >> 4) & 15;
+    !(distance + leading <= 14 && matches!((right.edge >> 8) as u8, 0xa4..=0xa7 | 0xaa..=0xaf))
 }
 
 // A counted MOV-store loop can use entry-time range validation when RDI
@@ -1140,9 +1213,11 @@ pub(crate) fn prepare<C: VmContext>(
     // Reuse hazard scans while the guard proves the bytes have not changed.
     // Alias proofs follow the guarded tree; cross-page bytes are checked anew.
     let mut hazards = [PageHazards {
+        boundary: [0; 32],
+        edge: 0,
         offsets: [0; 4],
         count: 0,
-    }; 4];
+    }; SVM_CODE_PAGE_CAPACITY];
     let v = &ctx.state().vmcs;
     let long = v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) != 0;
     if long
@@ -1196,7 +1271,7 @@ pub(crate) fn prepare<C: VmContext>(
         }
         let current = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
-        let mut updated = [u64::MAX; 4];
+        let mut updated = [u64::MAX; SVM_CODE_PAGE_CAPACITY];
         updated[0] = current;
         let mut next = 1;
         for linear in recent {
@@ -1207,7 +1282,9 @@ pub(crate) fn prepare<C: VmContext>(
                 updated[next] = linear;
                 next += 1;
             }
-            if batch.code_page_count == 4 || batch.page_count == batch.pages.len() {
+            if batch.code_page_count == SVM_CODE_PAGE_CAPACITY
+                || batch.page_count == batch.pages.len()
+            {
                 continue;
             }
             let Some(physical) = super::svm::physical(ctx, linear)
@@ -1225,11 +1302,29 @@ pub(crate) fn prepare<C: VmContext>(
                 continue;
             }
             let Some(hazard) = cached_page_hazards(ctx, physical) else {
+                // A failed optional scan is also unusable as a primary page.
+                // Remember it instead of rescanning its bytes on every plan.
+                // Rejection is conservative even if the guest later rewrites
+                // the page: only the acceleration opportunity is lost.
+                let state = ctx.state_mut();
+                state.svm_rejected_pages[state.svm_rejected_cursor] = physical;
+                state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
                 continue;
             };
-            if batch.pages[..batch.code_page_count].iter().any(|&page| {
-                page_boundary_safe(ctx, page, physical).is_none()
-                    || page_boundary_safe(ctx, physical, page).is_none()
+            // Each physical hazard needs at least one execution breakpoint.
+            // Do not enumerate the alias tree for a set already known to
+            // exceed the four hardware slots.
+            if hazards[..batch.code_page_count]
+                .iter()
+                .map(|h| h.count)
+                .sum::<usize>()
+                + hazard.count
+                > 4
+            {
+                continue;
+            }
+            if hazards[..batch.code_page_count].iter().any(|previous| {
+                !hazard_boundary_safe(previous, &hazard) || !hazard_boundary_safe(&hazard, previous)
             }) {
                 continue;
             }
@@ -1250,10 +1345,16 @@ pub(crate) fn prepare<C: VmContext>(
                 state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
                 return prepare_verified(ctx, can_loop, false, window);
             }
-            batch.pages.copy_within(
-                batch.code_page_count..batch.page_count,
-                batch.code_page_count - 1,
-            );
+            // Keep hazard-free pages when virtual aliases exhaust the slots.
+            // Removing them cannot reduce the number of needed breakpoints.
+            let remove = (1..batch.code_page_count)
+                .rev()
+                .find(|&index| hazards[index].count != 0)
+                .unwrap_or(batch.code_page_count - 1);
+            batch
+                .pages
+                .copy_within(remove + 1..batch.page_count, remove);
+            hazards.copy_within(remove + 1..batch.code_page_count, remove);
             batch.code_page_count -= 1;
             batch.page_count -= 1;
         }
@@ -1608,32 +1709,22 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
         ctx.state_mut().svm_guard.saved[index].valid = false;
         guard.saved_count = index + 1;
         let gpa = GuestPhysAddr::new(page);
-        let Some((host, permissions)) = ctx.state().ept.lookup(allocator, gpa) else {
-            guard.restore(ctx, allocator);
-            return None;
+        let write_guard = match ctx.state_mut().ept.restrict_write_4k(allocator, gpa) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => continue,
+            Err(_) => {
+                guard.restore(ctx, allocator);
+                return None;
+            }
         };
-        if permissions.bits() & 2 == 0 {
-            continue;
-        }
-        let read_only = EptPermissions::from_bits(permissions.bits() & !2);
-        if ctx
-            .state_mut()
-            .ept
-            .remap_4k(allocator, gpa, host, read_only, EptMemoryType::WriteBack)
-            .is_err()
-        {
-            guard.restore(ctx, allocator);
-            return None;
-        }
         ctx.state_mut().svm_guard.saved[index] = super::super::vm_state::SvmGuardSaved {
             guest: page,
-            host: host.as_u64(),
-            permissions: permissions.bits(),
+            write_guard,
             valid: true,
         };
     }
     if batch.page_execution {
-        let mut pages = [GuestPhysAddr::new(0); 4];
+        let mut pages = [GuestPhysAddr::new(0); SVM_CODE_PAGE_CAPACITY];
         for (target, &page) in pages.iter_mut().zip(&batch.pages[..batch.code_page_count]) {
             *target = GuestPhysAddr::new(page);
         }
@@ -1692,18 +1783,9 @@ impl BatchGuard {
             if !saved.valid {
                 continue;
             }
-            // Entries cannot disappear while the VM is stopped. Preserve the
-            // original COW permission rather than promoting a shared page.
-            ctx.state_mut()
-                .ept
-                .remap_4k(
-                    allocator,
-                    GuestPhysAddr::new(saved.guest),
-                    HostPhysAddr::new(saved.host),
-                    EptPermissions::from_bits(saved.permissions),
-                    EptMemoryType::WriteBack,
-                )
-                .expect("SVM batch mapping disappeared");
+            saved
+                .write_guard
+                .restore(&mut ctx.state_mut().ept, allocator);
         }
         // Exceptions are delivered by the common handler after accounting.
         // A trap may have advanced RIP, so stepping would lose the exception.
@@ -1967,8 +2049,98 @@ mod tests {
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare_verified(&ctx, true, true, &window).unwrap();
         assert!(batch.page_execution && batch.uses_counter);
-        ctx.state_mut().stop_at_tsc = Some(65536);
+        ctx.state_mut().stop_at_tsc = Some(InstructionBatch::COUNTER_DEADLINE_MARGIN);
         assert!(!prepare_verified(&ctx, true, true, &window).is_some_and(|b| b.page_execution));
+    }
+
+    #[test]
+    fn wide_page_sets_keep_the_four_breakpoint_limit() {
+        extern crate std;
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory.resize(0x40000, 0);
+        ctx.memory[0x10000..0x20000].fill(0x90);
+        for index in 0..SVM_CODE_PAGE_CAPACITY {
+            let virtual_page = (index + 1) * 4096;
+            let physical_page = 0x10000 + index * 4096;
+            ctx.memory[0x6000 + (index + 1) * 8..0x6008 + (index + 1) * 8]
+                .copy_from_slice(&(physical_page as u64 | 7).to_le_bytes());
+            ctx.state_mut().svm_recent_pages[index] = virtual_page as u64;
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert_eq!(batch.code_page_count, SVM_CODE_PAGE_CAPACITY);
+        assert_eq!(batch.page_breakpoint_count, 0);
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator,
+            bedrock_ept::PageTableFormat::AmdNpt,
+        )
+        .unwrap();
+        let mappings: std::vec::Vec<_> = batch.pages[..batch.page_count]
+            .iter()
+            .chain(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].iter())
+            .copied()
+            .collect();
+        for page in mappings {
+            ctx.state_mut()
+                .ept
+                .map_4k(
+                    &mut allocator,
+                    GuestPhysAddr::new(page),
+                    HostPhysAddr::new(page + 0x1000000),
+                    bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                    bedrock_ept::EptMemoryType::WriteBack,
+                )
+                .unwrap();
+        }
+        let guard = protect(&mut ctx, &allocator, &batch).unwrap();
+        guard.restore(&mut ctx, &allocator);
+        for index in 0..5 {
+            let address = 0x10100 + index * 4096;
+            ctx.memory[address..address + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.valid = false;
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert_eq!(batch.page_breakpoint_count, 4);
+        assert!(!batch.pages[..batch.code_page_count].contains(&0x14000));
+    }
+
+    #[test]
+    fn code_selection_keeps_safe_pages_when_hazards_exhaust_breakpoints() {
+        let mut ctx = paged_context(&[0x90]);
+        for page in [0x7000, 0x8000, 0x9000] {
+            ctx.memory[page + 0x100..page + 0x104].copy_from_slice(&[0x48, 0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_recent_pages[..4].copy_from_slice(&[0x7000, 0x8000, 0x9000, 0xa000]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert_eq!(batch.page_breakpoint_count, 4);
+        assert_eq!(batch.code_page_count, 4);
+        assert!(batch.pages[..batch.code_page_count].contains(&0xa000));
+        assert!(!batch.pages[..batch.code_page_count].contains(&0x9000));
+    }
+
+    #[test]
+    fn optional_pages_with_excess_hazards_are_rejected_between_plans() {
+        let mut ctx = paged_context(&[0x90]);
+        for offset in (0..80).step_by(16) {
+            ctx.memory[0x9000 + offset..0x9004 + offset].copy_from_slice(&[0x48, 0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_recent_pages[1] = 0x9000;
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(first.page_execution);
+        assert_eq!(first.code_page_count, 1);
+        assert!(ctx.state().svm_rejected_pages.contains(&0x9000));
+        let cursor = ctx.state().svm_rejected_cursor;
+        ctx.state_mut().svm_guard.valid = false;
+        let second = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(second.page_execution);
+        assert_eq!(second.code_page_count, 1);
+        assert_eq!(ctx.state().svm_rejected_cursor, cursor);
     }
 
     #[test]
@@ -2126,6 +2298,73 @@ mod tests {
             &batch.page_breakpoints[..batch.page_breakpoint_count],
             &[0x1100, 0x200100]
         );
+    }
+
+    #[test]
+    fn edge_summaries_match_the_byte_scanner_for_crossing_opcodes_and_prefixes() {
+        let check = |suffix: &[u8], prefix: &[u8]| {
+            let mut left = PageHazards {
+                boundary: [0x90; 32],
+                edge: 0,
+                offsets: [0; 4],
+                count: 0,
+            };
+            let mut right = left;
+            left.boundary[32 - suffix.len()..].copy_from_slice(suffix);
+            right.boundary[..prefix.len()].copy_from_slice(prefix);
+            // The fast comparison requires independently safe edge halves.
+            if forbidden_page_bytes(&left.boundary[16..])
+                || forbidden_page_bytes(&right.boundary[..16])
+            {
+                return;
+            }
+            left.edge = summarize_edge(&left.boundary);
+            right.edge = summarize_edge(&right.boundary);
+            let mut joined = [0; 32];
+            joined[..16].copy_from_slice(&left.boundary[16..]);
+            joined[16..].copy_from_slice(&right.boundary[..16]);
+            assert_eq!(
+                hazard_boundary_safe(&left, &right),
+                !forbidden_page_bytes(&joined),
+                "suffix={suffix:x?} prefix={prefix:x?}"
+            );
+        };
+        for byte in 0..=255u8 {
+            check(&[0x0f, 0xc7], &[byte]);
+            check(&[0x0f], &[0xc7, byte]);
+            check(&[0x0f], &[byte]);
+            for left_prefixes in 0..14 {
+                for right_prefixes in 0..15 {
+                    let mut suffix = [0x66; 14];
+                    suffix[0] = 0xf3;
+                    let mut prefix = [0x48; 16];
+                    prefix[right_prefixes] = byte;
+                    check(&suffix[..left_prefixes + 1], &prefix[..right_prefixes + 1]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alias_proofs_ignore_safe_code_pages_and_selection_order() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().svm_recent_pages[..2].copy_from_slice(&[0x7000, 0x8000]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(first.page_breakpoint_count, 1);
+        assert_eq!(ctx.state().svm_guard.alias_proof.page_count, 1);
+        // The traversal scratch is not proof state. A cache hit must not
+        // restart it, even when the harmless selected pages and order change.
+        ctx.state_mut().svm_guard.aliases[0].table = 0;
+        ctx.set_guest_rip(0x7000);
+        ctx.state_mut().svm_recent_pages[..2].copy_from_slice(&[0x1000, 0x9000]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let second = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(second.page_breakpoint_count, 1);
+        assert_eq!(second.page_breakpoints[0], 0x1100);
+        assert!(second.pages[..second.code_page_count].contains(&0x9000));
+        assert_eq!(ctx.state().svm_guard.aliases[0].table, 0);
     }
 
     #[test]

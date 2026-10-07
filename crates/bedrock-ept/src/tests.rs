@@ -11,6 +11,44 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::collections::HashMap;
 
 #[test]
+fn npt_execution_guard_covers_sixteen_pages_and_restores_permissions() {
+    use crate::traits::GuestPhysAddr;
+    let mut allocator = TestAllocator::new();
+    let mut ept =
+        EptPageTable::new_with_format(&mut allocator, crate::PageTableFormat::AmdNpt).unwrap();
+    for index in 1..=17 {
+        ept.map_4k(
+            &mut allocator,
+            GuestPhysAddr::new(index * 4096),
+            HostPhysAddr::new(0x100000 + index * 4096),
+            EptPermissions::READ_WRITE_EXECUTE,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    }
+    let pages = core::array::from_fn::<_, 16, _>(|i| GuestPhysAddr::new((i as u64 + 1) * 4096));
+    let guard = ept.restrict_execution_to_pages(&allocator, &pages).unwrap();
+    for index in 1..=17 {
+        let permissions = ept
+            .lookup(&allocator, GuestPhysAddr::new(index * 4096))
+            .unwrap()
+            .1
+            .bits();
+        assert_eq!(permissions & 4 != 0, index <= 16);
+        assert_eq!(permissions & 2 != 0, index == 17);
+    }
+    guard.restore(&mut ept, &allocator);
+    for index in 1..=17 {
+        assert_eq!(
+            ept.lookup(&allocator, GuestPhysAddr::new(index * 4096))
+                .unwrap()
+                .1,
+            EptPermissions::READ_WRITE_EXECUTE
+        );
+    }
+}
+
+#[test]
 fn npt_permissions_root_and_cow_use_amd_encodings() {
     use crate::PageTableFormat;
     let mut allocator = TestAllocator::new();
@@ -479,12 +517,169 @@ fn page_execution_guard_blocks_other_subtrees_and_restores_cow_and_nx() {
 }
 
 #[test]
+fn direct_write_guards_preserve_cow_execute_restrictions_and_accessed_dirty_bits() {
+    use crate::traits::GuestPhysAddr;
+    use crate::PageTableFormat;
+    let mut allocator = TestAllocator::new();
+    let mut ept = EptPageTable::new_with_format(&mut allocator, PageTableFormat::AmdNpt).unwrap();
+    for (guest, permissions) in [
+        (0x1000, EptPermissions::READ_WRITE_EXECUTE),
+        (0x2000, EptPermissions::READ_EXECUTE),
+        (0x3000, EptPermissions::from_bits(3)),
+    ] {
+        ept.map_4k(
+            &mut allocator,
+            GuestPhysAddr::new(guest),
+            HostPhysAddr::new(guest + 0x8000),
+            permissions,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    }
+    assert!(ept
+        .restrict_write_4k(&allocator, GuestPhysAddr::new(0x2000))
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        ept.restrict_write_4k(&allocator, GuestPhysAddr::new(0x4000)),
+        Err(EptRemapError::NotMapped)
+    ));
+    let write = ept
+        .restrict_write_4k(&allocator, GuestPhysAddr::new(0x1000))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x1000))
+            .unwrap()
+            .1
+            .bits(),
+        5
+    );
+    // Simulate the hardware updating A/D while the leaf is write-protected.
+    let mut table = HostPhysAddr::new(ept.eptp());
+    for _ in 0..3 {
+        let entry = unsafe { *allocator.phys_to_virt(table).cast::<EptEntry>() };
+        table = entry.addr();
+    }
+    let leaf = unsafe { allocator.phys_to_virt(table).cast::<u64>().add(1) };
+    unsafe { *leaf |= (1 << 5) | (1 << 6) };
+    let before = unsafe { *leaf };
+    let execute = ept
+        .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x1000))
+        .unwrap();
+    execute.restore(&mut ept, &allocator);
+    assert_eq!(unsafe { *leaf }, before);
+    write.restore(&mut ept, &allocator);
+    assert_eq!(unsafe { *leaf }, before | 2);
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x2000))
+            .unwrap()
+            .1
+            .bits(),
+        5
+    );
+    let write = ept
+        .restrict_write_4k(&allocator, GuestPhysAddr::new(0x3000))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x3000))
+            .unwrap()
+            .1
+            .bits(),
+        1
+    );
+    write.restore(&mut ept, &allocator);
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x3000))
+            .unwrap()
+            .1
+            .bits(),
+        3
+    );
+}
+
+#[test]
+fn execution_masks_refresh_after_mapping_and_execute_permission_changes() {
+    use crate::traits::GuestPhysAddr;
+    use crate::PageTableFormat;
+    let mut allocator = TestAllocator::new();
+    let mut ept = EptPageTable::new_with_format(&mut allocator, PageTableFormat::AmdNpt).unwrap();
+    ept.map_4k(
+        &mut allocator,
+        GuestPhysAddr::new(0x1000),
+        HostPhysAddr::new(0x9000),
+        EptPermissions::READ_WRITE_EXECUTE,
+        EptMemoryType::WriteBack,
+    )
+    .unwrap();
+    let guard = ept
+        .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x1000))
+        .unwrap();
+    guard.restore(&mut ept, &allocator);
+    // A newly executable leaf in a previously cached table must be blocked.
+    ept.map_4k(
+        &mut allocator,
+        GuestPhysAddr::new(0x2000),
+        HostPhysAddr::new(0xa000),
+        EptPermissions::READ_WRITE_EXECUTE,
+        EptMemoryType::WriteBack,
+    )
+    .unwrap();
+    for permissions in [
+        EptPermissions::READ_WRITE_EXECUTE,
+        EptPermissions::from_bits(3),
+        EptPermissions::READ_EXECUTE,
+        EptPermissions::READ_WRITE_EXECUTE,
+    ] {
+        ept.remap_4k(
+            &allocator,
+            GuestPhysAddr::new(0x2000),
+            HostPhysAddr::new(0xb000),
+            permissions,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+        let before = ept.lookup(&allocator, GuestPhysAddr::new(0x2000));
+        for _ in 0..2 {
+            let guard = ept
+                .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x1000))
+                .unwrap();
+            assert_eq!(
+                ept.lookup(&allocator, GuestPhysAddr::new(0x2000))
+                    .unwrap()
+                    .1
+                    .bits()
+                    & 4,
+                0
+            );
+            guard.restore(&mut ept, &allocator);
+            assert_eq!(ept.lookup(&allocator, GuestPhysAddr::new(0x2000)), before);
+        }
+    }
+}
+
+#[test]
 fn multiple_code_pages_remain_executable_and_restore_all_permissions() {
     use crate::traits::GuestPhysAddr;
     use crate::PageTableFormat;
     let mut allocator = TestAllocator::new();
     let mut ept = EptPageTable::new_with_format(&mut allocator, PageTableFormat::AmdNpt).unwrap();
-    let addresses = [0x1000, 0x2000, 1 << 21, 2 << 21, 3 << 21, 1 << 30, 1 << 39];
+    let addresses = [
+        0x1000,
+        0x2000,
+        1 << 21,
+        2 << 21,
+        3 << 21,
+        1 << 30,
+        1 << 39,
+        2 << 39,
+        3 << 39,
+        4 << 39,
+        5 << 39,
+        6 << 39,
+        7 << 39,
+    ];
     for (index, &address) in addresses.iter().enumerate() {
         ept.map_4k(
             &mut allocator,
@@ -525,10 +720,20 @@ fn multiple_code_pages_remain_executable_and_restore_all_permissions() {
             before[index]
         );
     }
-    // Four distant paths exceed the bounded table union. Failure is atomic.
-    let distant = [0x1000, 1 << 21, 1 << 30, 1 << 39].map(GuestPhysAddr::new);
+    // An unmapped final path fails before mutation and returns the workspace.
+    let invalid = [
+        0x1000,
+        1 << 39,
+        2 << 39,
+        3 << 39,
+        4 << 39,
+        5 << 39,
+        6 << 39,
+        8 << 39,
+    ]
+    .map(GuestPhysAddr::new);
     assert!(ept
-        .restrict_execution_to_pages(&allocator, &distant)
+        .restrict_execution_to_pages(&allocator, &invalid)
         .is_none());
     for (index, &address) in addresses.iter().enumerate() {
         assert_eq!(
@@ -536,4 +741,20 @@ fn multiple_code_pages_remain_executable_and_restore_all_permissions() {
             before[index]
         );
     }
+    // The workspace remains usable, including distant valid translations.
+    let distant = [
+        0x1000,
+        1 << 39,
+        2 << 39,
+        3 << 39,
+        4 << 39,
+        5 << 39,
+        6 << 39,
+        7 << 39,
+    ]
+    .map(GuestPhysAddr::new);
+    let guard = ept
+        .restrict_execution_to_pages(&allocator, &distant)
+        .unwrap();
+    guard.restore(&mut ept, &allocator);
 }

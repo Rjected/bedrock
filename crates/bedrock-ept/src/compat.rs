@@ -8,6 +8,11 @@ mod cargo_impl {
     extern crate alloc;
 
     pub type EptVec<T> = alloc::vec::Vec<T>;
+    pub type EptBox<T> = alloc::boxed::Box<T>;
+
+    pub fn ept_box_uninit<T>() -> Option<EptBox<core::mem::MaybeUninit<T>>> {
+        Some(alloc::boxed::Box::<T>::new_uninit())
+    }
 
     pub fn ept_vec_init<T>(val: T) -> EptVec<T> {
         alloc::vec![val]
@@ -27,6 +32,11 @@ mod kernel_impl {
     use kernel::alloc::{allocator::KVmalloc, flags::GFP_KERNEL, Vec};
 
     pub type EptVec<T> = Vec<T, KVmalloc>;
+    pub type EptBox<T> = kernel::alloc::KVBox<T>;
+
+    pub fn ept_box_uninit<T>() -> Option<EptBox<core::mem::MaybeUninit<T>>> {
+        kernel::alloc::KVBox::new_uninit(GFP_KERNEL).ok()
+    }
 
     pub fn ept_vec_init<T>(val: T) -> EptVec<T> {
         let mut v = Vec::new();
