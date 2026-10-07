@@ -27,19 +27,33 @@ fn test_mov_ss_deadline() -> Result<(), Box<dyn std::error::Error>> {
         &[0x41, 0x66, 0x8e, 0xd0][..], // Legacy prefix cancels REX.
         &[0x8e, 0xd4][..],             // SP comes from the VMCB, not the GPR save area.
     ] {
-        test_mov_ss_register_deadline(instruction)?;
+        test_mov_ss_register_deadline(instruction, None, 0x00cf93000000ffff)?;
+        test_mov_ss_register_deadline(instruction, Some(0x1c), 0x00cf93000000ffff)?;
+        test_mov_ss_register_deadline(instruction, Some(4), 0x00cf93000000ffff)?;
+        test_mov_ss_register_deadline(instruction, Some(0x1c), 0x124a97345678bcde)?;
     }
     println!("SVM_MOV_SS_DEADLINE_PASS");
     Ok(())
 }
 
-fn test_mov_ss_register_deadline(instruction: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn test_mov_ss_register_deadline(
+    instruction: &[u8],
+    local_selector: Option<u16>,
+    descriptor: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = Vm::create(2 * 1024 * 1024)?;
     let memory = vm.memory_mut()?;
     for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
         memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
     }
-    memory[0x9018..0x9020].copy_from_slice(&0x00cf93000000ffffu64.to_le_bytes());
+    let table_base = if local_selector.is_some() {
+        0xa000
+    } else {
+        0x9000
+    };
+    let selector = u64::from(local_selector.unwrap_or(0x18));
+    let offset = (selector & !7) as usize;
+    memory[table_base + offset..table_base + offset + 8].copy_from_slice(&descriptor.to_le_bytes());
     let next_rip = 0x1000 + instruction.len();
     memory[0x1000..next_rip].copy_from_slice(instruction);
     memory[next_rip..next_rip + 6].copy_from_slice(&[0x90, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
@@ -47,10 +61,13 @@ fn test_mov_ss_register_deadline(instruction: &[u8]) -> Result<(), Box<dyn std::
     regs.control_regs.cr3 = Cr3::new(0x3000);
     regs.descriptor_tables.gdtr = Gdtr::new(0x9000, 0x1f);
     regs.rip = 0x1000;
-    regs.gprs.rax = 0x18;
-    regs.gprs.r8 = 0x18;
+    if local_selector.is_some() {
+        regs.segment_regs.ldtr = SegmentRegister::new(0x20, 0x82, 0x1f, 0xa000);
+    }
+    regs.gprs.rax = selector;
+    regs.gprs.r8 = selector;
     regs.gprs.rsp = if instruction == [0x8e, 0xd4] {
-        0x18
+        selector
     } else {
         0x8000
     };
@@ -68,7 +85,16 @@ fn test_mov_ss_register_deadline(instruction: &[u8]) -> Result<(), Box<dyn std::
             stopped.rip, next_rip as u64,
             "MOV SS deadline crossed the following instruction"
         );
-        assert_eq!(stopped.segment_regs.ss.selector.bits(), 0x18);
+        assert_eq!(stopped.segment_regs.ss.selector.bits(), selector as u16);
+        let bytes = descriptor.to_le_bytes();
+        let expected_base = u64::from(u16::from_le_bytes([bytes[2], bytes[3]]))
+            | (u64::from(bytes[4]) << 16)
+            | (u64::from(bytes[7]) << 24);
+        assert_eq!(stopped.segment_regs.ss.base, expected_base);
+        assert_eq!(
+            stopped.segment_regs.ss.access_rights.bits(),
+            u32::from(bytes[5]) | (u32::from(bytes[6] & 0xf0) << 8)
+        );
         vm.set_stop_at_tsc(Some(2))?;
         loop {
             let exit = vm.run()?;

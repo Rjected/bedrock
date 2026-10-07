@@ -156,7 +156,7 @@ fn prepare_random_exit_with_window<C: VmContext>(
     Ok(true)
 }
 
-/// Load an already-accessed GDT stack descriptor without using TF. Hardware
+/// Load an already-accessed GDT or LDT stack descriptor without using TF. Hardware
 /// suppresses the trap for MOV SS and would also retire the next instruction.
 /// Other operand/descriptor forms still require equivalent software handling.
 fn prepare_mov_ss_register<C: VmContext>(
@@ -180,19 +180,32 @@ fn prepare_mov_ss_register<C: VmContext>(
         (u64::from(selector) << 4, 0xffff, 0x93)
     } else {
         // Let hardware deliver invalid-selector faults before retirement.
-        // Null selectors, LDT descriptors, and unaccessed descriptors need
+        // Null selectors and unaccessed descriptors need
         // separate handling; do not manufacture cached segment state for them.
         let cpl = (v.read32(VmcsField32::GuestCsAccessRights)? >> 5) & 3;
-        if selector & 4 != 0 || selector & !7 == 0 || u32::from(selector & 3) != cpl {
+        if selector & !3 == 0 || u32::from(selector & 3) != cpl {
             return Ok(false);
         }
+        let (table_base, table_limit) = if selector & 4 != 0 {
+            let attributes = v.read32(VmcsField32::GuestLdtrAccessRights)?;
+            if attributes & 0x1009f != 0x82 {
+                return Ok(false);
+            }
+            (
+                v.read_natural(VmcsFieldNatural::GuestLdtrBase)?,
+                v.read32(VmcsField32::GuestLdtrLimit)?,
+            )
+        } else {
+            (
+                v.read_natural(VmcsFieldNatural::GuestGdtrBase)?,
+                v.read32(VmcsField32::GuestGdtrLimit)?,
+            )
+        };
         let offset = u64::from(selector & !7);
-        if offset + 7 > u64::from(v.read32(VmcsField32::GuestGdtrLimit)?) {
+        if offset + 7 > u64::from(table_limit) {
             return Ok(false);
         }
-        let address = v
-            .read_natural(VmcsFieldNatural::GuestGdtrBase)?
-            .wrapping_add(offset);
+        let address = table_base.wrapping_add(offset);
         let mut descriptor = [0u8; 8];
         for (i, byte) in descriptor.iter_mut().enumerate() {
             let Ok(address) = physical(ctx, address.wrapping_add(i as u64)) else {
@@ -205,7 +218,7 @@ fn prepare_mov_ss_register<C: VmContext>(
                 return Ok(false);
             }
         }
-        if descriptor[5] & 0x9f != 0x93 || u32::from((descriptor[5] >> 5) & 3) != cpl {
+        if descriptor[5] & 0x9b != 0x93 || u32::from((descriptor[5] >> 5) & 3) != cpl {
             return Ok(false);
         }
         let base = u64::from(u16::from_le_bytes([descriptor[2], descriptor[3]]))
@@ -584,6 +597,62 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn mov_ss_uses_cached_ldt_and_expand_down_descriptor() {
+        let mut ctx = context();
+        ctx.state_mut().gprs.rax = 0x1c;
+        ctx.set_guest_rflags(0x202);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr0, 1);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestLdtrBase, 0x9000);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestLdtrLimit, 0x1f);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestLdtrAccessRights, 0x82);
+        // Base 0x12345678, byte limit 0xabcde, present expand-down data.
+        ctx.memory[0x9018..0x9020]
+            .copy_from_slice(&[0xde, 0xbc, 0x78, 0x56, 0x34, 0x97, 0x4a, 0x12]);
+        assert!(prepare_mov_ss_register(&ctx, 0xd0, 0, 2).unwrap());
+        assert_eq!(
+            ctx.state()
+                .vmcs
+                .read_natural(VmcsFieldNatural::GuestSsBase)
+                .unwrap(),
+            0x12345678
+        );
+        assert_eq!(
+            ctx.state().vmcs.read32(VmcsField32::GuestSsLimit).unwrap(),
+            0xabcde
+        );
+        assert_eq!(
+            ctx.state()
+                .vmcs
+                .read32(VmcsField32::GuestSsAccessRights)
+                .unwrap(),
+            0x4097
+        );
+        // LDT index zero is valid; only GDT index zero is a null selector.
+        ctx.set_guest_rip(0x1000);
+        ctx.state_mut().gprs.rax = 4;
+        ctx.memory[0x9000..0x9008].copy_from_slice(&0x00cf93000000ffffu64.to_le_bytes());
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestLdtrAccessRights, 0xe2);
+        assert!(prepare_mov_ss_register(&ctx, 0xd0, 0, 2).unwrap());
+        assert_eq!(
+            ctx.state()
+                .vmcs
+                .read16(VmcsField16::GuestSsSelector)
+                .unwrap(),
+            4
+        );
+        ctx.set_guest_rip(0x1000);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestLdtrAccessRights, 1 << 16);
+        assert!(!prepare_mov_ss_register(&ctx, 0xd0, 0, 2).unwrap());
+        assert_eq!(ctx.get_guest_rip(), Some(0x1000));
     }
 
     #[test]
