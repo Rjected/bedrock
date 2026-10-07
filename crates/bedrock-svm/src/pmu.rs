@@ -12,6 +12,7 @@ pub struct PmcEntry {
     idt_limit: u64,
     entry_rip: u64,
     entry_rf: bool,
+    period: u64,
 }
 
 impl PmcEntry {
@@ -44,6 +45,7 @@ impl PmcEntry {
             idt_limit: v.read(o::IDTR + 4, 4),
             entry_rip: v.read(o::RIP, 8),
             entry_rf: v.read(o::RFLAGS, 8) & (1 << 16) != 0,
+            period,
         };
         v.write(o::VIRT_EXT, 8, saved.virt_ext | (1 << 3));
         v.write(
@@ -83,6 +85,21 @@ impl PmcEntry {
     pub fn finish(self, v: &mut Vmcb) -> Option<u64> {
         let raw = v.read(o::INSTR_RETIRED_CTR, 8);
         let code = v.read(o::EXIT_CODE, 8);
+        // An ordinary exit can occasionally save IRPERF one tick behind the
+        // programmable retired-instruction counter. The latter has the same
+        // VMRUN tick on this host. Correct only a single-tick disagreement
+        // before overflow; after overflow the counter may be reloaded and
+        // cannot independently establish the number of guest retirements.
+        let pmc_start = 0u64.wrapping_sub(self.period) & ((1 << 48) - 1);
+        let pmc_elapsed = v.read(o::PERF_CTR0, 8).wrapping_sub(pmc_start) & ((1 << 48) - 1);
+        let raw = if v.read(o::PERF_GLOBAL_STATUS, 8) & 1 == 0
+            && pmc_elapsed < self.period
+            && pmc_elapsed == raw.saturating_add(1)
+        {
+            raw.saturating_add(1)
+        } else {
+            raw
+        };
         let overflow_nmi = code == 0x4d
             && v.read(o::EXIT_INT_INFO, 4) & 0x800007ff == 0x80000202
             && v.read(o::PERF_GLOBAL_STATUS, 8) & 1 != 0;
@@ -239,6 +256,26 @@ mod tests {
                 v.write(o::RIP, 8, rip);
                 assert_eq!(entry.finish(&mut v), expected);
             }
+        }
+    }
+
+    #[test]
+    fn cross_checks_a_missing_irperf_tick_only_before_overflow() {
+        for (raw, pmc_ticks, status, expected) in [
+            (16, 16, 0, Some(15)),
+            (15, 16, 0, Some(15)),
+            (15, 17, 0, Some(14)),
+            (15, 16, 1, Some(14)),
+        ] {
+            let mut v = Vmcb::new();
+            v.initialize();
+            let entry = PmcEntry::prepare(&mut v, 1000).unwrap();
+            let start = v.read(o::PERF_CTR0, 8);
+            v.write(o::PERF_CTR0, 8, start + pmc_ticks);
+            v.write(o::INSTR_RETIRED_CTR, 8, raw);
+            v.write(o::PERF_GLOBAL_STATUS, 8, status);
+            v.write(o::EXIT_CODE, 8, 0x72);
+            assert_eq!(entry.finish(&mut v), expected);
         }
     }
 }

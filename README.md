@@ -248,25 +248,20 @@ It also diverged with the former 4,096-instruction margin and with whole-page
 execution disabled. A separate trial that kept only whole-page counter batches
 also diverged. Disabling every counter-backed batch, while retaining
 exact-breakpoint batches, matched 256 replays; all-scalar execution did too.
-Counter-backed instruction accounting remains an unresolved correctness issue
-in both batch forms. A trial retaining only counter-bounded batches, which stop
-before PMC overflow, matched 256 replays. On the validation host, 392 of the
-first 1,000 PMC overflows exited for another reason before NMI delivery; all
-had V_NMI_PENDING set, and most were nested-page faults. The guest IRPERF and
-programmable counters agreed at those exits. Adding one instruction to their
-count failed on the first replay, so the overflow race needs a more precise
-accounting fix.
-The forked 8.0–8.1-million replay also exposes a native REP interaction:
-the published backend diverged in a 10,000-instruction checkpoint test,
-whereas disabling native REP batches matched 1,024 replays. Rejecting only
-REP batches shorter than 16 iterations or only deadline-truncated batches
-still diverged. A copy-on-write nested-page fault precedes one `REP MOVSL`
-in each child, but pre-copying its destination pages before native execution
-also diverged. Guest IRPERF reports one retirement for a native three-iteration
-REP batch, so it cannot replace RCX-delta accounting. A direct REP completion
-test now compares a stepped child against a native child, including final
-clocks and registers, and checks parent-memory isolation; it passes. The intermittent Linux mismatch
-remains unresolved, and native REP stays enabled pending a precise fix.
+The one-instruction replay mismatch was traced to a counted guarded batch,
+before a `REP MOVSL` made the error visible. In a failing CPUID loop iteration,
+the programmable retired-instruction counter advanced 16 ticks but guest
+IRPERF advanced only 15, with no overflow status. Both normally advance 16;
+the backend subtracts the common VMRUN tick to report 15 guest instructions.
+The PMU path now corrects a single-tick disagreement only before overflow.
+It matches 2,048 per-exit replays from 8 to 8.02 million instructions,
+1,024 checkpoint replays from 8 to 8.1 million, and 64 checkpoint replays
+from 100 to 101 million. A complete Linux boot and its two forked children
+also pass at 21.90 seconds and 2.73 million exits on the validation host.
+These runs cover the reproduced discrepancy, not every possible PMU exit.
+Native REP continues to use RCX-delta accounting: guest IRPERF reports one
+retirement for a native three-iteration REP batch. A direct REP completion
+test compares a stepped child against a native child and passes.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
