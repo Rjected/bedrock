@@ -141,18 +141,22 @@ pub(crate) unsafe fn run(
         ctx.guest_rcx = repeat.iterations;
     }
     let breakpoint = if let Some(batch) = batch {
-        v.write(o::DR7, 8, 0x401); // DR0 local execution breakpoint.
-        v.write(o::DR6, 8, original_dr6 & !0x400f);
-        batch.endpoint() + v.read(o::CS + 8, 8)
+        if batch.endpoint_intercepted {
+            0 // The endpoint itself exits through an unconditional SVM intercept.
+        } else {
+            v.write(o::DR7, 8, 0x401); // DR0 local execution breakpoint.
+            v.write(o::DR6, 8, original_dr6 & !0x400f);
+            batch.endpoint() + v.read(o::CS + 8, 8)
+        }
     } else {
         v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) | (1 << 8));
         0
     };
     let host_pa = unsafe { c_helpers::bedrock_svm_host_vmcb() };
     let mut before = 0;
-    let counting = batch.is_some_and(|b| b.looping);
-    let pmu_ready = if let Some(batch) = batch.filter(|b| b.looping) {
-        (unsafe { c_helpers::bedrock_svm_pmu_arm(batch.loop_period(), &mut before) }) == 0
+    let counting = batch.is_some_and(|b| b.uses_counter);
+    let pmu_ready = if let Some(batch) = batch.filter(|b| b.uses_counter) {
+        (unsafe { c_helpers::bedrock_svm_pmu_arm(batch.counter_period(), &mut before) }) == 0
     } else {
         false
     };
@@ -267,10 +271,17 @@ pub(crate) unsafe fn run(
     let batch_stop = batch.is_some_and(|b| {
         code == 0x41 && v.read(o::DR6, 8) & 1 != 0 && v.read(o::RIP, 8) == b.endpoint()
     });
+    // Replay the endpoint intercept on the next entry, as with an execution
+    // breakpoint. Timer/deadline handling must run before that instruction's
+    // emulation can change guest registers or produce device output.
+    let natural_stop = batch.is_some_and(|b| {
+        b.endpoint_intercepted && v.read(o::RIP, 8) == b.endpoint()
+            && !matches!(code, 0x60 | 0x61 | 0x52)
+    });
     let completed = if let Some(batch) = batch {
         v.write(o::DR7, 8, original_dr7);
         v.write(o::DR6, 8, original_dr6);
-        if batch_stop {
+        if batch_stop || natural_stop {
             v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) & !(1 << 16));
         }
         if let Some(repeat) = batch.repeat {
@@ -287,17 +298,12 @@ pub(crate) unsafe fn run(
                 v.write(o::RIP, 8, batch.start);
             }
             completed
-        } else if batch.looping {
+        } else if batch.uses_counter {
             if !pmu_ready || batch.completed_at(v.read(o::RIP, 8)).is_none() {
                 kernel::pr_err!("SVM PMU invalid boundary: ready={} before={} after={} rip={:#x} code={:#x} batch={:?}\n", pmu_ready, before, after, v.read(o::RIP,8), code, batch);
                 return Err(VmEntryError::VmEntryFailed);
             }
-            // Conditional branches exclude interrupt and VMRUN activity that
-            // AMD's retired-instruction event includes. The verified control
-            // flow converts branch ticks plus RIP into exact instruction work.
-            let count = after
-                .checked_sub(before)
-                .and_then(|n| batch.loop_instructions(n, v.read(o::RIP, 8)))
+            let count = exits::retired_instructions(before, after, code)
                 .ok_or(VmEntryError::VmEntryFailed)?;
             if count > batch.instruction_budget {
                 kernel::pr_err!(
@@ -328,13 +334,15 @@ pub(crate) unsafe fn run(
         8,
         (v.read(o::RFLAGS, 8) & !(1 << 8)) | original_tf,
     );
+    let target_stop = batch.is_some_and(|b| completed == b.instruction_budget)
+        && matches!(code, 0x41 | 0x60 | 0x61);
     let e = exits::decode(
-        code,
+        if natural_stop || target_stop { 0x41 } else { code },
         v.read(o::EXIT_INFO1, 8),
         v.read(o::EXIT_INFO2, 8),
         v.read(o::RIP, 8),
         v.read(o::NEXT_RIP, 8),
-        stepped || batch_stop,
+        stepped || batch_stop || natural_stop || target_stop,
     )
     .map_err(|e| {
         kernel::pr_err!(

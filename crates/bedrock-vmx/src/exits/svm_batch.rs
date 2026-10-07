@@ -192,6 +192,35 @@ fn repeat_len(bytes: &[u8]) -> Option<usize> {
     }
 }
 
+fn relative_branch(bytes: &[u8], long: bool, default32: bool) -> Option<(usize, i64)> {
+    let first = *bytes.first()?;
+    if matches!(first, 0x70..=0x7f | 0xeb) {
+        return Some((2, i64::from(*bytes.get(1)? as i8)));
+    }
+    let opcode_length = if first == 0xe9 {
+        1
+    } else if first == 0x0f && matches!(*bytes.get(1)?, 0x80..=0x8f) {
+        2
+    } else {
+        return None;
+    };
+    let width = if long || default32 { 4 } else { 2 };
+    let displacement = bytes.get(opcode_length..opcode_length + width)?;
+    let displacement = if width == 4 {
+        i64::from(i32::from_le_bytes(displacement.try_into().ok()?))
+    } else {
+        i64::from(i16::from_le_bytes(displacement.try_into().ok()?))
+    };
+    Some((opcode_length + width, displacement))
+}
+
+fn endpoint_intercepted(bytes: &[u8]) -> bool {
+    matches!(
+        bytes,
+        [0xf4, ..] | [0x0f, 0xa2 | 0x31, ..] | [0x0f, 0x01, 0xd9 | 0xf9, ..]
+    )
+}
+
 fn opcode_start(bytes: &[u8], long: bool) -> Option<(usize, u8, bool)> {
     let mut p = 0;
     let mut rex = 0;
@@ -523,8 +552,8 @@ pub(crate) fn prepare<C: VmContext>(
         accesses_memory: false,
         writes_memory: false,
         validated_stores: false,
-        looping: false,
-        loop_start: 0,
+        uses_counter: false,
+        endpoint_intercepted: false,
         instruction_budget: budget,
     };
     batch.pages[0] = physical.as_u64() & !4095;
@@ -550,6 +579,9 @@ pub(crate) fn prepare<C: VmContext>(
     let mut changed = 0u16;
     let mut stores = StorePlan::default();
     let mut offset = 0;
+    let mut branch_targets = [0u16; 64];
+    let mut branch_count = 0;
+    let mut first_branch = 0;
     if long {
         if let Some(length) = repeat_len(&bytes[..available]) {
             let original_count = state.gprs.rcx;
@@ -567,31 +599,32 @@ pub(crate) fn prepare<C: VmContext>(
         }
     }
     while batch.repeat.is_none() && batch.count < limit.min(64) {
-        // One backward conditional branch stays entirely inside the verified
-        // region. Its fall-through is the execution breakpoint. PMIs bound
-        // execution, then TF handles the margin before a deterministic stop.
+        // Relative transfers may only enter decoded boundaries or the
+        // endpoint. The retired-instruction counter accounts for their paths.
         if can_loop
-            && budget >= InstructionBatch::LOOP_DEADLINE_MARGIN
-            && batch.count != 0
+            && budget >= InstructionBatch::COUNTER_DEADLINE_MARGIN
             && !(paged && batch.writes_memory)
         {
             let tail = &bytes[offset..available];
-            if let [opcode @ 0x70..=0x7f, displacement, ..] = tail {
-                let end = offset + 2;
-                let target = end as i64 + i64::from(*displacement as i8);
-                if target >= 0
-                    && target < offset as i64
-                    && batch.offsets[..batch.count].contains(&(target as u16))
-                {
-                    batch.count += 1;
-                    batch.offsets[batch.count] = end as u16;
-                    batch.looping = true;
-                    batch.loop_start = batch.offsets[..batch.count - 1]
-                        .iter()
-                        .position(|&p| p == target as u16)?;
+            if let Some((length, displacement)) = relative_branch(tail, long, default32) {
+                let end = offset + length;
+                let target = end as i64 + displacement;
+                if target < 0 || target > available as i64 {
                     break;
                 }
-                let _ = opcode;
+                if branch_count == 0 {
+                    first_branch = batch.count;
+                }
+                branch_targets[branch_count] = target as u16;
+                branch_count += 1;
+                offset = end;
+                batch.count += 1;
+                batch.offsets[batch.count] = end as u16;
+                batch.uses_counter = true;
+                if offset == available {
+                    break;
+                }
+                continue;
             }
         }
         let Some((length, memory, writes)) = safe_len(&bytes[offset..available], long, default32)
@@ -599,7 +632,7 @@ pub(crate) fn prepare<C: VmContext>(
             break;
         };
         if paged && writes {
-            if !long {
+            if !long || batch.uses_counter {
                 break;
             }
             let instruction = &bytes[offset..offset + length];
@@ -623,6 +656,16 @@ pub(crate) fn prepare<C: VmContext>(
         if offset == available {
             break;
         }
+    }
+    if batch.uses_counter
+        && branch_targets[..branch_count]
+            .iter()
+            .any(|target| !batch.offsets[..=batch.count].contains(target))
+    {
+        // An unknown instruction or boundary ends verification. Keep the
+        // straight-line prefix before the first transfer as an ordinary batch.
+        batch.count = first_branch;
+        batch.uses_counter = false;
     }
     if batch.repeat.is_none() && batch.count < 2 {
         return None;
@@ -699,6 +742,8 @@ pub(crate) fn prepare<C: VmContext>(
             page = page.checked_add(4096)?;
         }
     }
+    batch.endpoint_intercepted =
+        endpoint_intercepted(&bytes[batch.offsets[batch.count] as usize..available]);
     Some(batch)
 }
 
@@ -780,6 +825,30 @@ mod tests {
     use super::*;
     use crate::tests::MockVmContext;
 
+    #[test]
+    fn naturally_trapped_endpoints_exclude_bitmap_dependent_msrs_and_rng() {
+        for instruction in [
+            &[0xf4][..],
+            &[0x0f, 0xa2],
+            &[0x0f, 0x31],
+            &[0x0f, 0x01, 0xf9],
+            &[0x0f, 0x01, 0xd9],
+        ] {
+            assert!(endpoint_intercepted(instruction));
+        }
+        for instruction in [
+            &[0x0f, 0x30][..],
+            &[0x0f, 0x32],
+            &[0x0f, 0xc7, 0xf0],
+            &[0xc3],
+            &[0x90],
+            &[0x0f],
+            &[],
+        ] {
+            assert!(!endpoint_intercepted(instruction));
+        }
+    }
+
     fn paged_context(code: &[u8]) -> MockVmContext {
         let mut ctx = MockVmContext::new();
         ctx.set_guest_rip(0x1000);
@@ -823,7 +892,7 @@ mod tests {
         let ctx = paged_context(&[0x48, 0x83, 0xc7, 8, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
         assert!(planned(&ctx).is_none());
         let ctx = paged_context(&[0x48, 0x89, 0x07, 0x48, 0x89, 0x47, 8, 0x75, 0xf7]);
-        assert!(!planned(&ctx).unwrap().looping);
+        assert!(!planned(&ctx).unwrap().uses_counter);
     }
 
     #[test]
@@ -842,6 +911,80 @@ mod tests {
         let b = planned(&ctx).unwrap();
         assert_eq!(b.count, 2); // First store and NOP, stopping before the redirected store.
         assert!(b.validated_stores);
+    }
+
+    #[test]
+    fn counter_regions_accept_multiple_branches_only_to_decoded_boundaries() {
+        let ctx = paged_context(&[0x90, 0x74, 3, 0x90, 0xeb, 0xfa, 0x90, 0x0f, 0xc7, 0xf0]);
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter);
+        assert_eq!(&b.offsets[..=b.count], &[0, 1, 3, 4, 6, 7]);
+        let ctx = paged_context(&[0x90, 0x90, 0x74, 1, 0x48, 0x89, 0xc0, 0x0f, 0xc7, 0xf0]);
+        let b = planned(&ctx).unwrap();
+        assert!(!b.uses_counter);
+        assert_eq!(b.count, 2); // Target enters the middle of MOV.
+        let ctx = paged_context(&[0x90, 0x90, 0xeb, 0x7f, 0x0f, 0xc7, 0xf0]);
+        let b = planned(&ctx).unwrap();
+        assert!(!b.uses_counter);
+        assert_eq!(b.count, 2);
+        let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
+        assert!(!planned(&ctx).unwrap().uses_counter); // Paged stores need straight-line addresses.
+    }
+
+    #[test]
+    fn relative_branch_lengths_and_targets_match_independent_decoder() {
+        use iced_x86::{Decoder, DecoderOptions, FlowControl};
+        for bitness in [16, 32, 64] {
+            for displacement in -128i8..=127 {
+                for opcode in (0x70..=0x7f).chain([0xeb]) {
+                    let bytes = [opcode, displacement as u8];
+                    let (length, relative) =
+                        relative_branch(&bytes, bitness == 64, bitness == 32).unwrap();
+                    let instruction = Decoder::new(bitness, &bytes, DecoderOptions::NONE).decode();
+                    assert_eq!(length, instruction.len());
+                    let mask = if bitness == 16 {
+                        0xffff
+                    } else if bitness == 32 {
+                        0xffff_ffff
+                    } else {
+                        u64::MAX
+                    };
+                    assert_eq!(
+                        (length as i64 + relative) as u64 & mask,
+                        instruction.near_branch_target()
+                    );
+                    assert!(matches!(
+                        instruction.flow_control(),
+                        FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
+                    ));
+                }
+            }
+            for displacement in [i32::MIN, -256, -1, 0, 256, i32::MAX] {
+                for opcode in [&[0xe9][..], &[0x0f, 0x85][..]] {
+                    let mut bytes = opcode.to_vec();
+                    if bitness == 16 {
+                        bytes.extend((displacement as i16).to_le_bytes());
+                    } else {
+                        bytes.extend(displacement.to_le_bytes());
+                    }
+                    let (length, relative) =
+                        relative_branch(&bytes, bitness == 64, bitness == 32).unwrap();
+                    let instruction = Decoder::new(bitness, &bytes, DecoderOptions::NONE).decode();
+                    assert_eq!(length, instruction.len());
+                    let mask = if bitness == 16 {
+                        0xffff
+                    } else if bitness == 32 {
+                        0xffff_ffff
+                    } else {
+                        u64::MAX
+                    };
+                    assert_eq!(
+                        (length as i64 + relative) as u64 & mask,
+                        instruction.near_branch_target()
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn accepted_encodings_match_independent_decoder() {
@@ -991,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_counter_accounts_for_prefix_partial_iteration_and_fallthrough() {
+    fn counter_period_leaves_a_deadline_margin() {
         let mut batch = InstructionBatch {
             start: 0x1000,
             offsets: [0; 65],
@@ -1002,23 +1145,16 @@ mod tests {
             accesses_memory: false,
             writes_memory: false,
             validated_stores: false,
-            looping: true,
-            loop_start: 1,
+            uses_counter: true,
+            endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };
         batch.offsets[..5].copy_from_slice(&[0, 3, 4, 5, 7]);
-        assert_eq!(batch.loop_period(), 1 << 30);
-        batch.instruction_budget = InstructionBatch::LOOP_DEADLINE_MARGIN + 301;
-        assert_eq!(batch.loop_period(), 100);
-        batch.instruction_budget = InstructionBatch::LOOP_DEADLINE_MARGIN;
-        assert_eq!(batch.loop_period(), 1);
-        assert_eq!(batch.loop_instructions(0, 0x1000), Some(0));
-        assert_eq!(batch.loop_instructions(0, 0x1005), Some(3));
-        assert_eq!(batch.loop_instructions(10, 0x1004), Some(32));
-        assert_eq!(batch.loop_instructions(10, 0x1007), Some(31));
-        assert_eq!(batch.loop_instructions(0, 0x1007), None);
-        assert_eq!(batch.loop_instructions(1, 0x1002), None);
-        assert_eq!(batch.loop_instructions(u64::MAX, 0x1007), None);
+        assert_eq!(batch.counter_period(), 1 << 30);
+        batch.instruction_budget = InstructionBatch::COUNTER_DEADLINE_MARGIN + 301;
+        assert_eq!(batch.counter_period(), 301);
+        batch.instruction_budget = InstructionBatch::COUNTER_DEADLINE_MARGIN;
+        assert_eq!(batch.counter_period(), 1);
     }
     #[test]
     fn stops_before_randomness_flags_memory_and_control_flow() {
@@ -1068,8 +1204,8 @@ mod tests {
             accesses_memory: false,
             writes_memory: false,
             validated_stores: false,
-            looping: false,
-            loop_start: 0,
+            uses_counter: false,
+            endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };
         b.offsets[1] = 3;

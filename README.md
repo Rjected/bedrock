@@ -56,17 +56,22 @@ testing.
 The AMD backend implements SVM entry/exit, VMCB state, nested page tables,
 and MSR/I/O intercept bitmaps. The common device, randomness and fork logic is
 shared with the Intel backend. AMD execution batches verified straight-line
-instructions and bounded REP stores, and uses a perf-owned retired-conditional-
-branch counter for verified loops. Code and translation guards prevent a batch
+instructions and bounded REP stores, and uses a perf-owned retired-instruction
+counter for verified regions containing conditional branches and relative jumps.
+SVM entry and physical NMI ticks are removed from that count; REP iterations
+use RCX accounting. Code and translation guards prevent a batch
 from modifying the instructions it has decoded. Long-mode MOV stores and PUSH
 can join a batch when their address registers retain their entry values and
 their destinations cannot rewrite the code or subsequent store translations.
 Unsupported instructions and other stores fall back to instruction stepping.
 Loop acceleration requires AMD PerfMonV2; counter allocation failure disables it.
+Regions ending at an unconditional SVM intercept omit the execution breakpoint,
+then replay that intercept after timer and deadline handling at the boundary.
 
 This is partial acceleration, not an equivalent of Intel's PEBS execution path.
 Linux still spends substantial time in the stepping fallback. Near-native
-execution, with roughly 5% overhead as the target, has not been demonstrated.
+execution of general Linux workloads, with roughly 5% overhead as the target,
+has not been demonstrated.
 PMI skid can exceed the deadline margin; such a run fails instead of returning
 an incorrect instruction count.
 
@@ -87,10 +92,13 @@ sudo timeout 10 target/release/examples/svm_smoke
 sudo timeout 10 target/release/examples/svm_transitions
 sudo timeout 15 target/release/examples/svm_bench
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
+sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native-branches
 ```
 
 The `native` comparison runs the same register-only loop natively and in a
-long-mode guest three times, and reports median overhead. It measures the
+long-mode guest nine times, with matching code alignment, and reports median
+wall and thread CPU time. `native-branches` uses a loop with varying instruction
+counts on its two paths. These comparisons measure the
 verified loop path; it does not represent Linux or general guest workloads.
 
 The Linux integration example uses a userspace snapshot, then compares two

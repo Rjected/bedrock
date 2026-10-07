@@ -10,7 +10,10 @@ use std::time::Instant;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && args[1] == "native" {
-        return native_loop_comparison();
+        return native_loop_comparison(false);
+    }
+    if args.len() == 2 && args[1] == "native-branches" {
+        return native_loop_comparison(true);
     }
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
@@ -19,13 +22,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return linux_checkpoint(&args[1], &args[2]);
     }
     if args.len() != 1 {
-        return Err("Usage: svm_bench [native | stores | VMLINUX INITRD]".into());
+        return Err("Usage: svm_bench [native | native-branches | stores | VMLINUX INITRD]".into());
     }
     test_repeat()?;
     test_paged_stores()?;
     test_self_modifying()?;
     test_debug_registers()?;
     test_hardware_loop()?;
+    test_hardware_control_flow()?;
+    test_endpoint_deadline()?;
     const LOOPS: u16 = 4096;
     const EXPECTED: u64 = 1 + LOOPS as u64 * 66 + 1;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
@@ -74,17 +79,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // The same register-only loop executes natively and in a long-mode guest.
 // This measures verified-loop throughput, not Linux or general guest overhead.
-fn native_loop_comparison() -> Result<(), Box<dyn std::error::Error>> {
+fn native_loop_comparison(branched: bool) -> Result<(), Box<dyn std::error::Error>> {
     const ITERATIONS: u64 = 10_000_000;
+    const SAMPLES: usize = 9;
     let mut native_times = Vec::new();
     let mut guest_times = Vec::new();
-    for _ in 0..3 {
+    let mut native_cpu_times = Vec::new();
+    let mut guest_cpu_times = Vec::new();
+    for _ in 0..SAMPLES {
         let mut vm = Vm::create(2 * 1024 * 1024)?;
         for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
             vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
         }
-        let mut code = vec![0x90; 32];
-        code.extend([0x48, 0xff, 0xc9, 0x75, 0xdb]); // dec rcx; jnz start
+        let mut code = if branched {
+            let mut code = vec![0xf6, 0xc1, 1, 0x74, 8]; // test cl,1; jz skip
+            code.extend([0x90; 16]);
+            code.extend([0x48, 0xff, 0xc9, 0x75, 0xe6]);
+            code
+        } else {
+            let mut code = vec![0x90; 32];
+            code.extend([0x48, 0xff, 0xc9, 0x75, 0xdb]);
+            code
+        };
         code.extend([0x31, 0xc0, 0x0f, 0x01, 0xd9]);
         vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
         let mut regs = Regs::long_mode();
@@ -93,17 +109,29 @@ fn native_loop_comparison() -> Result<(), Box<dyn std::error::Error>> {
         regs.gprs.rcx = ITERATIONS;
         regs.gprs.rsp = 0x8000;
         vm.set_regs(&regs)?;
+        let cpu_start = thread_cpu_seconds()?;
         let start = Instant::now();
         // SAFETY: No memory or stack accesses; RCX and flags are declared
         // clobbered. The loop terminates after ITERATIONS decrements.
         unsafe {
-            core::arch::asm!(
-                ".p2align 4", "2:", ".rept 32", "nop", ".endr",
-                "dec rcx", "jnz 2b",
-                inout("rcx") ITERATIONS => _, options(nomem, nostack)
-            );
+            if branched {
+                core::arch::asm!(
+                ".p2align 6", "2:", "test cl,1", "jz 3f",
+                    ".rept 8", "nop", ".endr", "3:",
+                    ".rept 8", "nop", ".endr", "dec rcx", "jnz 2b",
+                    inout("rcx") ITERATIONS => _, options(nomem, nostack)
+                );
+            } else {
+                core::arch::asm!(
+                ".p2align 6", "2:", ".rept 32", "nop", ".endr",
+                    "dec rcx", "jnz 2b",
+                    inout("rcx") ITERATIONS => _, options(nomem, nostack)
+                );
+            }
         }
         native_times.push(start.elapsed().as_secs_f64());
+        native_cpu_times.push(thread_cpu_seconds()? - cpu_start);
+        let cpu_start = thread_cpu_seconds()?;
         let start = Instant::now();
         loop {
             let exit = vm.run()?;
@@ -111,20 +139,145 @@ fn native_loop_comparison() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             assert_eq!(exit.exit_reason, 258);
-            assert_eq!(exit.emulated_tsc, ITERATIONS * 34 + 1);
+            assert_eq!(
+                exit.emulated_tsc,
+                ITERATIONS * if branched { 16 } else { 34 } + 1
+            );
             assert_eq!(vm.get_regs()?.gprs.rcx, 0);
             break;
         }
         guest_times.push(start.elapsed().as_secs_f64());
+        guest_cpu_times.push(thread_cpu_seconds()? - cpu_start);
     }
     println!("SVM_NATIVE_LOOP_SAMPLES native={native_times:?} guest={guest_times:?}");
+    println!("SVM_NATIVE_LOOP_CPU_SAMPLES native={native_cpu_times:?} guest={guest_cpu_times:?}");
+    let mut paired_cpu_overheads: Vec<_> = native_cpu_times
+        .iter()
+        .zip(&guest_cpu_times)
+        .map(|(native, guest)| (guest / native - 1.0) * 100.0)
+        .collect();
+    paired_cpu_overheads.sort_by(f64::total_cmp);
     native_times.sort_by(f64::total_cmp);
     guest_times.sort_by(f64::total_cmp);
+    native_cpu_times.sort_by(f64::total_cmp);
+    guest_cpu_times.sort_by(f64::total_cmp);
     println!(
-        "SVM_NATIVE_LOOP_PASS instructions={} native_seconds={:.6} guest_seconds={:.6} overhead_percent={:.2}",
-        ITERATIONS * 34, native_times[1], guest_times[1],
-        (guest_times[1] / native_times[1] - 1.0) * 100.0
+        "SVM_NATIVE_LOOP_PASS branched={branched} instructions={} native_seconds={:.6} guest_seconds={:.6} overhead_percent={:.2}",
+        ITERATIONS * if branched { 16 } else { 34 }, native_times[SAMPLES / 2], guest_times[SAMPLES / 2],
+        (guest_times[SAMPLES / 2] / native_times[SAMPLES / 2] - 1.0) * 100.0
     );
+    println!("SVM_NATIVE_LOOP_CPU branched={branched} native_seconds={:.6} guest_seconds={:.6} median_pair_overhead_percent={:.2}",
+        native_cpu_times[SAMPLES / 2], guest_cpu_times[SAMPLES / 2], paired_cpu_overheads[SAMPLES / 2]);
+    Ok(())
+}
+
+fn thread_cpu_seconds() -> Result<f64, std::io::Error> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `time` is a writable timespec, and this clock needs no privileges.
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(time.tv_sec as f64 + time.tv_nsec as f64 * 1e-9)
+}
+
+fn test_hardware_control_flow() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let code = [
+        0xb9, 0x60, 0xea, 0xf6, 0xc1, 1, 0x74, 1, 0x90, 0x90, 0x49, 0x75, 0xf6, 0x66, 0x31, 0xc0,
+        0x0f, 0x01, 0xd9,
+    ];
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::real_mode();
+    regs.segment_regs.cs = SegmentRegister::new(0, 0x9b, 0xffff, 0);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(200_000))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259);
+        assert_eq!(exit.emulated_tsc, 200_000);
+        let r = vm.get_regs()?;
+        assert_eq!(r.rip, 0x1009);
+        assert_eq!(r.gprs.rcx & 0xffff, 23637);
+        break;
+    }
+    vm.set_stop_at_tsc(None)?;
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let child = vm.fork()?;
+        child.set_stop_at_tsc(Some(300_000))?;
+        loop {
+            let exit = child.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 259);
+            assert_eq!(exit.emulated_tsc, 300_000);
+            let r = child.get_regs()?;
+            assert_eq!(r.rip, 0x1008);
+            assert_eq!(r.gprs.rcx & 0xffff, 5455);
+            break;
+        }
+        child.set_stop_at_tsc(None)?;
+        loop {
+            let exit = child.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, 330_002);
+            let r = child.get_regs()?;
+            assert_eq!(r.gprs.rcx & 0xffff, 0);
+            assert_eq!(r.rflags & ((1 << 8) | (1 << 16)), 0);
+            results.push((r.rip, r.rflags, r.gprs.rax, r.gprs.rcx));
+            break;
+        }
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(vm.get_regs()?.gprs.rcx & 0xffff, 23637);
+    println!("SVM_CONTROL_FLOW_DEADLINE_FORK_PASS");
+    Ok(())
+}
+
+fn test_endpoint_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.memory_mut()?[0x1000..0x1005].copy_from_slice(&[0x90, 0x90, 0x0f, 0x01, 0xd9]);
+    let mut regs = Regs::real_mode();
+    regs.segment_regs.cs = SegmentRegister::new(0, 0x9b, 0xffff, 0);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rax = 1; // Snapshot must not happen before the precise stop.
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(2))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259);
+        assert_eq!(exit.emulated_tsc, 2);
+        assert_eq!(vm.get_regs()?.rip, 0x1002);
+        break;
+    }
+    vm.set_stop_at_tsc(None)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 260);
+        assert_eq!(exit.emulated_tsc, 2);
+        assert_eq!(vm.get_regs()?.rip, 0x1005);
+        break;
+    }
+    println!("SVM_INTERCEPT_ENDPOINT_DEADLINE_PASS");
     Ok(())
 }
 

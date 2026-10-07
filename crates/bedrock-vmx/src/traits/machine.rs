@@ -33,7 +33,7 @@ pub enum VmEntryError {
     VmEntryFailed,
 }
 
-/// Boundaries of a straight-line sequence, stopped before its endpoint.
+/// Boundaries of a verified instruction region, stopped before its endpoint.
 /// Memory-accessing batches protect code against writes. Store batches also
 /// protect translations, or validate the destination ranges before entry.
 #[derive(Clone, Copy, Debug)]
@@ -47,8 +47,8 @@ pub struct InstructionBatch {
     pub accesses_memory: bool,
     pub writes_memory: bool,
     pub validated_stores: bool,
-    pub looping: bool,
-    pub loop_start: usize,
+    pub uses_counter: bool,
+    pub endpoint_intercepted: bool,
     pub instruction_budget: u64,
 }
 
@@ -61,15 +61,11 @@ pub struct RepeatBatch {
 impl InstructionBatch {
     // Interrupt latency is not precise on AMD. Leave a conservative margin
     // for stepping, then fail closed if an interrupt still arrives too late.
-    pub const LOOP_DEADLINE_MARGIN: u64 = 65536;
+    pub const COUNTER_DEADLINE_MARGIN: u64 = 65536;
 
-    pub fn loop_period(&self) -> u64 {
-        let length = (self.count - self.loop_start) as u64;
-        (self
-            .instruction_budget
-            .saturating_sub(Self::LOOP_DEADLINE_MARGIN)
-            .saturating_sub(self.loop_start as u64)
-            / length)
+    pub fn counter_period(&self) -> u64 {
+        self.instruction_budget
+            .saturating_sub(Self::COUNTER_DEADLINE_MARGIN)
             .clamp(1, 1 << 30)
     }
 
@@ -84,22 +80,6 @@ impl InstructionBatch {
     pub fn endpoint(&self) -> u64 {
         self.start + u64::from(self.offsets[self.count])
     }
-
-    /// A verified region has one backward conditional branch and no other
-    /// transfers. Its branch counter and exit boundary determine exact work.
-    pub fn loop_instructions(&self, branches: u64, rip: u64) -> Option<u64> {
-        let index = self.completed_at(rip)?;
-        let length = (self.count - self.loop_start) as u64;
-        let partial = if index == self.count as u64 {
-            if branches == 0 {
-                return None;
-            }
-            self.loop_start as u64
-        } else {
-            index
-        };
-        branches.checked_mul(length)?.checked_add(partial)
-    }
 }
 
 /// Low-level VM entry (assembly), separated from the run loop for testability.
@@ -113,7 +93,8 @@ pub trait VmRunner {
     }
 
     /// Exact count captured by a software-counted backend, including exits
-    /// before a batch's endpoint. None for hardware PMU accounting.
+    /// before a batch's endpoint. None when the instruction-counter object
+    /// already reads its hardware accounting directly.
     fn completed_instructions(&self) -> Option<u64> {
         None
     }

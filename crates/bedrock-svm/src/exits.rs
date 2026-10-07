@@ -20,6 +20,15 @@ pub enum DecodeError {
     MissingCrDecode,
 }
 
+/// GuestOnly retired-instruction accounting includes VMRUN and the physical
+/// NMI transition. Intercepted ordinary IRQs/faults do not retire a guest
+/// instruction. REP iteration accounting must use RCX instead of this event.
+pub fn retired_instructions(before: u64, after: u64, code: u64) -> Option<u64> {
+    after
+        .checked_sub(before)?
+        .checked_sub(1 + u64::from(code == 0x61))
+}
+
 pub fn decode(
     code: u64,
     info1: u64,
@@ -188,6 +197,17 @@ pub fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retired_counter_removes_entry_and_physical_nmi_ticks() {
+        for code in [0x41, 0x60, 0x400, 0x4e, 0x72, 0x81] {
+            assert_eq!(retired_instructions(100, 111, code), Some(10));
+            assert_eq!(retired_instructions(100, 101, code), Some(0));
+        }
+        assert_eq!(retired_instructions(100, 112, 0x61), Some(10));
+        assert_eq!(retired_instructions(100, 102, 0x61), Some(0));
+        assert_eq!(retired_instructions(100, 101, 0x61), None);
+        assert_eq!(retired_instructions(100, 99, 0x41), None);
+    }
     #[test]
     fn io_decode_preserves_direction_size_port_and_string_flags() {
         let e = decode(

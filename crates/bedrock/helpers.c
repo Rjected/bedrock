@@ -84,7 +84,7 @@ int bedrock_svm_pmu_init(void)
     struct perf_event_attr attr = {
         .type = PERF_TYPE_RAW,
         .size = sizeof(attr),
-        .config = 0xd1, /* Retired conditional branches, excluding host IRQ work. */
+        .config = 0xc0, /* Retired instructions; SVM entry/NMI ticks are removed. */
         .pinned = 1,
         .exclude_host = 1, /* AMD GuestOnly, including guest CPL0 and CPL3. */
     };
