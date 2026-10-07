@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_self_modifying()?;
     test_guarded_code_and_translation_writes()?;
     test_page_rng_breakpoints()?;
+    test_page_fetch_rng()?;
     test_data_translation_write()?;
     test_debug_registers()?;
     test_hardware_loop()?;
@@ -1004,6 +1005,54 @@ fn test_page_rng_breakpoints() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("SVM_PAGE_RNG_BREAKPOINTS_PASS");
+    Ok(())
+}
+
+fn test_page_fetch_rng() -> Result<(), Box<dyn std::error::Error>> {
+    // Cover both a new instruction page and an instruction split across the
+    // guard boundary. The latter must retain unrestricted scalar replay.
+    for (target, branch) in [(0x2000usize, false), (0x1ffe, false), (0x2000, true)] {
+        let mut vm = Vm::create(2 * 1024 * 1024)?;
+        vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+        for (address, entry) in [(0x3000, 0x4027u64), (0x4000, 0x5027), (0x5000, 0xe7)] {
+            vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        vm.memory_mut()?[0x1000..0x2000].fill(0x90);
+        vm.memory_mut()?[0x1000] = 0xe9;
+        vm.memory_mut()?[0x1001..0x1005].copy_from_slice(&((target - 0x1005) as i32).to_le_bytes());
+        let random = if branch { 0x2040 } else { target };
+        if branch {
+            vm.memory_mut()?[target..target + 5].copy_from_slice(&[0xe9, 0x3b, 0, 0, 0]);
+        }
+        vm.memory_mut()?[random..random + 12].copy_from_slice(&[
+            0x48, 0x0f, 0xc7, 0xf0, // rdrand rax
+            0x48, 0x89, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9,
+        ]);
+        let mut regs = Regs::long_mode();
+        regs.control_regs.cr3 = Cr3::new(0x3000);
+        regs.rip = 0x1000;
+        regs.gprs.rsp = 0x8000;
+        vm.set_regs(&regs)?;
+        let mut random_exits = 0;
+        loop {
+            let exit = vm.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            if exit.exit_reason == 57 {
+                assert_eq!(exit.emulated_tsc, if branch { 2 } else { 1 });
+                random_exits += 1;
+                vm.set_rdrand_value(0x1234)?;
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, if branch { 4 } else { 3 });
+            assert_eq!(vm.get_regs()?.gprs.rbx, 0x1234);
+            assert_eq!(random_exits, 1);
+            break;
+        }
+    }
+    println!("SVM_PAGE_FETCH_RNG_PASS");
     Ok(())
 }
 

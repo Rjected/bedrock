@@ -178,6 +178,10 @@ mod counted_loop_tests {
 }
 
 impl InstructionBatch {
+    /// Private qualification on an AMD synthetic MTF exit: an NPT fetch
+    /// guard stopped execution before entering another immutable code page.
+    pub(crate) const PAGE_FETCH_BOUNDARY: u64 = 1 << 63;
+
     // Interrupt latency is not precise on AMD. Leave a conservative margin
     // for stepping, then fail closed if an interrupt still arrives too late.
     pub const COUNTER_DEADLINE_MARGIN: u64 = 65536;

@@ -8,7 +8,7 @@ use super::svm_core::{
     exits, fields,
     vmcb::{offset as o, Vmcb},
 };
-use super::vmx::{VmEntryError, VmxContext};
+use super::vmx::{InstructionBatch, VmEntryError, VmxContext};
 use core::arch::asm;
 
 pub(crate) struct Counters;
@@ -257,8 +257,18 @@ pub(crate) unsafe fn run(
         }
         // Replay an intercept or a guarded unsafe entry after accounting and
         // timers. Guest debug state was restored above before exposing it.
-        let e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
+        let mut e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
             .map_err(|_| VmEntryError::VmEntryFailed)?;
+        if code == 0x400 && v.read(o::EXIT_INFO1, 8) & 0x13 == 0x11
+            && v.read(o::EXIT_INFO2, 8) & 4095 == v.read(o::RIP, 8) & 4095
+            && !batch.pages[..batch.code_page_count].contains(&(v.read(o::EXIT_INFO2, 8) & !4095)) {
+            // A present, non-writing fetch hit the temporary NX guard. No
+            // Only a fetch at the instruction start can replan directly: a
+            // split instruction still needs unrestricted scalar execution.
+            // No instruction retired on the new page; fresh planning validates
+            // its contents and translations before the next hardware entry.
+            e.qualification = InstructionBatch::PAGE_FETCH_BOUNDARY;
+        }
         fields::record_exit(v, &e);
         return Ok(count);
     }

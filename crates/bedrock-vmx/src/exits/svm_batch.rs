@@ -1455,6 +1455,18 @@ impl BatchGuard {
         }
         let v = &ctx.state().vmcs;
         let delivered_exception = matches!(v.read32(VmcsField32::VmExitReason).ok(), Some(0 | 514));
+        let fetch_boundary = v.read32(VmcsField32::VmExitReason).ok() == Some(37)
+            && v.read_natural(VmcsFieldNatural::ExitQualification).ok()
+                == Some(InstructionBatch::PAGE_FETCH_BOUNDARY)
+            && super::svm::InstructionWindow::read(ctx)
+                .ok()
+                .is_some_and(|window| {
+                    // Entry stores often need scalar replay for A/D or table
+                    // writes anyway. Replanning first only adds another guard.
+                    matches!(window.bytes[0], 0xc3 | 0xe9 | 0xeb)
+                        || safe_len(&window.bytes, true, false)
+                            .is_some_and(|(_, _, writes)| !writes)
+                });
         let write_fault = v.read32(VmcsField32::VmExitReason).ok() == Some(48)
             && v.read_natural(VmcsFieldNatural::ExitQualification)
                 .unwrap_or(0)
@@ -1477,7 +1489,7 @@ impl BatchGuard {
         }
         // Exceptions are delivered by the common handler after accounting.
         // A trap may have advanced RIP, so stepping would lose the exception.
-        (page_execution && !delivered_exception) || retry_single
+        (page_execution && !delivered_exception && !fetch_boundary) || retry_single
     }
 }
 

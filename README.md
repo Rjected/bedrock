@@ -95,8 +95,10 @@ bit 6 makes page-table walks request nested writes only for actual A/D updates.
 Those updates and explicit table writes end the run and use stepping before
 replanning. See [AMD APM, section 15.25.5](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2).
 The counter accounts for all retired instructions;
-a transition outside the guarded pages, code write, or intercepted instruction
-ends the run and is replayed with stepping after timer handling. Guest exceptions
+a transition outside the guarded pages ends the run and validates the new page.
+Non-writing entry instructions can replan directly; entry stores, split
+instructions, code/table writes, and other intercepts use scalar replay after
+timer handling. Guest exceptions
 and software interrupts are delivered through the shared exit handlers.
 Guest single-step traps use
 the scalar path and are reported after retirement. Accepted pages are rescanned
