@@ -192,6 +192,13 @@ pub(crate) unsafe fn run(
     } else {
         0
     };
+    if batch.is_some_and(|batch| batch.page_execution) {
+        if let Some(counter) = counter.as_ref() {
+            // TF is clear for guarded native execution. NPT catches PUSHF
+            // writes to protected code or tables before scalar replay.
+            counter.allow_native_pushf(v);
+        }
+    }
     unsafe {
         // Pass the virtual pointer as well as the physical address: VMRUN
         // modifies this allocation, which the compiler must see at the FFI

@@ -15,6 +15,17 @@ pub struct PmcEntry {
 }
 
 impl PmcEntry {
+    /// Native PUSHF observes logical flags only when neither stepping TF nor
+    /// debug-resume RF is active. The caller must guard code/table writes.
+    /// finish restores the original PUSHF intercept on every counted exit.
+    pub fn allow_native_pushf(&self, v: &mut Vmcb) -> bool {
+        if v.read(o::RFLAGS, 8) & ((1 << 8) | (1 << 16)) != 0 {
+            return false;
+        }
+        v.intercept(112, false);
+        true
+    }
+
     /// The caller must check PMC virtualization, VNMI, and enabled IRPERF.
     /// Hardware swaps all six programmable counters and IRPERF, keeping host
     /// perf events separate from the guest's overflow counter and clock.
@@ -98,6 +109,25 @@ impl PmcEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pushf_requires_logical_flags_and_restores_intercepts_on_failure() {
+        for flags in [2, 2 | (1 << 8), 2 | (1 << 16)] {
+            let mut v = Vmcb::new();
+            v.initialize();
+            v.write(o::RFLAGS, 8, flags);
+            let misc = v.read(o::INTERCEPT_MISC1, 4);
+            let entry = PmcEntry::prepare(&mut v, 100).unwrap();
+            assert_eq!(entry.allow_native_pushf(&mut v), flags == 2);
+            assert_eq!(v.read(o::INTERCEPT_MISC1, 4) & (1 << 16) != 0, flags != 2);
+            assert_ne!(v.read(o::INTERCEPT_MISC1, 4) & (1 << 17), 0); // POPF stays intercepted.
+            v.write(o::INSTR_RETIRED_CTR, 8, 0);
+            v.write(o::EXIT_CODE, 8, 0x400);
+            assert_eq!(entry.finish(&mut v), None);
+            assert_eq!(v.read(o::INTERCEPT_MISC1, 4), misc);
+            assert_eq!(v.read(o::RFLAGS, 8), flags);
+        }
+    }
 
     #[test]
     fn rejects_pending_guest_events_before_mutating_state() {

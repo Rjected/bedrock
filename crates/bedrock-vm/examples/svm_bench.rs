@@ -81,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_page_loops(true)?;
     test_counted_loop_deadlines()?;
     test_counter_idt_shadow()?;
+    test_native_pushf_flags()?;
     const LOOPS: u16 = 4096;
     const EXPECTED: u64 = 1 + LOOPS as u64 * 66 + 1;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
@@ -465,6 +466,68 @@ fn test_forward_stores() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("SVM_FORWARD_STORE_DEADLINE_FORK_PASS");
+    Ok(())
+}
+
+fn test_native_pushf_flags() -> Result<(), Box<dyn std::error::Error>> {
+    const LOOPS: u32 = 2048;
+    const TARGET: u64 = 1 + 4 * LOOPS as u64;
+    let mut expected = None;
+    let mut flag_exits = [0; 2];
+    for (index, reference) in [false, true].into_iter().enumerate() {
+        let mut vm = Vm::create(2 * 1024 * 1024)?;
+        for (address, entry) in [(0x3000, 0x4027u64), (0x4000, 0x5027), (0x5000, 0xe7)] {
+            vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        vm.memory_mut()?[0x1000..0x2000].fill(0x90);
+        let mut code = vec![0xb9]; // mov ecx,LOOPS
+        code.extend(LOOPS.to_le_bytes());
+        code.extend([0x9c, 0x58, 0x48, 0xff, 0xc9, 0x75, 0xf9]); // pushfq; pop rax; dec rcx; jnz
+        code.extend([0x0f, 0x01, 0xd9]);
+        vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+        let mut regs = Regs::long_mode();
+        regs.control_regs.cr3 = Cr3::new(0x3000);
+        regs.rip = 0x1000;
+        regs.rflags = 2;
+        regs.gprs.rsp = 0x8000;
+        vm.set_regs(&regs)?;
+        if reference {
+            vm.set_single_step_range(0, TARGET)?;
+        }
+        vm.set_stop_at_tsc(Some(TARGET))?;
+        loop {
+            let exit = vm.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 259);
+            assert_eq!(exit.emulated_tsc, TARGET);
+            break;
+        }
+        let r = vm.get_regs()?;
+        assert_eq!((r.rip, r.gprs.rcx, r.gprs.rsp), (0x100c, 0, 0x8000));
+        assert_eq!(
+            r.gprs.rax & ((1 << 8) | (1 << 16)),
+            0,
+            "PUSHF leaked hypervisor flags"
+        );
+        let stack = u64::from_le_bytes(vm.memory()?[0x7ff8..0x8000].try_into()?);
+        let observed = (r.gprs.rax, r.rflags, stack);
+        if let Some(expected) = expected {
+            assert_eq!(observed, expected);
+        } else {
+            expected = Some(observed);
+        }
+        flag_exits[index] = vm.get_exit_stats()?.other.count;
+    }
+    assert!(
+        flag_exits[0] < flag_exits[1],
+        "native PUSHF still trapped on every iteration"
+    );
+    println!(
+        "SVM_NATIVE_PUSHF_FLAGS_PASS native_exits={} reference_exits={}",
+        flag_exits[0], flag_exits[1]
+    );
     Ok(())
 }
 

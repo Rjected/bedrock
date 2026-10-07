@@ -136,6 +136,11 @@ known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.
 PUSHF emulation checks every translated stack destination: table overlap
 revokes the table proof, and code overlap revokes cached code scans.
+Guarded counter entries run PUSHF natively when TF and RF are clear; the
+counter exit restores interception before stepping can resume. NPT write
+guards stop stores into protected code or tables. POPF and port I/O handlers
+retain still-valid RAM proofs; guest event delivery revokes them before
+writing an interrupt frame.
 Other unproven writes, emulation, and a new RUN invalidate the table proof;
 a changed CR3 rebuilds it.
 
@@ -158,10 +163,12 @@ boot to a userspace snapshot, matching clock/randomness/registers/instruction
 counts in two children, and isolation of the parent's memory.
 Fresh roots have matched at the 100-million instruction checkpoint using guest
 IRPERF; the earlier GuestOnly programmable-counter clock diverged there.
-Repeated 50-million instruction runs have also produced different RAM hashes,
-sometimes despite matching registers, so those passing pairs do not establish fresh-boot
-determinism. Both full boots pass child replay and parent isolation, but fresh
-boot snapshots differ; full-boot reproducibility remains unresolved.
+Earlier 50-million checkpoint pairs and full fresh boots have diverged.
+With guarded native PUSHF and proof retention across POPF and port I/O, a
+50-million checkpoint pair and a full fresh-boot pair now match on the
+validation host. The full comparison includes snapshot clocks, RAM hashes,
+registers, child clocks and reports, and parent isolation. Another 128 snapshot
+replays match the stepping reference.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,

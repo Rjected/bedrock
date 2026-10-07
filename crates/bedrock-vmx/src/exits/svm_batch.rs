@@ -554,7 +554,7 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
                     .unwrap_or(0)
                     & (1 << 13)
                     != 0;
-                long && (window.bytes[0] == 0xc3
+                long && (matches!(window.bytes[0], 0xc3 | 0x9d | 0xe4..=0xe7 | 0xec..=0xef)
                     || relative_branch(&window.bytes, true, false).is_some()
                     || safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| !writes)
                     || scalar_store_preserves_guard(ctx, window, false))
@@ -2545,6 +2545,30 @@ mod tests {
         for other in [[0xf3, 0x0f, 0x1e, 0xfb], [0xf3, 0x0f, 0x1e, 0xf8]] {
             assert_eq!(safe_len(&other, true, false), None);
         }
+    }
+
+    #[test]
+    fn popf_and_port_io_keep_ram_proofs_until_event_delivery() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        let mut window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        prepare(&mut ctx, true, true, &window).unwrap();
+        let code_count = ctx.state().svm_guard.code_count;
+        for opcode in [0x9d, 0xe4, 0xe5, 0xe6, 0xe7, 0xec, 0xed, 0xee, 0xef] {
+            window.bytes[0] = opcode;
+            retain_translation_cache(&mut ctx, None, Some(&window), false);
+            assert!(ctx.state().svm_guard.valid);
+            assert_eq!(ctx.state().svm_guard.code_count, code_count);
+        }
+        // INS/OUTS are not classified as scalar register/device operations.
+        window.bytes[0] = 0x6c;
+        retain_translation_cache(&mut ctx, None, Some(&window), false);
+        assert!(!ctx.state().svm_guard.valid);
+        prepare(&mut ctx, true, true, &window).unwrap();
+        window.bytes[0] = 0xec;
+        // A pending guest event can write an interrupt frame before IN runs.
+        retain_translation_cache(&mut ctx, None, Some(&window), true);
+        assert!(!ctx.state().svm_guard.valid);
     }
 
     #[test]
