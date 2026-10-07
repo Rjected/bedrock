@@ -83,7 +83,13 @@ Long-mode execution can also run across calls, returns, and store loops within
 a code page that contains no possible RDRAND/RDSEED/RDPID, repeated-string
 encoding, or SYSRET. SYSRET uses the scalar path because it can restore guest
 TF from R11. A temporary NPT guard makes that page read-only and blocks
-instruction fetch from every other page. The counter accounts for all retired instructions;
+instruction fetch from every other page. It also protects the guest page tables
+used to translate the code, so a guest cannot redirect instruction fetch during
+the run. This path requires AMD ROGPT (CPUID 8000000A:EDX[21]); VMCB nested-control
+bit 6 makes page-table walks request nested writes only for actual A/D updates.
+Those updates and explicit table writes end the run and use stepping before
+replanning. See [AMD APM, section 15.25.5](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2).
+The counter accounts for all retired instructions;
 a page transition, code write, or intercepted instruction ends the run and is
 replayed with stepping after timer handling. Guest single-step traps use
 the scalar path and are reported after retirement. Accepted pages are rescanned

@@ -212,6 +212,11 @@ pub trait VmRunner {
         false
     }
 
+    /// Guest page-table walks can read nested pages protected against writes.
+    fn can_guard_page_tables(&self) -> bool {
+        false
+    }
+
     /// Exact count captured by a software-counted backend, including exits
     /// before a batch's endpoint. None when the instruction-counter object
     /// already reads its hardware accounting directly.

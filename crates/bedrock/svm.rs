@@ -54,6 +54,21 @@ pub(crate) struct Bitmaps {
     msr: *mut core::ffi::c_void,
     io: *mut core::ffi::c_void,
 }
+
+pub(crate) fn features() -> u32 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static FEATURES: AtomicU64 = AtomicU64::new(0);
+    let cached = FEATURES.load(Ordering::Relaxed);
+    if cached != 0 { return (cached - 1) as u32; }
+    let features: u32;
+    unsafe {
+        asm!("push rbx", "cpuid", "pop rbx",
+            inout("eax") 0x8000000au32 => _, inout("ecx") 0u32 => _,
+            lateout("edx") features, options(nomem));
+    }
+    FEATURES.store(u64::from(features) + 1, Ordering::Relaxed);
+    features
+}
 // Owned kernel allocations, accessed only under the VM lock.
 unsafe impl Send for Bitmaps {}
 unsafe impl Sync for Bitmaps {}
@@ -86,12 +101,8 @@ impl Bitmaps {
         Some(b)
     }
     pub(crate) fn bind(&self, v: &mut Vmcb) {
-        let features: u32;
-        unsafe {
-            asm!("push rbx", "cpuid", "pop rbx",
-                inout("eax") 0x8000000au32 => _, inout("ecx") 0u32 => _,
-                lateout("edx") features, options(nomem));
-        }
+        let features = features();
+        v.configure_nested_features(features);
         // Flush this guest's ASID rather than every host/guest translation.
         v.write(
             o::TLB_CONTROL,

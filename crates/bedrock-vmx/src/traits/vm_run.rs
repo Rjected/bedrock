@@ -328,6 +328,7 @@ where
                 super::super::exits::prepare_instruction_batch(
                     ctx,
                     runner.can_count_instructions(),
+                    runner.can_guard_page_tables(),
                     window,
                 )
             })

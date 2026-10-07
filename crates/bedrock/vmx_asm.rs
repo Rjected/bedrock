@@ -81,6 +81,10 @@ impl VmRunner for RealVmRunner {
         super::svm::supported() && unsafe { super::c_helpers::bedrock_svm_pmu_mask() } != 0
     }
 
+    fn can_guard_page_tables(&self) -> bool {
+        super::svm::supported() && super::svm::features() & (1 << 21) != 0
+    }
+
     fn saved_guest_msr(&self, vmcs: &Self::Vmcs, index: u32) -> Option<u64> {
         if !super::svm::supported() {
             return None;

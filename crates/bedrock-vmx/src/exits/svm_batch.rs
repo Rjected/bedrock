@@ -706,6 +706,7 @@ fn validate_contiguous_store_range<C: VmContext>(
 pub(crate) fn prepare<C: VmContext>(
     ctx: &mut C,
     can_loop: bool,
+    can_guard_page_tables: bool,
     window: &super::svm::InstructionWindow,
 ) -> Option<InstructionBatch> {
     let page = window.physical.as_u64() & !4095;
@@ -714,6 +715,7 @@ pub(crate) fn prepare<C: VmContext>(
     let long = v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) != 0;
     if long
         && can_loop
+        && can_guard_page_tables
         && instruction_budget(ctx) > InstructionBatch::COUNTER_DEADLINE_MARGIN
         && !ctx.state().svm_rejected_pages.contains(&page)
     {
@@ -819,6 +821,9 @@ fn prepare_verified<C: VmContext>(
         batch.counter_bounded = false;
         batch.accesses_memory = true;
         batch.writes_memory = true;
+        if paged {
+            collect_code_tables(ctx, &mut batch, linear)?;
+        }
         return Some(batch);
     }
 
@@ -1035,18 +1040,10 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
         saved: [None; 5],
         execution: None,
     };
-    if batch.page_execution {
-        guard.execution = Some(
-            ctx.state_mut()
-                .ept
-                .restrict_execution_to_page(allocator, GuestPhysAddr::new(batch.pages[0]))?,
-        );
-        return Some(guard);
-    }
     if !batch.accesses_memory {
         return Some(guard);
     }
-    let protected = if batch.writes_memory && !batch.validated_stores {
+    let protected = if batch.page_execution || (batch.writes_memory && !batch.validated_stores) {
         batch.page_count
     } else {
         1
@@ -1072,6 +1069,16 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
         }
         guard.saved[index] = Some((gpa, host, permissions));
     }
+    if batch.page_execution {
+        guard.execution = ctx
+            .state_mut()
+            .ept
+            .restrict_execution_to_page(allocator, GuestPhysAddr::new(batch.pages[0]));
+        if guard.execution.is_none() {
+            guard.restore(ctx, allocator);
+            return None;
+        }
+    }
     Some(guard)
 }
 
@@ -1081,11 +1088,11 @@ impl BatchGuard {
         ctx: &mut C,
         allocator: &A,
     ) -> bool {
+        let page_execution = self.execution.is_some();
         if let Some(execution) = self.execution {
             execution.restore(&mut ctx.state_mut().ept, allocator);
             // The fast exit is a synthetic boundary. Replay its instruction
             // once with stepping and unrestricted execute permissions.
-            return true;
         }
         let v = &ctx.state().vmcs;
         let write_fault = v.read32(VmcsField32::VmExitReason).ok() == Some(48)
@@ -1108,7 +1115,7 @@ impl BatchGuard {
                 .remap_4k(allocator, gpa, host, permissions, EptMemoryType::WriteBack)
                 .expect("SVM batch mapping disappeared");
         }
-        retry_single
+        page_execution || retry_single
     }
 }
 
@@ -1306,14 +1313,36 @@ mod tests {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
-        assert!(prepare(&mut ctx, true, &window).unwrap().page_execution);
+        assert!(
+            !prepare(&mut ctx, true, false, &window)
+                .unwrap()
+                .page_execution
+        );
+        let b = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(
+            &b.pages[..b.page_count],
+            &[0x1000, 0x3000, 0x4000, 0x5000, 0x6000]
+        );
+        assert!(
+            prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
         // Modification outside the small instruction window must revoke
         // page-wide execution; accepted pages have no persistent cache entry.
         ctx.memory[0x1ff0..0x1ff3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
-        assert!(!prepare(&mut ctx, true, &window).unwrap().page_execution);
+        assert!(
+            !prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
         assert!(ctx.state().svm_rejected_pages.contains(&0x1000));
         ctx.memory[0x1ff0..0x1ff3].fill(0x90);
-        assert!(!prepare(&mut ctx, true, &window).unwrap().page_execution);
+        assert!(
+            !prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
     }
 
     #[test]

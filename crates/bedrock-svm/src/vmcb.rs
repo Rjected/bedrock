@@ -137,6 +137,17 @@ impl Vmcb {
         self.write(offset::DR6, 8, 0xffff0ff0);
         self.write(offset::DR7, 8, 0x400);
     }
+
+    /// AMD APM 15.25.5: ROGPT avoids treating every guest page-table walk as
+    /// a nested write. Actual guest A/D updates still fault on protected tables.
+    pub fn configure_nested_features(&mut self, features: u32) {
+        let control = self.read(offset::NESTED_CONTROL, 8) & !(1 << 6);
+        self.write(
+            offset::NESTED_CONTROL,
+            8,
+            control | if features & (1 << 21) != 0 { 1 << 6 } else { 0 },
+        );
+    }
 }
 
 /// Intel access-rights bits 15:12 are packed at bits 11:8 in the VMCB.
@@ -186,5 +197,15 @@ mod tests {
             assert_eq!(segment_attributes_from_vmx(vmx), svm);
             assert_eq!(segment_attributes_to_vmx(svm), vmx);
         }
+    }
+
+    #[test]
+    fn readonly_guest_tables_require_the_cpuid_feature() {
+        let mut v = Vmcb::new();
+        v.initialize();
+        v.configure_nested_features(1 << 21);
+        assert_eq!(v.read(offset::NESTED_CONTROL, 8), 1 | (1 << 6));
+        v.configure_nested_features(1 << 6); // FlushByAsid is a different feature.
+        assert_eq!(v.read(offset::NESTED_CONTROL, 8), 1);
     }
 }

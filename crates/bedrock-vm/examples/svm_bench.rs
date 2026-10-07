@@ -861,7 +861,7 @@ fn test_self_modifying() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn test_guarded_code_and_translation_writes() -> Result<(), Box<dyn std::error::Error>> {
-    for translation in [false, true] {
+    for (translation, guarded) in [(false, true), (true, true), (true, false)] {
         let mut vm = Vm::create(4 * 1024 * 1024)?;
         vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
         for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
@@ -875,8 +875,10 @@ fn test_guarded_code_and_translation_writes() -> Result<(), Box<dyn std::error::
         }
         code.extend(tail);
         vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
-        // Reject the entire page, exercising bounded code/translation guards.
-        vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        // Also exercise page-wide execution without the rejection marker.
+        if guarded {
+            vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
         if translation {
             vm.memory_mut()?[0x201000..0x201003].copy_from_slice(&[0x48, 0x89, 0x07]);
             let new_tail = [0x0f, 0xc7, 0xf0, 0x89, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9];
