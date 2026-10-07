@@ -111,6 +111,16 @@ fn run_linux(kernel: &[u8], initrd: &[u8]) -> Result<RootReplay, Box<dyn std::er
     )?;
     let snapshot_tsc = run_until(&mut root, true)?;
     println!("SVM_LINUX_BOOT_PASS snapshot_tsc={snapshot_tsc}");
+    if std::env::var_os("BEDROCK_SVM_EXIT_STATS").is_some() {
+        let stats = root.get_exit_stats()?;
+        println!(
+            "{}",
+            bedrock_vm::ExitStatsReport {
+                stats: &stats,
+                wall_clock: start.elapsed(),
+            }
+        );
+    }
     let parent_hash = memory_hash(&mut root)?;
     let snapshot_registers = register_signature(root.get_regs()?);
     let parent_id = root.get_vm_id()?;

@@ -234,6 +234,11 @@ accelerated replays of the span from 8 million to 9 million instructions match
 the stepped reference at the first checkpoint where an earlier cold-root pair
 diverged. Four accelerated replays from 100 million to 110 million instructions
 also match the stepped reference.
+The complete boot still takes about 31.5 seconds on this host. An exit-stats
+sample at the userspace snapshot counted 8.61 million exits, including 8.49
+million synthetic step exits; VM entry setup used 55.6% of run-loop cycles.
+The near-native register-loop benchmark therefore does not represent general
+Linux boot overhead.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
@@ -288,6 +293,8 @@ sudo target/release/examples/svm_linux \
 
 Append `repeat` to compare two fresh boots as well, including the snapshot RAM
 hash, registers, virtual TSC, and both children's results.
+Set `BEDROCK_SVM_EXIT_STATS=1` to print the root VM's exit and cycle breakdown
+at the userspace snapshot.
 For a shorter reproducibility check, run `svm_bench VMLINUX INITRD INSTRUCTIONS
 repeat`; it compares the RAM hash and registers at an exact instruction
 deadline. `BEDROCK_CHECKPOINT_TIMEOUT_SECONDS` overrides its default 10-second

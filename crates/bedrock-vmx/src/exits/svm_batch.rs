@@ -203,14 +203,17 @@ fn repeat_len(bytes: &[u8]) -> Option<usize> {
 }
 
 fn relative_branch(bytes: &[u8], long: bool, default32: bool) -> Option<(usize, i64)> {
-    let first = *bytes.first()?;
+    // Linux return thunks commonly use CS:JMP (2e e9). The segment prefix
+    // does not change a relative branch target in long mode.
+    let prefix = usize::from(long && bytes.first() == Some(&0x2e));
+    let first = *bytes.get(prefix)?;
     if matches!(first, 0x70..=0x7f | 0xeb) {
-        return Some((2, i64::from(*bytes.get(1)? as i8)));
+        return Some((prefix + 2, i64::from(*bytes.get(prefix + 1)? as i8)));
     }
     let opcode_length = if first == 0xe9 {
-        1
-    } else if first == 0x0f && matches!(*bytes.get(1)?, 0x80..=0x8f) {
-        2
+        prefix + 1
+    } else if first == 0x0f && matches!(*bytes.get(prefix + 1)?, 0x80..=0x8f) {
+        prefix + 2
     } else {
         return None;
     };
@@ -1771,7 +1774,16 @@ fn prepare_verified<C: VmContext>(
                 batch.offsets[batch.count] = end as u16;
                 batch.uses_counter = true;
                 batch.counter_bounded &= !backward;
-                if offset == available {
+                // A jump at the entry of a rejected code page has no
+                // fallthrough path. Decoding padding after it can exhaust the
+                // outgoing traps and force an otherwise exact scalar step.
+                if (batch.count == 1
+                    && !allow_page
+                    && (matches!(tail[0], 0xe9 | 0xeb)
+                        || tail.starts_with(&[0x2e, 0xe9])
+                        || tail.starts_with(&[0x2e, 0xeb])))
+                    || offset == available
+                {
                     break;
                 }
                 continue;
@@ -2342,6 +2354,31 @@ mod tests {
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare_verified(&ctx, true, false, true, &window).unwrap();
         assert!(!batch.uses_counter && batch.branch_exit_count == 0 && batch.count == 2);
+    }
+
+    #[test]
+    fn rejected_page_entry_jump_ignores_unreachable_fallthrough() {
+        let ctx = paged_context(&[
+            0xe9, 0xfb, 0x00, 0x00, 0x00, // jump to 0x1100
+            0x74, 0x70, 0x74, 0x70, 0x74, 0x70, 0x74, 0x70,
+        ]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_verified(&ctx, true, false, true, &window).unwrap();
+        assert_eq!(batch.count, 1);
+        assert_eq!(&batch.branch_exits[..batch.branch_exit_count], &[0x1100]);
+        assert!(!batch.uses_counter);
+        let ctx = paged_context(&[
+            0x2e, 0xe9, 0xfa, 0x00, 0x00, 0x00, // CS:JMP to 0x1100
+            0x74, 0x70, 0x74, 0x70, 0x74, 0x70, 0x74, 0x70,
+        ]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let prefixed = prepare_verified(&ctx, true, false, true, &window).unwrap();
+        assert_eq!(prefixed.count, 1);
+        assert_eq!(
+            &prefixed.branch_exits[..prefixed.branch_exit_count],
+            &[0x1100]
+        );
+        assert!(!prefixed.uses_counter);
     }
 
     #[test]
@@ -3314,6 +3351,19 @@ mod tests {
     #[test]
     fn relative_branch_lengths_and_targets_match_independent_decoder() {
         use iced_x86::{Decoder, DecoderOptions, FlowControl};
+        for bytes in [
+            &[0x2e, 0xe9, 0xfa, 0x00, 0x00, 0x00][..],
+            &[0x2e, 0xeb, 0xfe],
+            &[0x2e, 0x75, 0xfc],
+        ] {
+            let (length, relative) = relative_branch(bytes, true, false).unwrap();
+            let instruction = Decoder::new(64, bytes, DecoderOptions::NONE).decode();
+            assert_eq!(length, instruction.len());
+            assert_eq!(
+                (length as i64 + relative) as u64,
+                instruction.near_branch_target()
+            );
+        }
         for bitness in [16, 32, 64] {
             for displacement in -128i8..=127 {
                 for opcode in (0x70..=0x7f).chain([0xeb]) {
