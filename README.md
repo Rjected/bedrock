@@ -75,8 +75,14 @@ interrupt margin. Stores reading the selected counter, including CL/CH or DL/DH
 aliases, use the stepping fallback.
 The range must map to contiguous physical pages and cannot overlap code or
 any page table used by the code or destination translations.
-Outside guarded page execution, unsupported instructions and other stores
-fall back to instruction stepping.
+Decoded long-mode memory blocks also use hardware-counter execution with code
+and every reachable page-table frame write-protected, including loops whose
+store addresses change. A guarded write fault restores permissions and replays
+the instruction with stepping before rebuilding the proof. Their direct branches
+may enter only decoded instruction boundaries; other instructions terminate
+the block. Without table-guard support or enough deadline margin, stores need
+static destination proofs or fall back to stepping. Unsupported instructions
+also use stepping.
 Control-flow acceleration requires AMD PerfMonV2, PMC virtualization, virtual
 NMI, and IRPERF enabled by the host kernel; unavailable features or a failed
 perf counter reservation disable it. VMRUN saves and restores the host's
@@ -154,7 +160,9 @@ Linux still spends substantial time in the stepping fallback. Near-native
 execution of general Linux workloads, with roughly 5% overhead as the target,
 has not been demonstrated.
 PMI skid can exceed the deadline margin; such a run fails instead of returning
-an incorrect instruction count.
+an incorrect instruction count. A real-mode branch deadline test has also
+intermittently stopped one instruction away from its expected boundary;
+instruction-count correctness is not established across all execution paths.
 
 Native validation on an AMD EPYC 4585PX with Ubuntu Linux 7.0.0-38-generic
 includes Linux 6.18 booting to userspace and matching executions of two Linux
@@ -201,7 +209,9 @@ verified loop path; it does not represent Linux or general guest workloads.
 `page-loops` exercises calls, returns, and stores across data pages, an exact
 mid-loop deadline, and two forks with matching final state and parent isolation.
 `guarded-loops` exercises a counted store loop on a page excluded from page-wide
-execution, including the same deadline and fork checks.
+execution, including the same deadline and fork checks. The default suite also
+checks such a loop storing its counter as payload, using page-table guards rather
+than counter clamping.
 `loop-deadlines` checks every instruction boundary with DEC before and after the
 store for ECX, EDX, RCX, and RDX, including large counter values, 32-bit zero
 extension, and arithmetic-flag restoration.

@@ -545,7 +545,7 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
     }
     let keep = !software
         && match batch {
-            Some(batch) => batch.page_execution || !batch.writes_memory,
+            Some(batch) => batch.page_execution || batch.guarded_stores || !batch.writes_memory,
             None => window.is_some_and(|window| {
                 let long = ctx
                     .state()
@@ -566,7 +566,7 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
         return;
     }
     match batch {
-        Some(batch) if batch.page_execution => {
+        Some(batch) if batch.page_execution || batch.guarded_stores => {
             // Other cached pages may be written as data during this entry.
             let cache = &mut ctx.state_mut().svm_guard;
             let mut index = 0;
@@ -1357,13 +1357,18 @@ pub(crate) fn prepare<C: VmContext>(
             state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
         }
     }
-    let prepared = prepare_verified(ctx, can_loop, allow_page, window);
+    let prepared = prepare_verified(ctx, can_loop, allow_page, can_guard_page_tables, window);
     if allow_page && !prepared.as_ref().is_some_and(|b| b.page_execution) {
         let state = ctx.state_mut();
         state.svm_rejected_pages[state.svm_rejected_cursor] = page;
         state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
     }
     let mut batch = prepared?;
+    if batch.guarded_stores {
+        if !can_guard_page_tables || collect_translation_tree(ctx, &batch).is_none() {
+            return None;
+        }
+    }
     if batch.page_execution {
         if ctx
             .state()
@@ -1388,7 +1393,7 @@ pub(crate) fn prepare<C: VmContext>(
             let state = ctx.state_mut();
             state.svm_rejected_pages[state.svm_rejected_cursor] = page;
             state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
-            return prepare_verified(ctx, can_loop, false, window);
+            return prepare_verified(ctx, can_loop, false, false, window);
         }
         let current = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
@@ -1461,7 +1466,7 @@ pub(crate) fn prepare<C: VmContext>(
                 let state = ctx.state_mut();
                 state.svm_rejected_pages[state.svm_rejected_cursor] = page;
                 state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
-                return prepare_verified(ctx, can_loop, false, window);
+                return prepare_verified(ctx, can_loop, false, false, window);
             }
             // Keep hazard-free pages when virtual aliases exhaust the slots.
             // Removing them cannot reduce the number of needed breakpoints.
@@ -1516,6 +1521,7 @@ fn prepare_verified<C: VmContext>(
     ctx: &C,
     can_loop: bool,
     allow_page: bool,
+    allow_guarded_stores: bool,
     window: &super::svm::InstructionWindow,
 ) -> Option<InstructionBatch> {
     let state = ctx.state();
@@ -1576,6 +1582,7 @@ fn prepare_verified<C: VmContext>(
         accesses_memory: false,
         writes_memory: false,
         validated_stores: false,
+        guarded_stores: false,
         uses_counter: false,
         counter_bounded: true,
         page_execution: false,
@@ -1651,7 +1658,7 @@ fn prepare_verified<C: VmContext>(
                     || target > available as i64
                     || (backward
                         && (budget < InstructionBatch::COUNTER_DEADLINE_MARGIN
-                            || (paged && batch.writes_memory)))
+                            || (paged && batch.writes_memory && !batch.guarded_stores)))
                 {
                     break;
                 }
@@ -1676,20 +1683,30 @@ fn prepare_verified<C: VmContext>(
             break;
         };
         if paged && writes {
-            if !long || (batch.uses_counter && !batch.counter_bounded) {
-                break;
+            if long
+                && can_loop
+                && allow_guarded_stores
+                && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN
+            {
+                batch.guarded_stores = true;
+                batch.uses_counter = true;
+                batch.validated_stores = false;
+            } else {
+                if !long || (batch.uses_counter && !batch.counter_bounded) {
+                    break;
+                }
+                let instruction = &bytes[offset..offset + length];
+                let Some((start, width)) =
+                    store_range(instruction, rip + offset as u64, &gprs, changed)
+                else {
+                    break;
+                };
+                collect_code_tables(ctx, &mut batch, linear)?;
+                if validate_store(ctx, &batch, &mut stores, start, width).is_none() {
+                    break;
+                }
+                batch.validated_stores = true;
             }
-            let instruction = &bytes[offset..offset + length];
-            let Some((start, width)) =
-                store_range(instruction, rip + offset as u64, &gprs, changed)
-            else {
-                break;
-            };
-            collect_code_tables(ctx, &mut batch, linear)?;
-            if validate_store(ctx, &batch, &mut stores, start, width).is_none() {
-                break;
-            }
-            batch.validated_stores = true;
         }
         changed |= modified_gprs(&bytes[offset..offset + length], long);
         offset += length;
@@ -1813,7 +1830,7 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
     } else {
         1
     };
-    let tables = if batch.page_execution {
+    let tables = if batch.page_execution || batch.guarded_stores {
         ctx.state().svm_guard.count
     } else {
         0
@@ -1967,7 +1984,7 @@ mod tests {
 
     fn planned(ctx: &MockVmContext) -> Option<InstructionBatch> {
         let window = super::super::svm::InstructionWindow::read(ctx).unwrap();
-        prepare_verified(ctx, true, false, &window)
+        prepare_verified(ctx, true, false, false, &window)
     }
 
     #[test]
@@ -2052,6 +2069,83 @@ mod tests {
         let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
+    }
+
+    #[test]
+    fn decoded_memory_loops_guard_every_table_and_reject_code_table_aliases() {
+        // Changing RDI and counter payloads prevent static destination proofs.
+        let code = [
+            0x48, 0x89, 0x0f, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf4,
+        ];
+        let mut ctx = paged_context(&code);
+        ctx.state_mut().gprs.rcx = 100;
+        for offset in [0x1800, 0x1820, 0x1840, 0x1860, 0x1880] {
+            ctx.memory[offset..offset + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        for (address, entry) in [(0x3008, 0x8007u64), (0x8000, 0x9007), (0x9000, 0xa007)] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.guarded_stores && batch.uses_counter && !batch.counter_bounded);
+        assert!(!batch.page_execution && !batch.validated_stores && batch.counted_loop.is_none());
+        assert!(!prepare(&mut ctx, true, false, &window).is_some_and(|b| b.guarded_stores));
+        assert!(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0xa000));
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator,
+            bedrock_ept::PageTableFormat::AmdNpt,
+        )
+        .unwrap();
+        let mappings = [
+            0x1000, 0x3000, 0x4000, 0x5000, 0x6000, 0x7000, 0x8000, 0x9000, 0xa000,
+        ];
+        for page in mappings {
+            ctx.state_mut()
+                .ept
+                .map_4k(
+                    &mut allocator,
+                    GuestPhysAddr::new(page),
+                    HostPhysAddr::new(page + 0x1000000),
+                    bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                    bedrock_ept::EptMemoryType::WriteBack,
+                )
+                .unwrap();
+        }
+        let guard = protect(&mut ctx, &allocator, &batch).unwrap();
+        for page in mappings {
+            let permissions = ctx
+                .state()
+                .ept
+                .lookup(&allocator, GuestPhysAddr::new(page))
+                .unwrap()
+                .1
+                .bits();
+            assert_eq!(permissions & 2 != 0, page == 0x7000);
+            assert_ne!(permissions & 4, 0); // This guard does not restrict instruction fetch.
+        }
+        ctx.vmcs_setup().set_field32(VmcsField32::VmExitReason, 48);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::ExitQualification, 2);
+        ctx.state()
+            .vmcs
+            .write64(VmcsField64::GuestPhysicalAddr, 0xa000)
+            .unwrap();
+        assert!(guard.restore(&mut ctx, &allocator)); // Replay the table write with stepping.
+        for page in mappings {
+            assert_eq!(
+                ctx.state()
+                    .ept
+                    .lookup(&allocator, GuestPhysAddr::new(page))
+                    .unwrap()
+                    .1,
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE
+            );
+        }
+        // A decoded instruction stream may not alias an unrelated table frame.
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.memory[0x9000..0x9008].copy_from_slice(&0x1007u64.to_le_bytes());
+        assert!(prepare(&mut ctx, true, true, &window).is_none());
     }
 
     #[test]
@@ -2225,10 +2319,12 @@ mod tests {
         ctx.memory[0x1000..0x1004].copy_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]); // ENDBR64
         assert!(page_safe(&ctx, 0x1000).is_some());
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
-        let batch = prepare_verified(&ctx, true, true, &window).unwrap();
+        let batch = prepare_verified(&ctx, true, true, false, &window).unwrap();
         assert!(batch.page_execution && batch.uses_counter);
         ctx.state_mut().stop_at_tsc = Some(InstructionBatch::COUNTER_DEADLINE_MARGIN);
-        assert!(!prepare_verified(&ctx, true, true, &window).is_some_and(|b| b.page_execution));
+        assert!(
+            !prepare_verified(&ctx, true, true, false, &window).is_some_and(|b| b.page_execution)
+        );
     }
 
     #[test]
@@ -3079,6 +3175,7 @@ mod tests {
             accesses_memory: false,
             writes_memory: false,
             validated_stores: false,
+            guarded_stores: false,
             uses_counter: true,
             counter_bounded: false,
             page_execution: false,
@@ -3144,6 +3241,7 @@ mod tests {
             accesses_memory: false,
             writes_memory: false,
             validated_stores: false,
+            guarded_stores: false,
             uses_counter: false,
             counter_bounded: true,
             page_execution: false,

@@ -18,13 +18,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return native_loop_comparison(true);
     }
     if args.len() == 2 && args[1] == "guarded-loops" {
-        return test_page_loops(true);
+        return test_page_loops(true, false);
     }
     if args.len() == 2 && args[1] == "loop-deadlines" {
         return test_counted_loop_deadlines();
     }
     if args.len() == 2 && args[1] == "page-loops" {
-        return test_page_loops(false);
+        return test_page_loops(false, false);
     }
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
@@ -77,8 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_endpoint_deadline()?;
     test_forward_deadline()?;
     test_forward_stores()?;
-    test_page_loops(false)?;
-    test_page_loops(true)?;
+    test_page_loops(false, false)?;
+    test_page_loops(true, false)?;
+    test_page_loops(true, true)?;
     test_counted_loop_deadlines()?;
     test_counter_idt_shadow()?;
     test_native_pushf_flags()?;
@@ -587,7 +588,7 @@ fn test_counter_idt_shadow() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn test_page_loops(guarded: bool, counter_payload: bool) -> Result<(), Box<dyn std::error::Error>> {
     const VALUE: u64 = 0x123456789abcdef0;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
     for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
@@ -615,6 +616,9 @@ fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
             vm.memory_mut()?[offset..offset + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         }
     }
+    if counter_payload {
+        code[2] = 0x0f;
+    } // MOV [RDI], RCX cannot use a clamped counter.
     vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
     let mut regs = Regs::long_mode();
     regs.control_regs.cr3 = Cr3::new(0x3000);
@@ -662,8 +666,8 @@ fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(r.gprs.rdi, 0x10000 + 800_000);
             assert_eq!(r.gprs.rcx, 0);
             assert_eq!(r.gprs.rsp, 0x8000);
-            assert_eq!(r.gprs.r8, VALUE);
-            assert_eq!(r.gprs.r9, VALUE);
+            assert_eq!(r.gprs.r8, if counter_payload { 100_000 } else { VALUE });
+            assert_eq!(r.gprs.r9, if counter_payload { 1 } else { VALUE });
             results.push((r.rip, r.rflags, r.gprs.rdi, r.gprs.r8, r.gprs.r9));
             break;
         }
@@ -673,7 +677,7 @@ fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
     hash.write(vm.memory()?);
     assert_eq!(hash.finish(), parent);
     println!(
-        "SVM_STORE_LOOP_FORK_PASS guarded={guarded} seconds={:.6}",
+        "SVM_STORE_LOOP_FORK_PASS guarded={guarded} counter_payload={counter_payload} seconds={:.6}",
         start.elapsed().as_secs_f64()
     );
     Ok(())

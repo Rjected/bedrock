@@ -52,6 +52,8 @@ pub struct InstructionBatch {
     pub accesses_memory: bool,
     pub writes_memory: bool,
     pub validated_stores: bool,
+    /// Every reachable translation frame is protected against guest writes.
+    pub guarded_stores: bool,
     pub uses_counter: bool,
     /// Every transfer moves forward, bounding retirements by `count`.
     pub counter_bounded: bool,
