@@ -65,12 +65,14 @@ can join a batch when their address registers retain their entry values and
 their destinations cannot rewrite the code or subsequent store translations.
 These stores can also join forward-only branches when their address registers
 are stable across every decoded path.
-Counted MOV-store loops using DEC RCX, an advancing RDI, and JNZ run in bounded
-chunks after validating each chunk's destination range. Entry temporarily clamps
-RCX to iterations that fit before the deadline; exit restores RCX and DEC flags,
-and rewinds an artificial loop termination. RCX and the exit instruction boundary
-give the exact retirement count without a performance-counter interrupt margin.
-Stores using RCX, CL, or CH as their payload use the stepping fallback.
+Counted MOV-store loops using DEC on ECX, EDX, RCX, or RDX, an advancing RDI,
+and JNZ run in bounded chunks after validating each chunk's destination range.
+Entry temporarily clamps the counter to iterations that fit before the deadline;
+exit restores its architectural value and DEC flags, including 32-bit zero
+extension, and rewinds an artificial loop termination. The counter and exit
+instruction boundary give the exact retirement count without a performance-counter
+interrupt margin. Stores reading the selected counter, including CL/CH or DL/DH
+aliases, use the stepping fallback.
 The range must map to contiguous physical pages and cannot overlap code or
 any page table used by the code or destination translations.
 Outside guarded page execution, unsupported instructions and other stores
@@ -169,6 +171,10 @@ With guarded native PUSHF and proof retention across POPF and port I/O, a
 validation host. The full comparison includes snapshot clocks, RAM hashes,
 registers, child clocks and reports, and parent isolation. Another 128 snapshot
 replays match the stepping reference.
+Subsequent fresh-boot comparisons have also diverged on both the guarded
+native-PUSHF baseline and the extended counted-loop backend. Individual roots
+and their fork comparisons pass, but fresh-root determinism remains unresolved;
+a passing pair does not establish repeatability across runs.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
@@ -197,7 +203,8 @@ mid-loop deadline, and two forks with matching final state and parent isolation.
 `guarded-loops` exercises a counted store loop on a page excluded from page-wide
 execution, including the same deadline and fork checks.
 `loop-deadlines` checks every instruction boundary with DEC before and after the
-store, including large RCX values and arithmetic-flag restoration.
+store for ECX, EDX, RCX, and RDX, including large counter values, 32-bit zero
+extension, and arithmetic-flag restoration.
 `svm_bench VMLINUX INITRD [INSTRUCTIONS]` stops Linux at an exact instruction
 checkpoint (one million by default), reports its registers and RAM hash, and
 limits each check to ten seconds.

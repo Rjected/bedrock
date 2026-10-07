@@ -154,7 +154,11 @@ pub(crate) unsafe fn run(
         ctx.guest_rcx = repeat.iterations;
     }
     if let Some(counted) = batch.and_then(|b| b.counted_loop) {
-        ctx.guest_rcx = counted.iterations;
+        match counted.register {
+            1 => ctx.guest_rcx = counted.iterations,
+            2 => ctx.guest_rdx = counted.iterations,
+            _ => return Err(VmEntryError::VmEntryFailed),
+        }
     }
     let mut breakpoints = [0u64; 4];
     if let Some(batch) = batch {
@@ -395,23 +399,32 @@ pub(crate) unsafe fn run(
             }
             completed
         } else if let Some(counted) = batch.counted_loop {
+            let counter = match counted.register {
+                1 => ctx.guest_rcx,
+                2 => ctx.guest_rdx,
+                _ => return Err(VmEntryError::VmEntryFailed),
+            };
             let instruction = batch.completed_at(v.read(o::RIP, 8))
                 .ok_or_else(|| {
-                    kernel::pr_err!("SVM counted loop invalid boundary: rip={:#x} code={:#x} rcx={:#x} batch={:?}\n",
-                        v.read(o::RIP, 8), code, ctx.guest_rcx, batch);
+                    kernel::pr_err!("SVM counted loop invalid boundary: rip={:#x} code={:#x} counter={:#x} batch={:?}\n",
+                        v.read(o::RIP, 8), code, counter, batch);
                     VmEntryError::VmEntryFailed
                 })?;
             let (completed, remaining, flags) = counted
-                .account(instruction, batch.count as u64, ctx.guest_rcx, v.read(o::RFLAGS, 8))
+                .account(instruction, batch.count as u64, counter, v.read(o::RFLAGS, 8))
                 .ok_or_else(|| {
-                    kernel::pr_err!("SVM counted loop invalid accounting: rip={:#x} code={:#x} rcx={:#x} batch={:?}\n",
-                        v.read(o::RIP, 8), code, ctx.guest_rcx, batch);
+                    kernel::pr_err!("SVM counted loop invalid accounting: rip={:#x} code={:#x} counter={:#x} batch={:?}\n",
+                        v.read(o::RIP, 8), code, counter, batch);
                     VmEntryError::VmEntryFailed
                 })?;
             if completed > batch.instruction_budget {
                 return Err(VmEntryError::VmEntryFailed);
             }
-            ctx.guest_rcx = remaining;
+            match counted.register {
+                1 => ctx.guest_rcx = remaining,
+                2 => ctx.guest_rdx = remaining,
+                _ => return Err(VmEntryError::VmEntryFailed),
+            }
             v.write(o::RFLAGS, 8, flags);
             if instruction == batch.count as u64 && remaining != 0 {
                 v.write(o::RIP, 8, batch.start);

@@ -1148,12 +1148,10 @@ fn counted_store_loop<C: VmContext>(
     gprs: &[u64; 16],
     batch: &mut InstructionBatch,
 ) -> Option<()> {
-    if gprs[1] == 0 {
-        return None;
-    }
     let mut candidate = *batch;
     let mut offset = 0;
     let mut decrement = None;
+    let mut payload_registers = 0u16;
     let mut stride = None;
     let mut first = u64::MAX;
     let mut last = 0;
@@ -1175,8 +1173,18 @@ fn counted_store_loop<C: VmContext>(
         }
         let (length, _, writes) = safe_len(tail, true, false)?;
         let instruction = &tail[..length];
-        if instruction == [0x48, 0xff, 0xc9] && decrement.is_none() {
-            decrement = Some(candidate.count as u64);
+        let counter = match instruction {
+            [0x48, 0xff, 0xc9] => Some((1u8, 64u8)),
+            [0x48, 0xff, 0xca] => Some((2, 64)),
+            [0xff, 0xc9] => Some((1, 32)),
+            [0xff, 0xca] => Some((2, 32)),
+            _ => None,
+        };
+        if let Some((register, width)) = counter {
+            if decrement.is_some() {
+                return None;
+            }
+            decrement = Some((candidate.count as u64, register, width));
         } else if instruction.len() == 4
             && instruction[..3] == [0x48, 0x8d, 0x7f]
             && instruction[3] > 0
@@ -1192,13 +1200,13 @@ fn counted_store_loop<C: VmContext>(
             {
                 return None;
             }
-            // Clamping RCX must not change a store's payload, including CH.
-            let source = (instruction[p + 1] >> 3) & 7;
-            if matches!(instruction[p], 0x88 | 0x89)
-                && rex & 4 == 0
-                && (source == 1 || (instruction[p] == 0x88 && rex == 0 && source == 5))
-            {
-                return None;
+            // Include high-byte aliases and stores before the decrement.
+            if matches!(instruction[p], 0x88 | 0x89) {
+                let mut source = ((instruction[p + 1] >> 3) & 7) | ((rex & 4) << 1);
+                if instruction[p] == 0x88 && rex == 0 && source >= 4 {
+                    source -= 4;
+                }
+                payload_registers |= 1 << source;
             }
             let (address, width) =
                 store_range(instruction, candidate.start + offset as u64, gprs, 0)?;
@@ -1216,7 +1224,17 @@ fn counted_store_loop<C: VmContext>(
     if candidate.count == 64 || last > stride {
         return None;
     }
-    let iterations = gprs[1]
+    let (decrement_index, register, width) = decrement?;
+    if payload_registers & (1 << register) != 0 {
+        return None;
+    }
+    let original_count = gprs[register as usize];
+    let count = if width == 32 {
+        original_count & u32::MAX as u64
+    } else {
+        original_count
+    };
+    let iterations = count
         .min(candidate.instruction_budget / candidate.count as u64)
         .min(65536);
     if iterations == 0 {
@@ -1229,9 +1247,11 @@ fn counted_store_loop<C: VmContext>(
     collect_code_tables(ctx, &mut candidate, linear)?;
     validate_contiguous_store_range(ctx, &candidate, start, end)?;
     candidate.counted_loop = Some(CountedLoopBatch {
-        original_count: gprs[1],
+        register,
+        width,
+        original_count,
         iterations,
-        decrement_index: decrement?,
+        decrement_index,
     });
     candidate.uses_counter = false;
     candidate.counter_bounded = true;
@@ -2053,6 +2073,35 @@ mod tests {
         assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
         ctx.state_mut().gprs.rcx = u64::MAX;
         assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+    }
+
+    #[test]
+    fn narrow_counted_loops_reject_payload_aliases_and_zero_low_counts() {
+        for (opcode, register) in [(0xc9, 1), (0xca, 2)] {
+            let code = [
+                0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0xff, opcode, 0x75, 0xf5,
+            ];
+            let mut ctx = paged_context(&code);
+            ctx.state_mut().gprs.rcx = 0x100000064;
+            ctx.state_mut().gprs.rdx = 0x100000064;
+            let batch = planned(&ctx).unwrap().counted_loop.unwrap();
+            assert_eq!(
+                (batch.register, batch.width, batch.iterations),
+                (register, 32, 100)
+            );
+            // Counter payload before DEC, including CH/DH.
+            for store in [
+                [0x48, 0x89, (register << 3) | 7],
+                [0x66, 0x88, ((register + 4) << 3) | 7],
+            ] {
+                ctx.memory[0x1000..0x1003].copy_from_slice(&store);
+                assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+            }
+            ctx.memory[0x1000..0x1003].copy_from_slice(&code[..3]);
+            ctx.state_mut().gprs.rcx = 1 << 32;
+            ctx.state_mut().gprs.rdx = 1 << 32;
+            assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+        }
     }
 
     #[test]

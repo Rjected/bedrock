@@ -67,32 +67,51 @@ pub struct RepeatBatch {
     pub iterations: u64,
 }
 
-/// A MOV/LEA/DEC RCX/JNZ loop with no other RCX or flags consumers.
+/// A MOV/LEA/DEC/JNZ loop with no other counter or flags consumers.
 #[derive(Clone, Copy, Debug)]
 pub struct CountedLoopBatch {
+    /// Architectural GPR index: RCX (1) or RDX (2).
+    pub register: u8,
+    /// Width of the decrement, either 32 or 64 bits.
+    pub width: u8,
     pub original_count: u64,
     pub iterations: u64,
     pub decrement_index: u64,
 }
 
 impl CountedLoopBatch {
-    /// Recover architectural RCX, flags, and retirements at any body boundary.
-    /// RCX is temporarily clamped on entry; only the final JNZ can observe
+    /// Recover the architectural counter, flags, and retirements at any body boundary.
+    /// The counter is temporarily clamped on entry; only the final JNZ can observe
     /// different flags, and its artificial fall-through is rewound by the caller.
     pub fn account(
         &self,
         instruction: u64,
         body_length: u64,
-        rcx: u64,
+        counter: u64,
         flags: u64,
     ) -> Option<(u64, u64, u64)> {
-        if instruction > body_length || self.decrement_index >= body_length {
+        if instruction > body_length
+            || self.decrement_index >= body_length
+            || !matches!(self.width, 32 | 64)
+            || !matches!(self.register, 1 | 2)
+        {
             return None;
         }
-        let decrements = self.iterations.checked_sub(rcx)?;
-        let remaining = self.original_count.checked_sub(decrements)?;
+        let decrements = self.iterations.checked_sub(counter)?;
+        let original = if self.width == 32 {
+            self.original_count & u32::MAX as u64
+        } else {
+            self.original_count
+        };
+        let result = original.checked_sub(decrements)?;
+        // A 32-bit write clears the upper half only after DEC has executed.
+        let remaining = if decrements == 0 {
+            self.original_count
+        } else {
+            result
+        };
         let completed = if instruction == body_length {
-            if rcx != 0 {
+            if counter != 0 {
                 return None;
             }
             decrements.checked_mul(body_length)?
@@ -109,9 +128,9 @@ impl CountedLoopBatch {
             // DEC preserves CF and sets PF/AF/ZF/SF/OF from the real result.
             let arithmetic = (u64::from((remaining as u8).count_ones() % 2 == 0) << 2)
                 | (u64::from(remaining & 15 == 15) << 4)
-                | (u64::from(remaining == 0) << 6)
-                | (remaining & (1 << 63)) >> 56
-                | (u64::from(remaining == 0x7fff_ffff_ffff_ffff) << 11);
+                | (u64::from(result == 0) << 6)
+                | ((result >> (self.width - 1)) & 1) << 7
+                | (u64::from(result == (1u64 << (self.width - 1)) - 1) << 11);
             (flags & !0x8d4) | arithmetic
         };
         Some((completed, remaining, flags))
@@ -134,10 +153,48 @@ mod counted_loop_tests {
     }
 
     #[test]
+    fn narrow_counters_match_native_zero_extension_and_flags() {
+        for register in [1, 2] {
+            for original_count in [0x100000003u64, 0x180000000, 0x180000001, u64::MAX] {
+                for decrement_index in 0..3 {
+                    let batch = CountedLoopBatch {
+                        register,
+                        width: 32,
+                        original_count,
+                        iterations: 3,
+                        decrement_index,
+                    };
+                    for loops in 0..3 {
+                        for instruction in 0..4 {
+                            let decrements = loops + u64::from(instruction > decrement_index);
+                            let (completed, remaining, flags) = batch
+                                .account(instruction, 4, 3 - decrements, 0x203)
+                                .unwrap();
+                            let mut expected = original_count;
+                            let mut expected_flags = 0x203u64;
+                            for _ in 0..decrements {
+                                unsafe {
+                                    core::arch::asm!("stc", "dec {value:e}", "pushfq", "pop {flags}",
+                                    value = inout(reg) expected, flags = lateout(reg) expected_flags);
+                                }
+                            }
+                            assert_eq!(completed, loops * 4 + instruction);
+                            assert_eq!(remaining, expected);
+                            assert_eq!(flags & 0x8d5, expected_flags & 0x8d5);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_partial_loop_boundary_matches_scalar_retirements_and_native_flags() {
         for original_count in [3, 4, 16, 256, 1 << 63, (1 << 63) + 1, u64::MAX] {
             for decrement_index in 0..3 {
                 let batch = CountedLoopBatch {
+                    register: 1,
+                    width: 64,
                     original_count,
                     iterations: 3,
                     decrement_index,

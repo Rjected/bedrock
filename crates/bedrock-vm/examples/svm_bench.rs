@@ -681,75 +681,137 @@ fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
 
 fn test_counted_loop_deadlines() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
-    for decrement_first in [false, true] {
-        for original_count in [5u64, 16, 257, (1 << 63) + 1, u64::MAX] {
-            for deadline in 4..20 {
-                let mut vm = Vm::create(2 * 1024 * 1024)?;
-                for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
-                    vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
-                }
-                let code = if decrement_first {
-                    [
-                        0x48, 0xff, 0xc9, 0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x75, 0xf4,
-                    ]
-                } else {
-                    [
-                        0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf4,
-                    ]
-                };
-                vm.memory_mut()?[0x1000..0x100c].copy_from_slice(&code);
-                vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
-                let mut regs = Regs::long_mode();
-                regs.control_regs.cr3 = Cr3::new(0x3000);
-                regs.rip = 0x1000;
-                regs.rflags = 0x203;
-                regs.gprs.rsp = 0x8000;
-                regs.gprs.rdi = 0x10000;
-                regs.gprs.rcx = original_count;
-                regs.gprs.rax = 0x123456789abcdef0;
-                vm.set_regs(&regs)?;
-                vm.set_stop_at_tsc(Some(deadline))?;
-                loop {
-                    let exit = vm.run()?;
-                    if exit.exit_reason == 256 {
-                        continue;
+    for (register, width) in [(1, 64), (2, 64), (1, 32), (2, 32)] {
+        for decrement_first in [false, true] {
+            for original_count in [
+                5u64,
+                16,
+                257,
+                0x80000000,
+                0x80000001,
+                (1 << 63) + 1,
+                u64::MAX,
+            ] {
+                for deadline in 4..20 {
+                    let mut vm = Vm::create(2 * 1024 * 1024)?;
+                    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)]
+                    {
+                        vm.memory_mut()?[address..address + 8]
+                            .copy_from_slice(&entry.to_le_bytes());
                     }
-                    assert_eq!(exit.exit_reason, 259);
-                    assert_eq!(exit.emulated_tsc, deadline);
-                    break;
-                }
-                let r = vm.get_regs()?;
-                let instruction = deadline % 4;
-                let loops = deadline / 4;
-                let decrements =
-                    loops + u64::from(instruction > if decrement_first { 0 } else { 2 });
-                let advances = loops + u64::from(instruction > if decrement_first { 2 } else { 1 });
-                let stores = loops + u64::from(instruction > if decrement_first { 1 } else { 0 });
-                let offsets = if decrement_first {
-                    [0, 3, 6, 10]
-                } else {
-                    [0, 3, 7, 10]
-                };
-                assert_eq!(r.rip, 0x1000 + offsets[instruction as usize]);
-                assert_eq!(r.gprs.rcx, original_count - decrements);
-                assert_eq!(r.gprs.rdi, 0x10000 + advances * 8);
-                let flags: u64;
-                unsafe {
-                    core::arch::asm!("stc", "dec {value}", "pushfq", "pop {flags}",
+                    let mut code = if decrement_first {
+                        [
+                            0x48, 0xff, 0xc9, 0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x75, 0xf4,
+                        ]
+                    } else {
+                        [
+                            0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf4,
+                        ]
+                    };
+                    let decrement_offset = if decrement_first { 0 } else { 7 };
+                    if register == 2 {
+                        code[decrement_offset + 2] = 0xca;
+                    }
+                    let code: Vec<u8> = if width == 32 {
+                        code.iter()
+                            .enumerate()
+                            .filter_map(|(i, &byte)| (i != decrement_offset).then_some(byte))
+                            .collect()
+                    } else {
+                        code.to_vec()
+                    };
+                    let mut code = code;
+                    let code_len = code.len();
+                    code[code_len - 1] = (-(code_len as i8)) as u8;
+                    vm.memory_mut()?[0x1000..0x1000 + code_len].copy_from_slice(&code);
+                    vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+                    let mut regs = Regs::long_mode();
+                    regs.control_regs.cr3 = Cr3::new(0x3000);
+                    regs.rip = 0x1000;
+                    regs.rflags = 0x203;
+                    regs.gprs.rsp = 0x8000;
+                    regs.gprs.rdi = 0x10000;
+                    let original_count = if width == 32 {
+                        0x100000000 | ((original_count as u32 as u64).max(5))
+                    } else {
+                        original_count
+                    };
+                    if register == 1 {
+                        regs.gprs.rcx = original_count;
+                    } else {
+                        regs.gprs.rdx = original_count;
+                    }
+                    regs.gprs.rax = 0x123456789abcdef0;
+                    vm.set_regs(&regs)?;
+                    vm.set_stop_at_tsc(Some(deadline))?;
+                    loop {
+                        let exit = vm.run()?;
+                        if exit.exit_reason == 256 {
+                            continue;
+                        }
+                        assert_eq!(exit.exit_reason, 259);
+                        assert_eq!(exit.emulated_tsc, deadline);
+                        break;
+                    }
+                    let r = vm.get_regs()?;
+                    let instruction = deadline % 4;
+                    let loops = deadline / 4;
+                    let decrements =
+                        loops + u64::from(instruction > if decrement_first { 0 } else { 2 });
+                    let advances =
+                        loops + u64::from(instruction > if decrement_first { 2 } else { 1 });
+                    let stores =
+                        loops + u64::from(instruction > if decrement_first { 1 } else { 0 });
+                    let mut offsets = if decrement_first {
+                        [0, 3, 6, 10]
+                    } else {
+                        [0, 3, 7, 10]
+                    };
+                    if width == 32 {
+                        for offset in &mut offsets {
+                            if *offset > decrement_offset as u64 {
+                                *offset -= 1;
+                            }
+                        }
+                    }
+                    assert_eq!(r.rip, 0x1000 + offsets[instruction as usize]);
+                    let remaining = if width == 32 {
+                        original_count as u32 as u64 - decrements
+                    } else {
+                        original_count - decrements
+                    };
+                    assert_eq!(
+                        if register == 1 {
+                            r.gprs.rcx
+                        } else {
+                            r.gprs.rdx
+                        },
+                        remaining
+                    );
+                    assert_eq!(r.gprs.rdi, 0x10000 + advances * 8);
+                    let flags: u64;
+                    unsafe {
+                        if width == 32 {
+                            core::arch::asm!("stc", "dec {value:e}", "pushfq", "pop {flags}",
+                            value = inout(reg) remaining + 1 => _, flags = lateout(reg) flags);
+                        } else {
+                            core::arch::asm!("stc", "dec {value}", "pushfq", "pop {flags}",
                         value = inout(reg) original_count - decrements + 1 => _,
                         flags = lateout(reg) flags);
-                }
-                assert_eq!(r.rflags & 0x8d5, flags & 0x8d5);
-                for index in 0..stores as usize {
+                        }
+                    }
+                    assert_eq!(r.rflags & 0x8d5, flags & 0x8d5);
+                    for index in 0..stores as usize {
+                        assert_eq!(
+                            &vm.memory()?[0x10000 + index * 8..0x10008 + index * 8],
+                            &regs.gprs.rax.to_le_bytes()
+                        );
+                    }
                     assert_eq!(
-                        &vm.memory()?[0x10000 + index * 8..0x10008 + index * 8],
-                        &regs.gprs.rax.to_le_bytes()
+                        &vm.memory()?[0x10000 + stores as usize * 8..0x10008 + stores as usize * 8],
+                        &[0; 8]
                     );
                 }
-                assert_eq!(
-                    &vm.memory()?[0x10000 + stores as usize * 8..0x10008 + stores as usize * 8],
-                    &[0; 8]
-                );
             }
         }
     }
