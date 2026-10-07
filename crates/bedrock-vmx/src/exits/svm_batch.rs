@@ -628,14 +628,20 @@ fn hazardous_entry(bytes: &[u8]) -> bool {
 }
 
 fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
+    // Amortize guest-memory translation without placing a full code page on
+    // the kernel stack. The carry covers every legal instruction prefix chain.
+    const CHUNK: usize = 512;
     let mut result = PageHazards {
         offsets: [0; 4],
         count: 0,
     };
-    let mut bytes = [0u8; 272];
-    for offset in (0..4096).step_by(256) {
-        ctx.read_guest_memory(GuestPhysAddr::new(physical + offset), &mut bytes[16..])
-            .ok()?;
+    let mut bytes = [0u8; CHUNK + 16];
+    for offset in (0..4096).step_by(CHUNK) {
+        ctx.read_guest_memory(
+            GuestPhysAddr::new(physical + offset as u64),
+            &mut bytes[16..],
+        )
+        .ok()?;
         for index in 0..bytes.len() {
             let position = offset as i64 + index as i64 - 16;
             let byte = bytes[index];
@@ -674,7 +680,7 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
                 result.count += 1;
             }
         }
-        bytes.copy_within(256..272, 0);
+        bytes.copy_within(CHUNK..CHUNK + 16, 0);
     }
     // Wrapping aliases and crossings to other permitted pages stay on the
     // conservative path. Interior hazards are covered at every prefix entry.

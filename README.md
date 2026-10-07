@@ -118,7 +118,9 @@ Native validation on an AMD EPYC 4585PX with Ubuntu Linux 7.0.0-38-generic
 includes Linux 6.18 booting to userspace and matching executions of two Linux
 forks with the reference stepping backend. The accelerated backend passes exact
 Linux checkpoints with matching registers and guest-memory hashes, plus loop
-and REP deadline/fork tests; its complete Linux boot/replay test is still pending.
+and REP deadline/fork tests. Its complete Linux integration test also passes:
+boot to a userspace snapshot, matching clock/randomness/registers/instruction
+counts in two children, and isolation of the parent's memory.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,

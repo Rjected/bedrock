@@ -43,8 +43,11 @@ impl NptExecutionGuard {
             let table = allocator
                 .phys_to_virt(self.tables[level])
                 .cast::<EptEntry>();
-            for index in 0..512 {
-                if self.changed_nx[level][index / 64] & (1 << (index % 64)) != 0 {
+            for (word, &changed) in self.changed_nx[level].iter().enumerate() {
+                let mut remaining = changed;
+                while remaining != 0 {
+                    let index = word * 64 + remaining.trailing_zeros() as usize;
+                    remaining &= remaining - 1;
                     // SAFETY: these live tables are exclusively guarded.
                     // Preserve hardware A/D updates when restoring NX.
                     unsafe { (*table.add(index)).set_npt_nx(false) };
@@ -241,16 +244,22 @@ impl<Frame> EptPageTable<Frame> {
             let table = allocator
                 .phys_to_virt(guard.tables[slot])
                 .cast::<EptEntry>();
-            for index in 0..512 {
-                let mask = 1 << (index % 64);
-                let selected = guard.changed_nx[slot][index / 64] & mask != 0;
-                guard.changed_nx[slot][index / 64] &= !mask;
-                // SAFETY: exclusive EPT access; every path was validated above.
-                let entry = unsafe { &mut *table.add(index) };
-                if !selected && entry.is_present() && entry.raw() & (1 << 63) == 0 {
-                    entry.set_npt_nx(true);
-                    guard.changed_nx[slot][index / 64] |= mask;
+            for (word, bits) in guard.changed_nx[slot].iter_mut().enumerate() {
+                let selected = *bits;
+                let mut changed = 0;
+                for bit in 0..64 {
+                    let mask = 1 << bit;
+                    if selected & mask != 0 {
+                        continue;
+                    }
+                    // SAFETY: exclusive EPT access; every path was validated above.
+                    let entry = unsafe { &mut *table.add(word * 64 + bit) };
+                    if entry.is_present() && entry.raw() & (1 << 63) == 0 {
+                        entry.set_npt_nx(true);
+                        changed |= mask;
+                    }
                 }
+                *bits = changed;
             }
         }
         for &(slot, index, _) in &guard.leaves[..guard.leaf_count] {
