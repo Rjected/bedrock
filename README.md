@@ -132,9 +132,12 @@ Page execution requires more than
 4,096 instructions before the next deadline. This margin has been exercised on
 the validation host; it is not a calibrated bound for every AMD processor.
 The table-frame list can be reused within a RUN while guarded execution,
-known non-writing instructions, or MOV/PUSH stores proven disjoint from table
-frames preserve its shape. Unproven writes,
-emulation, and a new RUN invalidate it; a changed CR3 rebuilds it.
+known non-writing instructions (including ENDBR64 and conditional branches),
+or MOV/PUSH stores proven disjoint from table frames preserve its shape.
+PUSHF emulation checks every translated stack destination: table overlap
+revokes the table proof, and code overlap revokes cached code scans.
+Other unproven writes, emulation, and a new RUN invalidate the table proof;
+a changed CR3 rebuilds it.
 
 Regions ending at an unconditional SVM intercept omit the execution breakpoint,
 then replay that intercept after timer and deadline handling at the boundary.

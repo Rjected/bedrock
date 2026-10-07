@@ -442,10 +442,14 @@ where
 
         let kernel = machine.kernel();
         if Ctx::V::uses_nested_paging()
-            && ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok() != Some(37)
+            && !matches!(
+                ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(),
+                Some(37 | 512)
+            )
         {
             // Emulated exits can write guest RAM, including interrupt frames
-            // and device responses. Synthetic MTF handling writes no RAM.
+            // and device responses. Synthetic MTF handling writes no RAM;
+            // the PUSHF handler checks its actual stack destinations itself.
             ctx.state_mut().svm_guard.valid = false;
         }
         match handle_exit(ctx, kernel, allocator) {

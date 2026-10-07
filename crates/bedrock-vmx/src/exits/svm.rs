@@ -474,6 +474,22 @@ fn emulate<C: VmContext, A: CowAllocator<C::CowPage>>(
         *address = physical(ctx, ss_base.wrapping_add((offset + i as u64) & stack_mask))?;
     }
     if push {
+        // PUSHF writes only these translated stack bytes. Preserve guarded
+        // table/code proofs when disjoint, including physical stack aliases.
+        let guard = &mut ctx.state_mut().svm_guard;
+        if addresses[..width]
+            .iter()
+            .any(|address| guard.tables[..guard.count].contains(&(address.as_u64() & !4095)))
+        {
+            guard.valid = false;
+            guard.code_count = 0;
+        } else if addresses[..width].iter().any(|address| {
+            guard.code[..guard.code_count]
+                .iter()
+                .any(|proof| proof.page == address.as_u64() & !4095)
+        }) {
+            guard.code_count = 0;
+        }
         if ctx.is_forked() {
             for i in 0..width {
                 if i == 0 || addresses[i].as_u64() >> 12 != addresses[i - 1].as_u64() >> 12 {
@@ -673,6 +689,66 @@ mod tests {
         }
         assert!(!prepare_mov_ss_register(&ctx, 0xd0, 4, 3).unwrap());
         assert!(!prepare_mov_ss_register(&ctx, 0x10, 0, 2).unwrap());
+    }
+
+    #[test]
+    fn pushf_preserves_disjoint_proofs_and_revokes_stack_aliases() {
+        for (table, code, rsp, valid, code_count) in [
+            (0x3000, 0x1000, 0x8000, true, 1),
+            (0x7000, 0x1000, 0x8000, false, 0),
+            (0x3000, 0x7000, 0x8000, true, 0),
+            (0x6000, 0x1000, 0x7004, false, 0),
+        ] {
+            let mut ctx = context();
+            ctx.set_guest_rflags(0x202);
+            ctx.vmcs_setup()
+                .set_field32(VmcsField32::GuestCsAccessRights, 1 << 13);
+            ctx.vmcs_setup()
+                .set_field_natural(VmcsFieldNatural::GuestRsp, rsp);
+            ctx.memory[0x1000] = 0x9c;
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.valid = true;
+            guard.tables[0] = table;
+            guard.count = 1;
+            guard.code[0].page = code;
+            guard.code_count = 1;
+            assert_eq!(
+                handle_flags(&mut ctx, &mut MockFrameAllocator::new(), true),
+                ExitHandlerResult::Continue
+            );
+            assert_eq!(ctx.state().svm_guard.valid, valid);
+            assert_eq!(ctx.state().svm_guard.code_count, code_count);
+        }
+        let mut ctx = context();
+        ctx.set_guest_rflags(0x202);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestCsAccessRights, 1 << 13);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr0, 1 << 31);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x3000);
+        ctx.vmcs_setup()
+            .write64(VmcsField64::GuestIa32Efer, 1 << 10)
+            .unwrap();
+        for (address, entry) in [
+            (0x3000, 0x4007u64),
+            (0x4000, 0x5007),
+            (0x5000, 0x6007),
+            (0x6008, 0x1007),
+            (0x6038, 0x3007),
+        ] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        ctx.memory[0x1000] = 0x9c;
+        ctx.state_mut().svm_guard.valid = true;
+        ctx.state_mut().svm_guard.tables[0] = 0x3000;
+        ctx.state_mut().svm_guard.count = 1;
+        // The virtual stack at 0x7000 aliases the active root at GPA 0x3000.
+        assert_eq!(
+            handle_flags(&mut ctx, &mut MockFrameAllocator::new(), true),
+            ExitHandlerResult::Continue
+        );
+        assert!(!ctx.state().svm_guard.valid);
     }
 
     #[test]

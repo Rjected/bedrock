@@ -17,6 +17,9 @@ const _: () = assert!(SVM_CODE_PAGE_CAPACITY <= NptExecutionGuard::MAX_PAGES);
 /// Unknown instructions and control transfers terminate a batch. The flags
 /// distinguish memory access from stores, including implicit stack accesses.
 fn safe_len(bytes: &[u8], long: bool, default32: bool) -> Option<(usize, bool, bool)> {
+    if long && bytes.starts_with(&[0xf3, 0x0f, 0x1e, 0xfa]) {
+        return Some((4, false, false)); // ENDBR64 changes no registers or RAM.
+    }
     let mut p = 0;
     let mut operand_override = false;
     let mut address_override = false;
@@ -253,6 +256,9 @@ fn opcode_start(bytes: &[u8], long: bool) -> Option<(usize, u8, bool)> {
 /// Over-approximate GPR writes; unknown operations invalidate every address
 /// register. Subregister writes invalidate the whole architectural register.
 fn modified_gprs(bytes: &[u8], long: bool) -> u16 {
+    if long && bytes.starts_with(&[0xf3, 0x0f, 0x1e, 0xfa]) {
+        return 0;
+    }
     let Some((p, rex, _)) = opcode_start(bytes, long) else {
         return u16::MAX;
     };
@@ -548,7 +554,8 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
                     .unwrap_or(0)
                     & (1 << 13)
                     != 0;
-                long && (matches!(window.bytes[0], 0xc3 | 0xe9 | 0xeb)
+                long && (window.bytes[0] == 0xc3
+                    || relative_branch(&window.bytes, true, false).is_some()
                     || safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| !writes)
                     || scalar_store_preserves_guard(ctx, window, false))
             }),
@@ -602,11 +609,17 @@ fn scalar_store_preserves_guard<C: VmContext>(
         g.rax, g.rcx, g.rdx, g.rbx, rsp, g.rbp, g.rsi, g.rdi, g.r8, g.r9, g.r10, g.r11, g.r12,
         g.r13, g.r14, g.r15,
     ];
-    let Some((length, _, _)) = safe_len(&window.bytes, true, false) else {
-        return false;
+    let range = if window.bytes[0] == 0x9c {
+        // Unprefixed PUSHFQ is emulated at an SVM intercept, but its stack
+        // destination can be checked before entry just like an ordinary PUSH.
+        rsp.checked_sub(8).map(|address| (address, 8))
+    } else {
+        safe_len(&window.bytes, true, false).and_then(|(length, _, _)| {
+            // RIP-relative stores use the instruction end, not the window end.
+            store_range(&window.bytes[..length], rip, &gprs, 0)
+        })
     };
-    // RIP-relative stores use the actual next RIP, not the fetch-window end.
-    let Some((address, width)) = store_range(&window.bytes[..length], rip, &gprs, 0) else {
+    let Some((address, width)) = range else {
         return false;
     };
     let Some(end) = address.checked_add(width - 1) else {
@@ -1848,7 +1861,8 @@ impl BatchGuard {
                 .is_some_and(|window| {
                     // Entry stores often need scalar replay for A/D or table
                     // writes anyway. Replanning first only adds another guard.
-                    matches!(window.bytes[0], 0xc3 | 0xe9 | 0xeb)
+                    window.bytes[0] == 0xc3
+                        || relative_branch(&window.bytes, true, false).is_some()
                         || safe_len(&window.bytes, true, false)
                             .is_some_and(|(_, _, writes)| !writes)
                 });
@@ -2515,6 +2529,57 @@ mod tests {
             &batch.page_breakpoints[..batch.page_breakpoint_count],
             &[0x1200, 0x9200]
         );
+    }
+
+    #[test]
+    fn endbr64_retains_proofs_and_bounds_the_decoded_instruction() {
+        let bytes = [0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x89, 0x07];
+        assert_eq!(safe_len(&bytes, true, false), Some((4, false, false)));
+        assert_eq!(modified_gprs(&bytes, true), 0);
+        let mut ctx = paged_context(&bytes);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        prepare(&mut ctx, true, true, &window).unwrap();
+        retain_translation_cache(&mut ctx, None, Some(&window), false);
+        assert!(ctx.state().svm_guard.valid);
+        assert!(ctx.state().svm_guard.code_count > 0);
+        for other in [[0xf3, 0x0f, 0x1e, 0xfb], [0xf3, 0x0f, 0x1e, 0xf8]] {
+            assert_eq!(safe_len(&other, true, false), None);
+        }
+    }
+
+    #[test]
+    fn conditional_branches_retain_table_and_code_proofs() {
+        for condition in 0..16 {
+            for near in [false, true] {
+                let mut ctx = paged_context(&[0x90]);
+                ctx.memory[0x1000..0x2000].fill(0x90);
+                let mut window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+                prepare(&mut ctx, true, true, &window).unwrap();
+                let code_count = ctx.state().svm_guard.code_count;
+                assert!(code_count > 0);
+                if near {
+                    window.bytes[..6].copy_from_slice(&[
+                        0x0f,
+                        0x80 + condition,
+                        0xfa,
+                        0xff,
+                        0xff,
+                        0xff,
+                    ]);
+                } else {
+                    window.bytes[..2].copy_from_slice(&[0x70 + condition, 0xfe]);
+                }
+                retain_translation_cache(&mut ctx, None, Some(&window), false);
+                assert!(ctx.state().svm_guard.valid);
+                assert_eq!(ctx.state().svm_guard.code_count, code_count);
+                // CALL still writes a return address; it must not inherit
+                // the memory-free classification of conditional branches.
+                window.bytes[..5].copy_from_slice(&[0xe8, 0, 0, 0, 0]);
+                retain_translation_cache(&mut ctx, None, Some(&window), false);
+                assert!(!ctx.state().svm_guard.valid);
+                assert_eq!(ctx.state().svm_guard.code_count, 0);
+            }
+        }
     }
 
     #[test]
