@@ -444,12 +444,13 @@ where
         if Ctx::V::uses_nested_paging()
             && !matches!(
                 ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(),
-                Some(30 | 37 | 512 | 513)
+                Some(10 | 16 | 30 | 37 | 51 | 512 | 513)
             )
         {
             // Emulated exits can write guest RAM, including interrupt frames
             // and device responses. Synthetic MTF handling writes no RAM;
-            // port I/O and POPF change no guest RAM. The PUSHF handler checks
+            // CPUID, clock reads, port I/O, and POPF change no guest RAM.
+            // The PUSHF handler checks
             // its actual stack destinations itself. Event delivery revokes
             // the proof separately before writing an interrupt frame.
             ctx.state_mut().svm_guard.valid = false;

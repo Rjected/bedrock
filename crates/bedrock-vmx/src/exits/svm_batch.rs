@@ -625,7 +625,10 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
                     .unwrap_or(0)
                     & (1 << 13)
                     != 0;
-                long && (scalar_iret_preserves_guard(ctx, window)
+                long && (window.bytes.starts_with(&[0x0f, 0x31])
+                    || window.bytes.starts_with(&[0x0f, 0x01, 0xf9])
+                    || window.bytes.starts_with(&[0x0f, 0xa2])
+                    || scalar_iret_preserves_guard(ctx, window)
                     || matches!(window.bytes[0], 0xc3 | 0x9d | 0xe4..=0xe7 | 0xec..=0xef)
                     || relative_branch(&window.bytes, true, false).is_some()
                     || safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| !writes)
@@ -2975,6 +2978,24 @@ mod tests {
         for other in [[0xf3, 0x0f, 0x1e, 0xfb], [0xf3, 0x0f, 0x1e, 0xf8]] {
             assert_eq!(safe_len(&other, true, false), None);
         }
+    }
+
+    #[test]
+    fn register_only_intercepts_keep_ram_proofs() {
+        let mut ctx = paged_context(&[0x90]);
+        let mut window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        prepare(&mut ctx, true, true, &window).unwrap();
+        let code_count = ctx.state().svm_guard.code_count;
+        for opcode in [&[0x0f, 0x31][..], &[0x0f, 0x01, 0xf9], &[0x0f, 0xa2]] {
+            window.bytes[..opcode.len()].copy_from_slice(opcode);
+            retain_translation_cache(&mut ctx, None, Some(&window), false);
+            assert!(ctx.state().svm_guard.valid);
+            assert_eq!(ctx.state().svm_guard.code_count, code_count);
+        }
+        // Control-register writes may change the page-table interpretation.
+        window.bytes[..3].copy_from_slice(&[0x0f, 0x22, 0xd8]);
+        retain_translation_cache(&mut ctx, None, Some(&window), false);
+        assert!(!ctx.state().svm_guard.valid);
     }
 
     #[test]

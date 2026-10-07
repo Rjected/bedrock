@@ -161,8 +161,9 @@ PUSHF emulation checks every translated stack destination: table overlap
 revokes the table proof, and code overlap revokes cached code scans.
 Guarded counter entries run PUSHF natively when TF and RF are clear; the
 counter exit restores interception before stepping can resume. NPT write
-guards stop stores into protected code or tables. POPF and port I/O handlers
-retain still-valid RAM proofs; guest event delivery revokes them before
+guards stop stores into protected code or tables. CPUID, RDTSC/RDTSCP, POPF,
+and port I/O handlers retain still-valid RAM proofs; guest event delivery
+revokes them before
 writing an interrupt frame.
 Other unproven writes, emulation, and a new RUN invalidate the table proof;
 a changed CR3 rebuilds it.
@@ -211,6 +212,10 @@ Retaining scans through cached-code write guards further reduces a matching
 50-million checkpoint pair to 2.83 and 2.82 seconds on the same host.
 The full fresh-boot pair also matches at 36.20 and 36.08 seconds; this change
 has not shown a measurable full-boot speedup.
+Retaining proofs across CPUID and RDTSC/RDTSCP exits reduces the matching
+50-million checkpoint pair to 2.80 and 2.79 seconds, and the full fresh-boot
+pair to 33.40 and 33.37 seconds. Four replays of the one-million-instruction
+span from 100 million to 101 million also match the stepped reference.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
