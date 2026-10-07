@@ -65,6 +65,10 @@ can join a batch when their address registers retain their entry values and
 their destinations cannot rewrite the code or subsequent store translations.
 These stores can also join forward-only branches when their address registers
 are stable across every decoded path.
+Counted MOV-store loops using DEC RCX, an advancing RDI, and JNZ can run on
+the retired-instruction counter after validating their entire destination range.
+The range must map to contiguous physical pages and cannot overlap code or
+any page table used by the code or destination translations.
 Outside guarded page execution, unsupported instructions and other stores
 fall back to instruction stepping.
 Control-flow acceleration requires AMD PerfMonV2; counter allocation failure
@@ -110,6 +114,7 @@ sudo timeout 10 target/release/examples/svm_smoke
 sudo timeout 10 target/release/examples/svm_transitions
 sudo timeout 15 target/release/examples/svm_bench
 sudo timeout 15 target/release/examples/svm_bench page-loops
+sudo timeout 15 target/release/examples/svm_bench guarded-loops
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native-branches
 ```
@@ -121,6 +126,8 @@ counts on its two paths. These comparisons measure the
 verified loop path; it does not represent Linux or general guest workloads.
 `page-loops` exercises calls, returns, and stores across data pages, an exact
 mid-loop deadline, and two forks with matching final state and parent isolation.
+`guarded-loops` exercises a counted store loop on a page excluded from page-wide
+execution, including the same deadline and fork checks.
 `svm_bench VMLINUX INITRD [INSTRUCTIONS]` stops Linux at an exact instruction
 checkpoint (one million by default), reports its registers and RAM hash, and
 limits each check to ten seconds.

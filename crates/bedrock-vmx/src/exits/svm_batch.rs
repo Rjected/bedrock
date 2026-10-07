@@ -538,6 +538,150 @@ fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
     (!forbidden_page_bytes(&bytes[..32])).then_some(())
 }
 
+// A counted MOV-store loop can use entry-time range validation when RDI
+// advances once per iteration and RCX decreases once before JNZ. Other writes
+// or control transfers require the ordinary conservative planner.
+fn counted_store_loop<C: VmContext>(
+    ctx: &C,
+    bytes: &[u8],
+    gprs: &[u64; 16],
+    batch: &mut InstructionBatch,
+) -> Option<()> {
+    if gprs[1] == 0 {
+        return None;
+    }
+    let mut candidate = *batch;
+    let mut offset = 0;
+    let mut decrement = false;
+    let mut stride = None;
+    let mut first = u64::MAX;
+    let mut last = 0;
+    while candidate.count < 64 {
+        let tail = bytes.get(offset..)?;
+        if tail.starts_with(&[0x75]) || tail.starts_with(&[0x0f, 0x85]) {
+            let (length, displacement) = relative_branch(tail, true, false)?;
+            if offset as i64 + length as i64 + displacement != 0
+                || !decrement
+                || stride.is_none()
+                || first == u64::MAX
+            {
+                return None;
+            }
+            offset += length;
+            candidate.count += 1;
+            candidate.offsets[candidate.count] = offset as u16;
+            break;
+        }
+        let (length, _, writes) = safe_len(tail, true, false)?;
+        let instruction = &tail[..length];
+        if instruction == [0x48, 0xff, 0xc9] && !decrement {
+            decrement = true;
+        } else if instruction.len() == 4
+            && instruction[..3] == [0x48, 0x8d, 0x7f]
+            && instruction[3] > 0
+            && instruction[3] < 128
+            && stride.is_none()
+        {
+            stride = Some(u64::from(instruction[3]));
+        } else if writes && stride.is_none() {
+            let (p, rex, _) = opcode_start(instruction, true)?;
+            if !matches!(instruction[p], 0x88 | 0x89 | 0xc6 | 0xc7)
+                || rex & 1 != 0
+                || instruction.get(p + 1)? & 7 != 7
+            {
+                return None;
+            }
+            let (address, width) =
+                store_range(instruction, candidate.start + offset as u64, gprs, 0)?;
+            let displacement = address.checked_sub(gprs[7])?;
+            first = first.min(displacement);
+            last = last.max(displacement.checked_add(width)?);
+        } else {
+            return None;
+        }
+        offset += length;
+        candidate.count += 1;
+        candidate.offsets[candidate.count] = offset as u16;
+    }
+    let stride = stride?;
+    if candidate.count == 64 || last > stride {
+        return None;
+    }
+    let start = gprs[7].checked_add(first)?;
+    let end = gprs[7]
+        .checked_add(gprs[1].checked_sub(1)?.checked_mul(stride)?)?
+        .checked_add(last.checked_sub(1)?)?;
+    validate_contiguous_store_range(ctx, &candidate, start, end)?;
+    candidate.uses_counter = true;
+    candidate.counter_bounded = false;
+    candidate.accesses_memory = true;
+    candidate.writes_memory = true;
+    candidate.validated_stores = true;
+    candidate.endpoint_intercepted = endpoint_intercepted(bytes.get(offset..)?);
+    *batch = candidate;
+    Some(())
+}
+
+fn validate_contiguous_store_range<C: VmContext>(
+    ctx: &C,
+    batch: &InstructionBatch,
+    start: u64,
+    end: u64,
+) -> Option<()> {
+    let first_page = start & !4095;
+    let last_page = end & !4095;
+    if last_page.checked_sub(first_page)? / 4096 >= 4096 {
+        return None;
+    }
+    let physical_start = super::svm::physical(ctx, first_page).ok()?.as_u64() & !4095;
+    let physical_end = physical_start
+        .checked_add(last_page - first_page)?
+        .checked_add(4095)?;
+    let overlaps = |page| page >= physical_start && page <= physical_end;
+    if batch.pages[..batch.page_count]
+        .iter()
+        .any(|&page| overlaps(page))
+    {
+        return None;
+    }
+    let mut page = first_page;
+    loop {
+        if super::svm::physical(ctx, page).ok()?.as_u64() & !4095
+            != physical_start.checked_add(page - first_page)?
+        {
+            return None;
+        }
+        let mut table = ctx
+            .state()
+            .vmcs
+            .read_natural(VmcsFieldNatural::GuestCr3)
+            .ok()?
+            & 0x000f_ffff_ffff_f000;
+        for shift in [39, 30, 21, 12] {
+            // Stores cannot redirect their own or a later iteration's walks.
+            if overlaps(table) || table == batch.pages[0] {
+                return None;
+            }
+            let mut entry = [0u8; 8];
+            ctx.read_guest_memory(
+                GuestPhysAddr::new(table + ((page >> shift) & 511) * 8),
+                &mut entry,
+            )
+            .ok()?;
+            let entry = u64::from_le_bytes(entry);
+            if shift == 12 || entry & (1 << 7) != 0 {
+                break;
+            }
+            table = entry & 0x000f_ffff_ffff_f000;
+        }
+        if page == last_page {
+            break;
+        }
+        page = page.checked_add(4096)?;
+    }
+    Some(())
+}
+
 pub(crate) fn prepare<C: VmContext>(
     ctx: &mut C,
     can_loop: bool,
@@ -675,6 +819,16 @@ fn prepare_verified<C: VmContext>(
         g.r14,
         g.r15,
     ];
+    if long && paged && can_loop && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN {
+        let mut candidate = batch;
+        collect_code_tables(ctx, &mut candidate, linear)?;
+        if counted_store_loop(ctx, &bytes[..available], &gprs, &mut candidate).is_some() {
+            return Some(candidate);
+        }
+        // Failed loop recognition leaves the collected translation frames
+        // intact, so the ordinary planner need not walk them again.
+        batch = candidate;
+    }
     let mut changed = 0u16;
     let mut stores = StorePlan::default();
     let mut offset = 0;
@@ -1051,6 +1205,58 @@ mod tests {
         let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
+    }
+
+    #[test]
+    fn counted_store_loops_prove_every_destination_and_translation() {
+        let code = [
+            0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf4, 0x0f, 0x01, 0xd9,
+        ];
+        let mut ctx = paged_context(&code);
+        ctx.state_mut().gprs.rcx = 100;
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter && b.validated_stores && !b.counter_bounded);
+        assert_eq!(b.count, 4);
+        for address in [0x1000, 0x3000, 0x4000, 0x5000] {
+            ctx.state_mut().gprs.rdi = address;
+            assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        }
+        ctx.state_mut().gprs.rdi = 0x7000;
+        ctx.state_mut().gprs.rcx = 0;
+        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        ctx.state_mut().gprs.rcx = u64::MAX;
+        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+    }
+
+    #[test]
+    fn counted_store_loops_accept_unrolled_memset_and_reject_mapping_changes() {
+        // Eight stores per iteration, as in an unrolled memset body.
+        let mut code = [0u8; 44];
+        for index in 0..8 {
+            code[index * 4..index * 4 + 4].copy_from_slice(&[0x48, 0x89, 0x47, index as u8 * 8]);
+        }
+        code[32..39].copy_from_slice(&[0x48, 0xff, 0xc9, 0x48, 0x8d, 0x7f, 64]);
+        let length = 41;
+        code[39..].copy_from_slice(&[0x75, (-(length as i8)) as u8, 0x0f, 0x01, 0xd9]);
+        let mut ctx = paged_context(&code);
+        ctx.state_mut().gprs.rcx = 128;
+        let b = planned(&ctx).unwrap();
+        assert!(b.uses_counter && b.validated_stores && !b.counter_bounded);
+        assert_eq!(b.count, 11);
+        assert_eq!(b.offsets[b.count] as usize, length);
+
+        // A later destination aliases a translation table, even though the
+        // first destination does not. Reject the whole loop.
+        ctx.memory[0x6040..0x6048].copy_from_slice(&0x6007u64.to_le_bytes());
+        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        // A noncontiguous mapping requires a different proof.
+        ctx.memory[0x6040..0x6048].copy_from_slice(&0xa007u64.to_le_bytes());
+        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        ctx.memory[0x6040..0x6048].copy_from_slice(&0x8007u64.to_le_bytes());
+        assert!(planned(&ctx).unwrap().uses_counter);
+        // Moving stores after the pointer advance invalidates the range.
+        ctx.memory[0x1000..0x1004].copy_from_slice(&[0x48, 0x8d, 0x7f, 64]);
+        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
     }
 
     #[test]
