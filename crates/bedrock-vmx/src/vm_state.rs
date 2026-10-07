@@ -7,6 +7,7 @@ use super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+use super::traits::InstructionBatch;
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptWriteGuard;
 #[cfg(feature = "cargo")]
@@ -41,6 +42,17 @@ pub(crate) struct SvmGuardScratch {
     pub alias_cursor: usize,
     pub region_proofs: [SvmRegionProof; 32],
     pub region_cursor: usize,
+    pub page_plans: [SvmPagePlan; 128],
+    pub code_epoch: u64,
+    pub tree_generation: u64,
+}
+
+pub(crate) struct SvmPagePlan {
+    pub valid: bool,
+    pub key: u64,
+    pub code_epoch: u64,
+    pub tree_generation: u64,
+    pub batch: core::mem::MaybeUninit<InstructionBatch>,
 }
 
 #[derive(Clone, Copy)]

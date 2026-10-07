@@ -449,6 +449,7 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
         .then_some(());
     }
     let scratch = &mut ctx.state_mut().svm_guard;
+    scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
     scratch.alias_proof.valid = false;
     for proof in &mut scratch.alias_proofs {
         proof.valid = false;
@@ -926,6 +927,7 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
         let index = memo.unwrap_or(ctx.state().svm_guard.hazard_memo_cursor);
         let cache = &mut ctx.state_mut().svm_guard;
         cache.hazard_memos[index].revision = cache.hazard_memos[index].revision.wrapping_add(1);
+        cache.code_epoch = cache.code_epoch.wrapping_add(1);
         ctx.state_mut().svm_guard.hazard_memos[index].valid = false;
         for offset in (0..4096).step_by(bytes.len()) {
             ctx.read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
@@ -1600,12 +1602,104 @@ fn validate_contiguous_store_range<C: VmContext>(
     Some(())
 }
 
+fn page_plan_slot(linear: u64, root: u64) -> usize {
+    let key = linear ^ root.rotate_left(17);
+    ((key ^ key.rotate_right(23)) as usize) & 127
+}
+
+fn cached_page_plan<C: VmContext>(
+    ctx: &C,
+    can_loop: bool,
+    can_guard_page_tables: bool,
+    window: &super::svm::InstructionWindow,
+) -> Option<InstructionBatch> {
+    if !can_loop || !can_guard_page_tables || repeat_len(&window.bytes).is_some() {
+        return None;
+    }
+    let state = ctx.state();
+    let v = &state.vmcs;
+    let cache = &state.svm_guard;
+    if !cache.valid
+        || state.mtf_enabled
+        || v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
+        || v.read_natural(VmcsFieldNatural::GuestCr0).ok()? & (1 << 31) == 0
+        || v.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0
+        || v.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
+        || state
+            .svm_rejected_pages
+            .contains(&(window.physical.as_u64() & !4095))
+    {
+        return None;
+    }
+    let budget = instruction_budget(ctx);
+    if budget <= InstructionBatch::COUNTER_DEADLINE_MARGIN {
+        return None;
+    }
+    let root = v.read_natural(VmcsFieldNatural::GuestCr3).ok()? & 0x000f_ffff_ffff_f000;
+    if cache.root != root {
+        return None;
+    }
+    let key = window.linear ^ root.rotate_left(17);
+    let plan = &cache.page_plans[page_plan_slot(window.linear, root)];
+    if !plan.valid
+        || plan.key != key
+        || plan.tree_generation != cache.tree_generation
+        || plan.code_epoch != cache.code_epoch
+    {
+        return None;
+    }
+    // SAFETY: valid is set only after the batch has been initialized.
+    let cached = unsafe { plan.batch.assume_init_ref() };
+    if !cached.page_execution
+        || cached.start != v.read_natural(VmcsFieldNatural::GuestRip).ok()?
+        || cached.pages[0] != window.physical.as_u64() & !4095
+        || window.linear
+            != cached
+                .start
+                .checked_add(v.read_natural(VmcsFieldNatural::GuestCsBase).ok()?)?
+        || !cached.pages[..cached.code_page_count].iter().all(|&page| {
+            cache.code[..cache.code_count]
+                .iter()
+                .any(|proof| proof.page == page)
+        })
+    {
+        return None;
+    }
+    let mut batch = *cached;
+    batch.instruction_budget = budget;
+    Some(batch)
+}
+
+fn remember_page_plan<C: VmContext>(
+    ctx: &mut C,
+    batch: &InstructionBatch,
+    window: &super::svm::InstructionWindow,
+) {
+    if !batch.page_execution || !ctx.state().svm_guard.valid {
+        return;
+    }
+    let root = ctx.state().svm_guard.root;
+    let cache = &mut ctx.state_mut().svm_guard;
+    let tree_generation = cache.tree_generation;
+    let code_epoch = cache.code_epoch;
+    let plan = &mut cache.page_plans[page_plan_slot(window.linear, root)];
+    plan.valid = false;
+    plan.key = window.linear ^ root.rotate_left(17);
+    plan.tree_generation = tree_generation;
+    plan.code_epoch = code_epoch;
+    plan.batch.write(*batch);
+    plan.valid = true;
+}
+
 pub(crate) fn prepare<C: VmContext>(
     ctx: &mut C,
     can_loop: bool,
     can_guard_page_tables: bool,
     window: &super::svm::InstructionWindow,
 ) -> Option<InstructionBatch> {
+    if let Some(batch) = cached_page_plan(ctx, can_loop, can_guard_page_tables, window) {
+        return Some(batch);
+    }
     let page = window.physical.as_u64() & !4095;
     let mut allow_page = false;
     // Reuse hazard scans while the guard proves the bytes have not changed.
@@ -1681,6 +1775,7 @@ pub(crate) fn prepare<C: VmContext>(
                 .any(|proof| proof.valid && proof.page == page))
             && collect_reachable_breakpoints(ctx, &mut batch, window.linear).is_some()
         {
+            remember_page_plan(ctx, &batch, window);
             return Some(batch);
         }
         let current = window.linear & !4095;
@@ -1773,6 +1868,7 @@ pub(crate) fn prepare<C: VmContext>(
             batch.page_count -= 1;
         }
     }
+    remember_page_plan(ctx, &batch, window);
     Some(batch)
 }
 
@@ -3225,6 +3321,33 @@ mod tests {
             &[0x1100]
         );
         assert_eq!(ctx.state().svm_guard.aliases[0].table, 0);
+    }
+
+    #[test]
+    fn cached_page_plan_requires_live_code_tree_and_deadline() {
+        let mut ctx = paged_context(&[0x90]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert!(cached_page_plan(&ctx, true, true, &window).is_some());
+
+        ctx.state_mut().stop_at_tsc = Some(InstructionBatch::COUNTER_DEADLINE_MARGIN);
+        assert!(cached_page_plan(&ctx, true, true, &window).is_none());
+        ctx.state_mut().stop_at_tsc = None;
+
+        let code_count = ctx.state().svm_guard.code_count;
+        ctx.state_mut().svm_guard.code_count = 0;
+        assert!(cached_page_plan(&ctx, true, true, &window).is_none());
+        ctx.state_mut().svm_guard.code_count = code_count;
+
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x2000);
+        assert!(cached_page_plan(&ctx, true, true, &window).is_none());
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x3000);
+
+        ctx.state_mut().svm_guard.valid = false;
+        assert!(cached_page_plan(&ctx, true, true, &window).is_none());
     }
 
     #[test]

@@ -158,6 +158,9 @@ boundaries on each preparation. Optional pages that cannot fit the four
 breakpoints are omitted before alias enumeration.
 Reachable-region proofs are tied to exact code bytes and recheck outgoing
 branch translations before reuse.
+Page-execution plans also reuse their selected pages and breakpoints for a
+repeated RIP/CR3 pair while the guarded translation tree and selected code
+proofs remain valid. The current instruction deadline is applied on each reuse.
 NPT permission guards reuse a heap workspace and cached executable-entry masks;
 write guards restore leaf permissions directly without another table walk.
 Optional code-page translations are cached while the guarded guest table proof
@@ -296,6 +299,10 @@ Expanding the guarded executable working set from 16 to 64 pages reduces a
 full Linux boot/fork run to 17.91 seconds and about 0.86 million exits on the
 validation host. The planner's largest measured stack frame stays below the
 8KB kernel limit, and 1,024 checkpoint replays from 8 to 8.1 million match.
+Caching guarded page plans reduces two full boot/fork runs to 16.02 and
+16.05 seconds with about 0.86 million exits. The SVM hardware suite and
+another 1,024 checkpoint replays pass. Later boot phases still invalidate
+these plans frequently, leaving planning as the main measured cost.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
