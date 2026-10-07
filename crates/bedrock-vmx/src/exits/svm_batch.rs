@@ -639,11 +639,17 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
     }
     match batch {
         Some(batch) if batch.page_execution || batch.guarded_stores => {
-            // Other cached pages may be written as data during this entry.
+            // Retain only pages whose bytes are covered by this entry's
+            // write guards, including cached code guarded only as data.
             let cache = &mut ctx.state_mut().svm_guard;
             let mut index = 0;
             while index < cache.code_count {
-                if !batch.pages[..batch.code_page_count].contains(&cache.code[index].page) {
+                if !batch.pages[..batch.code_page_count].contains(&cache.code[index].page)
+                    && !cache
+                        .saved
+                        .iter()
+                        .any(|saved| saved.valid && saved.guest == cache.code[index].page)
+                {
                     cache.code_count -= 1;
                     cache.code[index] = cache.code[cache.code_count];
                 } else {
@@ -1996,6 +2002,36 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
             valid: true,
         };
     }
+    if batch.page_execution || batch.guarded_stores {
+        // Keep earlier hazard scans valid even for code omitted from this
+        // entry's executable set. Guard its bytes as data, within the existing
+        // workspace capacity; unguarded proofs are discarded before entry.
+        for index in 0..ctx.state().svm_guard.code_count {
+            if guard.saved_count == ctx.state().svm_guard.saved.len() {
+                break;
+            }
+            let page = ctx.state().svm_guard.code[index].page;
+            if batch.pages[..protected].contains(&page)
+                || ctx.state().svm_guard.tables[..tables].contains(&page)
+            {
+                continue;
+            }
+            let slot = guard.saved_count;
+            guard.saved_count += 1;
+            ctx.state_mut().svm_guard.saved[slot].valid = false;
+            if let Ok(Some(write_guard)) = ctx
+                .state_mut()
+                .ept
+                .restrict_write_4k(allocator, GuestPhysAddr::new(page))
+            {
+                ctx.state_mut().svm_guard.saved[slot] = super::super::vm_state::SvmGuardSaved {
+                    guest: page,
+                    write_guard,
+                    valid: true,
+                };
+            }
+        }
+    }
     if batch.page_execution {
         let mut pages = [GuestPhysAddr::new(0); SVM_CODE_PAGE_CAPACITY];
         for (target, &page) in pages.iter_mut().zip(&batch.pages[..batch.code_page_count]) {
@@ -2319,8 +2355,10 @@ mod tests {
             bedrock_ept::PageTableFormat::AmdNpt,
         )
         .unwrap();
+        assert!(cached_page_hazards(&mut ctx, 0xb000).is_some());
+        assert!(cached_page_hazards(&mut ctx, 0xc000).is_some());
         let mappings = [
-            0x1000, 0x3000, 0x4000, 0x5000, 0x6000, 0x7000, 0x8000, 0x9000, 0xa000,
+            0x1000, 0x3000, 0x4000, 0x5000, 0x6000, 0x7000, 0x8000, 0x9000, 0xa000, 0xb000,
         ];
         for page in mappings {
             ctx.state_mut()
@@ -2346,6 +2384,17 @@ mod tests {
             assert_eq!(permissions & 2 != 0, page == 0x7000);
             assert_ne!(permissions & 4, 0); // This guard does not restrict instruction fetch.
         }
+        retain_translation_cache(&mut ctx, Some(&batch), Some(&window), false);
+        assert!(
+            ctx.state().svm_guard.code[..ctx.state().svm_guard.code_count]
+                .iter()
+                .any(|proof| proof.page == 0xb000)
+        );
+        assert!(
+            !ctx.state().svm_guard.code[..ctx.state().svm_guard.code_count]
+                .iter()
+                .any(|proof| proof.page == 0xc000)
+        ); // Unmapped pages cannot retain their proof.
         ctx.vmcs_setup().set_field32(VmcsField32::VmExitReason, 48);
         ctx.vmcs_setup()
             .set_field_natural(VmcsFieldNatural::ExitQualification, 2);
@@ -2364,6 +2413,20 @@ mod tests {
                 bedrock_ept::EptPermissions::READ_WRITE_EXECUTE
             );
         }
+        let guard = protect(&mut ctx, &allocator, &batch).unwrap();
+        ctx.state()
+            .vmcs
+            .write64(VmcsField64::GuestPhysicalAddr, 0xb000)
+            .unwrap();
+        assert!(guard.restore(&mut ctx, &allocator)); // Cached-only code writes require scalar replay too.
+        assert_eq!(
+            ctx.state()
+                .ept
+                .lookup(&allocator, GuestPhysAddr::new(0xb000))
+                .unwrap()
+                .1,
+            bedrock_ept::EptPermissions::READ_WRITE_EXECUTE
+        );
         // A decoded instruction stream may not alias an unrelated table frame.
         ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x9000..0x9008].copy_from_slice(&0x1007u64.to_le_bytes());

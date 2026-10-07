@@ -133,6 +133,12 @@ the scalar path and are reported after retirement. Page hazard scans are cached
 within a RUN while guarded execution protects their bytes or scalar stores are
 proven disjoint from the cached pages. Pages omitted from a guard lose their
 scan approval before execution; emulation and a new RUN revoke approvals.
+Native page entries and decoded store blocks also write-protect previously
+scanned code omitted from their executable set, within the existing guard
+workspace capacity. Those pages remain guarded as data, allowing their hazard
+scans to survive the entry without another full-page byte comparison. A write
+fault on such a page restores permissions and uses scalar replay; pages that
+cannot be guarded lose their scan approval.
 Alias proofs are reused while the table-frame proof remains valid, with
 hazardous physical pages and hazard offsets as the cache key, independent of
 selection order and ordinary code pages. Cached edge summaries check cross-page
@@ -201,6 +207,10 @@ A fresh 50-million checkpoint pair also matches at 3.11 and 3.12 seconds, and
 a full fresh-boot pair matches at 36.09 seconds per root, compared with
 3.53 seconds and 38.05 seconds before this change. These checks cover the
 observed counting discrepancy, not every previously failing execution path.
+Retaining scans through cached-code write guards further reduces a matching
+50-million checkpoint pair to 2.83 and 2.82 seconds on the same host.
+The full fresh-boot pair also matches at 36.20 and 36.08 seconds; this change
+has not shown a measurable full-boot speedup.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
