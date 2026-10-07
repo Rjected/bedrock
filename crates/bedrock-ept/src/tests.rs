@@ -391,3 +391,89 @@ fn ept_page_table_clone_for_fork() {
         EptPermissions::READ_WRITE_EXECUTE.bits()
     );
 }
+
+#[test]
+fn page_execution_guard_blocks_other_subtrees_and_restores_cow_and_nx() {
+    use crate::traits::GuestPhysAddr;
+    use crate::PageTableFormat;
+    let mut allocator = TestAllocator::new();
+    let mut ept = EptPageTable::new_with_format(&mut allocator, PageTableFormat::AmdNpt).unwrap();
+    let pages = [0x1000, 0x2000, 1 << 21, 1 << 30, 1 << 39, 0x3000];
+    for (i, &page) in pages.iter().enumerate() {
+        let permissions = if i == 5 {
+            EptPermissions::from_bits(3)
+        } else if i == 1 {
+            EptPermissions::READ_EXECUTE
+        } else {
+            EptPermissions::READ_WRITE_EXECUTE
+        };
+        ept.map_4k(
+            &mut allocator,
+            GuestPhysAddr::new(page),
+            HostPhysAddr::new(0x9000 + i as u64 * 4096),
+            permissions,
+            EptMemoryType::WriteBack,
+        )
+        .unwrap();
+    }
+    let before: std::vec::Vec<_> = pages
+        .iter()
+        .map(|&p| ept.lookup(&allocator, GuestPhysAddr::new(p)))
+        .collect();
+    let frames = ept.frame_count();
+    let guard = ept
+        .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x1000))
+        .unwrap();
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x1000))
+            .unwrap()
+            .1
+            .bits(),
+        5
+    );
+    for &page in &pages[1..] {
+        assert_eq!(
+            ept.lookup(&allocator, GuestPhysAddr::new(page))
+                .unwrap()
+                .1
+                .bits()
+                & 4,
+            0
+        );
+    }
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x2000))
+            .unwrap()
+            .1
+            .bits()
+            & 2,
+        0
+    );
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(1 << 39))
+            .unwrap()
+            .1
+            .bits()
+            & 2,
+        2
+    );
+    guard.restore(&mut ept, &allocator);
+    for (i, &page) in pages.iter().enumerate() {
+        assert_eq!(ept.lookup(&allocator, GuestPhysAddr::new(page)), before[i]);
+    }
+    assert_eq!(frames, ept.frame_count());
+    let guard = ept
+        .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x2000))
+        .unwrap();
+    guard.restore(&mut ept, &allocator);
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x2000)),
+        before[1]
+    );
+    assert!(ept
+        .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x3000))
+        .is_none());
+    assert!(ept
+        .restrict_execution_to_page(&allocator, GuestPhysAddr::new(0x4000))
+        .is_none());
+}

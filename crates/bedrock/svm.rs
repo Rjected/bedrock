@@ -141,7 +141,7 @@ pub(crate) unsafe fn run(
         ctx.guest_rcx = repeat.iterations;
     }
     let breakpoint = if let Some(batch) = batch {
-        if batch.endpoint_intercepted {
+        if batch.page_execution || batch.endpoint_intercepted {
             0 // The endpoint itself exits through an unconditional SVM intercept.
         } else {
             v.write(o::DR7, 8, 0x401); // DR0 local execution breakpoint.
@@ -200,7 +200,32 @@ pub(crate) unsafe fn run(
             );
         }
     }
-    let stepped = code == 0x41 && original_tf == 0 && v.read(o::DR6, 8) & (1 << 14) != 0;
+    if let Some(batch) = batch.filter(|b| b.page_execution) {
+        // Free execution starts with TF and guest breakpoints disabled.
+        // SYSRET pages are excluded because it can restore guest TF mid-run.
+        if code == 0x41 { return Err(VmEntryError::VmEntryFailed); }
+        let count = if pmu_ready { exits::retired_instructions(before, after, code) }
+            else { None }.ok_or(VmEntryError::VmEntryFailed)?;
+        if count > batch.instruction_budget {
+            kernel::pr_err!("SVM page execution exceeded deadline: count={} budget={} code={:#x}\n",
+                count, batch.instruction_budget, code);
+            return Err(VmEntryError::VmEntryFailed);
+        }
+        if code == 0x61 {
+            // This is a host NMI, including perf counter overflow. A synthetic
+            // boundary must still acknowledge it through the host handler.
+            unsafe { core::arch::asm!("int $2", options(nomem, nostack)); }
+        }
+        // Preserve architectural TF/RF/DR6: this path never installed a
+        // breakpoint or hypervisor TF. Restore NPT permissions and replay the
+        // intercepted instruction after accounting/timers, using scalar mode.
+        let e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
+            .map_err(|_| VmEntryError::VmEntryFailed)?;
+        fields::record_exit(v, &e);
+        return Ok(count);
+    }
+    let debug_step = code == 0x41 && v.read(o::DR6, 8) & (1 << 14) != 0;
+    let stepped = debug_step && original_tf == 0;
     if (0x20..=0x3f).contains(&code) {
         // Decode-assist supplies the GPR. Guest debug addresses have their own
         // VMCB shadow; they must never overwrite the host's DR0 breakpoint.
@@ -329,7 +354,7 @@ pub(crate) unsafe fn run(
             })?
         }
     } else {
-        u64::from(stepped)
+        u64::from(debug_step || (code == 0x41 && original_tf != 0 && original_dr7 & 0x20ff == 0))
     };
     v.write(
         o::RFLAGS,

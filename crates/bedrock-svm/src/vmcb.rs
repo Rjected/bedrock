@@ -115,10 +115,10 @@ impl Vmcb {
     pub fn initialize(&mut self) {
         // External interrupts, NMI, CPUID, HLT, IOIO, MSR, VMRUN, VMMCALL,
         // VMLOAD, VMSAVE, STGI, CLGI, RDTSC, RDTSCP, RDPMC, MONITOR, MWAIT,
-        // XSETBV, RDPRU. SVM instructions must never execute in the guest.
+        // XSETBV, RDPRU, INVD, WBINVD, SKINIT. SVM instructions must never execute in the guest.
         for bit in [
-            96, 97, 110, 111, 112, 113, 114, 117, 120, 123, 124, 128, 129, 130, 131, 132, 133, 135,
-            138, 139, 140, 141, 142,
+            96, 97, 110, 111, 112, 113, 114, 117, 118, 120, 123, 124, 128, 129, 130, 131, 132, 133,
+            134, 135, 137, 138, 139, 140, 141, 142,
         ] {
             self.intercept(bit, true);
         }
@@ -168,6 +168,9 @@ mod tests {
         let mut v = Vmcb::new();
         v.initialize();
         assert_ne!(v.read(0x10, 4) & 3, 0); // VMRUN and VMMCALL
+        assert_ne!(v.read(0x0c, 4) & (1 << 22), 0); // INVD
+        assert_ne!(v.read(0x10, 4) & (1 << 6), 0); // SKINIT
+        assert_ne!(v.read(0x10, 4) & (1 << 9), 0); // WBINVD
         assert_eq!(v.read(0x90, 8), 1); // NPT enabled
         assert_eq!(v.read(0x58, 4), 1); // ASID must not be zero
         assert_eq!(v.read(0x60, 4), 1 << 24);

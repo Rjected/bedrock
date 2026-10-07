@@ -140,6 +140,14 @@ impl EptEntry {
         }
     }
 
+    pub(crate) fn set_npt_nx(&mut self, nx: bool) {
+        self.0 = (self.0 & !(1 << 63)) | if nx { 1 << 63 } else { 0 };
+    }
+
+    pub(crate) fn set_npt_writable(&mut self, writable: bool) {
+        self.0 = (self.0 & !2) | if writable { 2 } else { 0 };
+    }
+
     pub const fn raw(&self) -> u64 {
         self.0
     }

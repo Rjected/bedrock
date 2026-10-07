@@ -15,6 +15,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "native-branches" {
         return native_loop_comparison(true);
     }
+    if args.len() == 2 && args[1] == "page-loops" {
+        return test_page_loops();
+    }
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
     }
@@ -28,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | stores | VMLINUX INITRD [INSTRUCTIONS]]"
+            "Usage: svm_bench [native | native-branches | stores | page-loops | VMLINUX INITRD [INSTRUCTIONS]]"
                 .into(),
         );
     }
@@ -41,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_endpoint_deadline()?;
     test_forward_deadline()?;
     test_forward_stores()?;
+    test_page_loops()?;
     const LOOPS: u16 = 4096;
     const EXPECTED: u64 = 1 + LOOPS as u64 * 66 + 1;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
@@ -425,6 +429,82 @@ fn test_forward_stores() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("SVM_FORWARD_STORE_DEADLINE_FORK_PASS");
+    Ok(())
+}
+
+fn test_page_loops() -> Result<(), Box<dyn std::error::Error>> {
+    const VALUE: u64 = 0x123456789abcdef0;
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    // Six instructions per iteration: CALL, MOV store, LEA, RET, DEC, JNZ.
+    // Stores traverse many data pages; their addresses change every iteration.
+    let mut code = vec![
+        0xe8, 21, 0, 0, 0, 0x48, 0xff, 0xc9, 0x75, 0xf6, 0x4c, 0x8b, 0x87,
+    ];
+    code.extend((-800_000i32).to_le_bytes());
+    code.extend([
+        0x4c, 0x8b, 0x4f, 0xf8, 0x31, 0xc0, 0x0f, 0x01, 0xd9, 0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f,
+        8, 0xc3,
+    ]);
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rdi = 0x10000;
+    regs.gprs.rcx = 100_000;
+    regs.gprs.rax = VALUE;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(200_000))?;
+    let start = Instant::now();
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259);
+        assert_eq!(exit.emulated_tsc, 200_000);
+        let r = vm.get_regs()?;
+        assert_eq!(r.rip, 0x101d);
+        assert_eq!(r.gprs.rcx, 66667);
+        assert_eq!(r.gprs.rdi, 0x10000 + 33333 * 8);
+        assert_eq!(r.gprs.rsp, 0x7ff8);
+        break;
+    }
+    let mut hash = DefaultHasher::new();
+    hash.write(vm.memory()?);
+    let parent = hash.finish();
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let child = vm.fork()?;
+        child.set_stop_at_tsc(None)?;
+        loop {
+            let exit = child.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, 600_003);
+            let r = child.get_regs()?;
+            assert_eq!(r.gprs.rdi, 0x10000 + 800_000);
+            assert_eq!(r.gprs.rcx, 0);
+            assert_eq!(r.gprs.rsp, 0x8000);
+            assert_eq!(r.gprs.r8, VALUE);
+            assert_eq!(r.gprs.r9, VALUE);
+            results.push((r.rip, r.rflags, r.gprs.rdi, r.gprs.r8, r.gprs.r9));
+            break;
+        }
+    }
+    assert_eq!(results[0], results[1]);
+    let mut hash = DefaultHasher::new();
+    hash.write(vm.memory()?);
+    assert_eq!(hash.finish(), parent);
+    println!(
+        "SVM_PAGE_CALL_STORE_LOOP_FORK_PASS seconds={:.6}",
+        start.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

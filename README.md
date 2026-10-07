@@ -65,11 +65,24 @@ can join a batch when their address registers retain their entry values and
 their destinations cannot rewrite the code or subsequent store translations.
 These stores can also join forward-only branches when their address registers
 are stable across every decoded path.
-Unsupported instructions and other stores fall back to instruction stepping.
+Outside guarded page execution, unsupported instructions and other stores
+fall back to instruction stepping.
 Control-flow acceleration requires AMD PerfMonV2; counter allocation failure
 disables it. Forward-only regions stop at their endpoint and can run inside
 the performance-counter interrupt margin when their maximum instruction count
 fits before the next deadline. Backward branches still require that margin.
+Long-mode execution can also run across calls, returns, and store loops within
+a code page that contains no possible RDRAND/RDSEED/RDPID, repeated-string
+encoding, or SYSRET. SYSRET uses the scalar path because it can restore guest
+TF from R11. A temporary NPT guard makes that page read-only and blocks
+instruction fetch from every other page. The counter accounts for all retired instructions;
+a page transition, code write, or intercepted instruction ends the run and is
+replayed with stepping after timer handling. Guest single-step traps use
+the scalar path and are reported after retirement. Accepted pages are rescanned
+before each entry;
+only conservative rejections are cached. Page execution requires more than
+65,536 instructions before the next deadline.
+
 Regions ending at an unconditional SVM intercept omit the execution breakpoint,
 then replay that intercept after timer and deadline handling at the boundary.
 
@@ -96,6 +109,7 @@ cargo build --release -p bedrock-vm --examples
 sudo timeout 10 target/release/examples/svm_smoke
 sudo timeout 10 target/release/examples/svm_transitions
 sudo timeout 15 target/release/examples/svm_bench
+sudo timeout 15 target/release/examples/svm_bench page-loops
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native-branches
 ```
@@ -105,6 +119,8 @@ long-mode guest nine times, with matching code alignment, and reports median
 wall and thread CPU time. `native-branches` uses a loop with varying instruction
 counts on its two paths. These comparisons measure the
 verified loop path; it does not represent Linux or general guest workloads.
+`page-loops` exercises calls, returns, and stores across data pages, an exact
+mid-loop deadline, and two forks with matching final state and parent isolation.
 `svm_bench VMLINUX INITRD [INSTRUCTIONS]` stops Linux at an exact instruction
 checkpoint (one million by default), reports its registers and RAM hash, and
 limits each check to ten seconds.

@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_interrupt()?;
     test_iret()?;
     test_page_fault()?;
+    test_guest_debug_trap()?;
     Ok(())
 }
 
@@ -230,5 +231,55 @@ fn test_page_fault() -> Result<(), Box<dyn std::error::Error>> {
         println!("SVM_PAGE_FAULT_PASS");
         break;
     }
+    Ok(())
+}
+
+fn test_guest_debug_trap() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x1010].copy_from_slice(&[
+        0x90, 0x68, 2, 1, 0, 0, 0x9d, 0x90, // Enable guest TF, then NOP.
+        0x48, 0xff, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9,
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    vm.set_regs(&regs)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        // Guest #DB follows retirement. The existing exception policy returns
+        // it to userspace; it must not replay the subsequent INC instruction.
+        assert_eq!(exit.exit_reason, 0);
+        let r = vm.get_regs()?;
+        assert_eq!(r.rip, 0x1008);
+        assert_eq!(r.gprs.rbx, 0);
+        assert_eq!(r.gprs.rsp, 0x8000);
+        assert_ne!(r.rflags & (1 << 8), 0);
+        let mut resumed = r;
+        resumed.rflags &= !(1 << 8);
+        vm.set_regs(&resumed)?;
+        break;
+    }
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 258);
+        assert_eq!(
+            exit.emulated_tsc, 6,
+            "lost the instruction preceding guest #DB"
+        );
+        assert_eq!(vm.get_regs()?.gprs.rbx, 1);
+        break;
+    }
+    println!("SVM_GUEST_DEBUG_TRAP_PASS");
     Ok(())
 }

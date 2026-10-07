@@ -110,6 +110,10 @@ pub fn decode(
             e.reason = 10;
             2
         }
+        0x076 | 0x089 => {
+            e.reason = if code == 0x076 { 13 } else { 54 };
+            2
+        }
         0x078 => {
             e.reason = 12;
             1
@@ -197,6 +201,15 @@ pub fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cache_invalidation_exits_match_shared_reasons() {
+        for (code, reason) in [(0x76, 13), (0x89, 54)] {
+            let exit = decode(code, 0, 0, 0x1000, 0x1002, false).unwrap();
+            assert_eq!(exit.reason, reason);
+            assert_eq!(exit.instruction_len, 2);
+        }
+    }
+
     #[test]
     fn retired_counter_removes_entry_and_physical_nmi_ticks() {
         for code in [0x41, 0x60, 0x400, 0x4e, 0x72, 0x81] {

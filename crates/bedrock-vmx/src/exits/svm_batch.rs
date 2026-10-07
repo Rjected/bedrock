@@ -4,8 +4,12 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CowAllocator, InstructionBatch, RepeatBatch};
+#[cfg(not(feature = "cargo"))]
+use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
+#[cfg(feature = "cargo")]
+use bedrock_ept::NptExecutionGuard;
 
 /// Unknown instructions and control transfers terminate a batch. The flags
 /// distinguish memory access from stores, including implicit stack accesses.
@@ -481,9 +485,105 @@ fn validate_store<C: VmContext>(
     Some(())
 }
 
+fn forbidden_page_bytes(bytes: &[u8]) -> bool {
+    for start in 0..bytes.len() {
+        // RDRAND/RDSEED/RDPID have no general SVM interception. Checking
+        // their opcode at every byte also covers overlapping code and data.
+        if bytes.get(start..start + 2) == Some(&[0x0f, 0xc7])
+            && bytes.get(start + 2).is_some_and(|b| b & 0xf0 == 0xf0)
+        {
+            return true;
+        }
+        // SYSRET can restore TF from R11 without an SVM intercept. Preserve
+        // architectural debug-trap accounting by using the scalar backend.
+        if bytes.get(start..start + 2) == Some(&[0x0f, 0x07]) {
+            return true;
+        }
+        if !matches!(bytes[start], 0xf2 | 0xf3) {
+            continue;
+        }
+        for &byte in bytes.iter().skip(start + 1).take(14) {
+            if matches!(byte, 0xa4..=0xa7 | 0xaa..=0xaf) {
+                return true;
+            }
+            if !matches!(
+                byte,
+                0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0x40..=0x4f | 0xf2 | 0xf3
+            ) {
+                break;
+            }
+        }
+    }
+    false
+}
+
+fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
+    // Stream the scan to avoid a 4KB buffer on the 8KB kernel stack. Carry
+    // enough bytes to recognize any legal prefix chain between chunks.
+    let mut bytes = [0u8; 272];
+    let mut first = [0u8; 16];
+    for offset in (0..4096).step_by(256) {
+        ctx.read_guest_memory(GuestPhysAddr::new(physical + offset), &mut bytes[16..])
+            .ok()?;
+        if offset == 0 {
+            first.copy_from_slice(&bytes[16..32]);
+        }
+        if forbidden_page_bytes(&bytes) {
+            return None;
+        }
+        bytes.copy_within(256..272, 0);
+    }
+    bytes[16..32].copy_from_slice(&first);
+    // A guest can map this same physical page at adjacent virtual addresses.
+    (!forbidden_page_bytes(&bytes[..32])).then_some(())
+}
+
 pub(crate) fn prepare<C: VmContext>(
+    ctx: &mut C,
+    can_loop: bool,
+    window: &super::svm::InstructionWindow,
+) -> Option<InstructionBatch> {
+    let page = window.physical.as_u64() & !4095;
+    let mut allow_page = false;
+    let v = &ctx.state().vmcs;
+    let long = v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) != 0;
+    if long
+        && can_loop
+        && instruction_budget(ctx) > InstructionBatch::COUNTER_DEADLINE_MARGIN
+        && !ctx.state().svm_rejected_pages.contains(&page)
+    {
+        allow_page = page_safe(ctx, page).is_some();
+        if !allow_page {
+            let state = ctx.state_mut();
+            state.svm_rejected_pages[state.svm_rejected_cursor] = page;
+            state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
+        }
+    }
+    prepare_verified(ctx, can_loop, allow_page, window)
+}
+
+fn instruction_budget<C: VmContext>(ctx: &C) -> u64 {
+    let state = ctx.state();
+    let current = state.last_instruction_count + state.tsc_offset;
+    let mut budget = u64::MAX;
+    for target in [
+        super::next_timer_exit_count(ctx).map(|n| n + state.tsc_offset),
+        super::next_io_channel_target_tsc(ctx),
+        state.stop_at_tsc,
+        super::next_single_step_start_tsc(ctx),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        budget = budget.min(target.saturating_sub(current));
+    }
+    budget
+}
+
+fn prepare_verified<C: VmContext>(
     ctx: &C,
     can_loop: bool,
+    allow_page: bool,
     window: &super::svm::InstructionWindow,
 ) -> Option<InstructionBatch> {
     let state = ctx.state();
@@ -491,7 +591,7 @@ pub(crate) fn prepare<C: VmContext>(
     let flags = v.read_natural(VmcsFieldNatural::GuestRflags).ok()?;
     if flags & ((1 << 8) | (1 << 16)) != 0
         || state.mtf_enabled
-        || v.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0xff != 0
+        || v.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
     {
         return None;
     }
@@ -525,19 +625,7 @@ pub(crate) fn prepare<C: VmContext>(
     let paged = v.read_natural(VmcsFieldNatural::GuestCr0).ok()? & (1 << 31) != 0;
     let bytes = &window.bytes;
 
-    let current = state.last_instruction_count + state.tsc_offset;
-    let mut budget = u64::MAX;
-    for target in [
-        super::next_timer_exit_count(ctx).map(|n| n + state.tsc_offset),
-        super::next_io_channel_target_tsc(ctx),
-        state.stop_at_tsc,
-        super::next_single_step_start_tsc(ctx),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        budget = budget.min(target.saturating_sub(current));
-    }
+    let budget = instruction_budget(ctx);
     let limit = budget.min(4096) as usize;
     if limit < 2 {
         return None;
@@ -554,10 +642,20 @@ pub(crate) fn prepare<C: VmContext>(
         validated_stores: false,
         uses_counter: false,
         counter_bounded: true,
+        page_execution: false,
         endpoint_intercepted: false,
         instruction_budget: budget,
     };
     batch.pages[0] = physical.as_u64() & !4095;
+    if long && allow_page && can_loop && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN {
+        batch.page_execution = true;
+        batch.uses_counter = true;
+        batch.counter_bounded = false;
+        batch.accesses_memory = true;
+        batch.writes_memory = true;
+        return Some(batch);
+    }
+
     let g = &state.gprs;
     let gprs = [
         g.rax,
@@ -754,6 +852,7 @@ pub(crate) fn prepare<C: VmContext>(
 
 pub(crate) struct BatchGuard {
     saved: [Option<(GuestPhysAddr, HostPhysAddr, EptPermissions)>; 5],
+    execution: Option<NptExecutionGuard>,
 }
 
 pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
@@ -761,7 +860,18 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
     allocator: &A,
     batch: &InstructionBatch,
 ) -> Option<BatchGuard> {
-    let mut guard = BatchGuard { saved: [None; 5] };
+    let mut guard = BatchGuard {
+        saved: [None; 5],
+        execution: None,
+    };
+    if batch.page_execution {
+        guard.execution = Some(
+            ctx.state_mut()
+                .ept
+                .restrict_execution_to_page(allocator, GuestPhysAddr::new(batch.pages[0]))?,
+        );
+        return Some(guard);
+    }
     if !batch.accesses_memory {
         return Some(guard);
     }
@@ -800,6 +910,12 @@ impl BatchGuard {
         ctx: &mut C,
         allocator: &A,
     ) -> bool {
+        if let Some(execution) = self.execution {
+            execution.restore(&mut ctx.state_mut().ept, allocator);
+            // The fast exit is a synthetic boundary. Replay its instruction
+            // once with stepping and unrestricted execute permissions.
+            return true;
+        }
         let v = &ctx.state().vmcs;
         let write_fault = v.read32(VmcsField32::VmExitReason).ok() == Some(48)
             && v.read_natural(VmcsFieldNatural::ExitQualification)
@@ -880,7 +996,7 @@ mod tests {
 
     fn planned(ctx: &MockVmContext) -> Option<InstructionBatch> {
         let window = super::super::svm::InstructionWindow::read(ctx).unwrap();
-        prepare(ctx, true, &window)
+        prepare_verified(ctx, true, false, &window)
     }
 
     #[test]
@@ -935,6 +1051,53 @@ mod tests {
         let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
+    }
+
+    #[test]
+    fn only_rejected_pages_are_cached_after_code_changes() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(prepare(&mut ctx, true, &window).unwrap().page_execution);
+        // Modification outside the small instruction window must revoke
+        // page-wide execution; accepted pages have no persistent cache entry.
+        ctx.memory[0x1ff0..0x1ff3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        assert!(!prepare(&mut ctx, true, &window).unwrap().page_execution);
+        assert!(ctx.state().svm_rejected_pages.contains(&0x1000));
+        ctx.memory[0x1ff0..0x1ff3].fill(0x90);
+        assert!(!prepare(&mut ctx, true, &window).unwrap().page_execution);
+    }
+
+    #[test]
+    fn page_scan_rejects_rng_rep_chunk_boundaries_and_wrapping_aliases() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        assert!(page_safe(&ctx, 0x1000).is_some());
+        for bytes in [
+            &[0x0f, 0xc7, 0xf0][..],
+            &[0xf3, 0x48, 0xab],
+            &[0xf2, 0xa6],
+            &[0x0f, 0x07],
+        ] {
+            for offset in [0, 254, 255, 256, 4094, 4095] {
+                ctx.memory[0x1000..0x2000].fill(0x90);
+                for (i, &byte) in bytes.iter().enumerate() {
+                    ctx.memory[0x1000 + (offset + i) % 4096] = byte;
+                }
+                assert!(
+                    page_safe(&ctx, 0x1000).is_none(),
+                    "offset={offset} bytes={bytes:x?}"
+                );
+            }
+        }
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1000..0x1004].copy_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]); // ENDBR64
+        assert!(page_safe(&ctx, 0x1000).is_some());
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_verified(&ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution && batch.uses_counter);
+        ctx.state_mut().stop_at_tsc = Some(65536);
+        assert!(!prepare_verified(&ctx, true, true, &window).is_some_and(|b| b.page_execution));
     }
 
     #[test]
@@ -1198,6 +1361,7 @@ mod tests {
             validated_stores: false,
             uses_counter: true,
             counter_bounded: false,
+            page_execution: false,
             endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };
@@ -1258,6 +1422,7 @@ mod tests {
             validated_stores: false,
             uses_counter: false,
             counter_bounded: true,
+            page_execution: false,
             endpoint_intercepted: false,
             instruction_budget: u64::MAX,
         };

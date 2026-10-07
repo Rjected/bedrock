@@ -50,6 +50,8 @@ pub struct InstructionBatch {
     pub uses_counter: bool,
     /// Every transfer moves forward, bounding retirements by `count`.
     pub counter_bounded: bool,
+    /// Run freely within an immutable code page guarded by nested paging.
+    pub page_execution: bool,
     pub endpoint_intercepted: bool,
     pub instruction_budget: u64,
 }

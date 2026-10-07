@@ -751,6 +751,9 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     pub instruction_counter: I,
     /// Last instruction count read after VM exit.
     pub last_instruction_count: u64,
+    /// Conservative scan rejections can remain cached after code changes.
+    pub svm_rejected_pages: [u64; 64],
+    pub svm_rejected_cursor: usize,
     /// Emulated TSC: `last_instruction_count + tsc_offset`.
     pub emulated_tsc: u64,
     /// Added to the instruction count; grows when HLT/MWAIT skips to a deadline.
@@ -1000,6 +1003,8 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             msr_state: GuestMsrState::new(),
             kernel_gs_base: 0,
             instruction_counter,
+            svm_rejected_pages: [u64::MAX; 64],
+            svm_rejected_cursor: 0,
             last_instruction_count: 0,
             emulated_tsc: 0,
             tsc_offset: 0,
@@ -1773,6 +1778,8 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             msr_state: GuestMsrState::new(),
             kernel_gs_base: 0,
             instruction_counter,
+            svm_rejected_pages: [u64::MAX; 64],
+            svm_rejected_cursor: 0,
             last_instruction_count: 0,
             emulated_tsc: 0,
             tsc_offset: 0,
@@ -1986,6 +1993,8 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             msr_state: parent_state.msr_state,           // Copy MSR state
             kernel_gs_base: parent_state.kernel_gs_base,
             instruction_counter,
+            svm_rejected_pages: [u64::MAX; 64],
+            svm_rejected_cursor: 0,
             last_instruction_count: 0, // Child's counter starts from 0
             emulated_tsc: parent_state.emulated_tsc,
             tsc_offset: parent_state.emulated_tsc,
