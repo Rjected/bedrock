@@ -249,7 +249,13 @@ execution disabled. A separate trial that kept only whole-page counter batches
 also diverged. Disabling every counter-backed batch, while retaining
 exact-breakpoint batches, matched 256 replays; all-scalar execution did too.
 Counter-backed instruction accounting remains an unresolved correctness issue
-in both batch forms.
+in both batch forms. A trial retaining only counter-bounded batches, which stop
+before PMC overflow, matched 256 replays. On the validation host, 392 of the
+first 1,000 PMC overflows exited for another reason before NMI delivery; all
+had V_NMI_PENDING set, and most were nested-page faults. The guest IRPERF and
+programmable counters agreed at those exits. Adding one instruction to their
+count failed on the first replay, so the overflow race needs a more precise
+accounting fix.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
