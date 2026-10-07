@@ -1,0 +1,134 @@
+{
+  "method": "A static guest wrapper issues READY hypercalls immediately before fork/exec of bench send and immediately after waitpid. Guest CLOCK_MONOTONIC nanoseconds travel in registers. Instrumented CLI records Instant elapsed immediately on vm.run return before processing serial events. Both clocks bracket the same complete bench command. The CLI host clock runs in outer NixOS/KVM; Ubuntu marker-receipt clock is an independent transport-limited check. No journal timestamps are used.",
+  "runs": [
+    {
+      "run": 1,
+      "txgen_count": 10000,
+      "target_tps": 1000,
+      "markers": [
+        {
+          "guest_monotonic_ns": 61694870836,
+          "guest_tsc": 185762707081,
+          "host_seconds": 60.870620943,
+          "marker": 1,
+          "tsc_frequency": 2995200000,
+          "ubuntu_received_monotonic_seconds": 58474.727122341
+        },
+        {
+          "guest_monotonic_ns": 77984272244,
+          "guest_tsc": 234552718009,
+          "host_seconds": 91.046730001,
+          "marker": 2,
+          "tsc_frequency": 2995200000,
+          "ubuntu_received_monotonic_seconds": 58504.902711654
+        }
+      ],
+      "full_exit_tracing": false,
+      "workload_passed": true,
+      "bedrock_lifetime": {
+        "guest_virtual_seconds": 79.54568937333066,
+        "host_seconds": 91.562445785
+      },
+      "launcher_exit_code": 0,
+      "launcher_host_seconds": 95.83239533899905,
+      "bench_command": {
+        "guest_monotonic_seconds": 16.289401408,
+        "guest_virtual_tsc_seconds": 16.289400016025642,
+        "host_seconds": 30.176109058,
+        "ubuntu_marker_receipt_seconds": 30.175589313003,
+        "host_clock_vs_ubuntu_receipt_difference_seconds": 0.0005197449969998047,
+        "host_per_guest_second": 1.8524995671836046,
+        "host_transactions_per_second": 331.3879857996104
+      },
+      "benchmark": {
+        "sent": 10000,
+        "success": 10000,
+        "failed": 0,
+        "elapsed_secs": 15.229388709,
+        "tps": 656.6251732802889,
+        "run_stats": {
+          "start_block": 26,
+          "end_block": 86,
+          "total_blocks": 61,
+          "total_txs": 10000,
+          "total_gas": 310011832,
+          "duration_ms": 11999,
+          "avg_blocks_per_second": 5.083756979748312,
+          "avg_tps": 833.4027835652971,
+          "avg_gas_per_second": 25836472.372697722,
+          "block_time_p50_ms": 200,
+          "block_time_p95_ms": 201,
+          "block_time_p99_ms": 201
+        }
+      },
+      "zero_reverts": true
+    },
+    {
+      "run": 2,
+      "txgen_count": 10000,
+      "target_tps": 1000,
+      "markers": [
+        {
+          "guest_monotonic_ns": 61694870836,
+          "guest_tsc": 185762707081,
+          "host_seconds": 60.693330274,
+          "marker": 1,
+          "tsc_frequency": 2995200000,
+          "ubuntu_received_monotonic_seconds": 58570.603560129
+        },
+        {
+          "guest_monotonic_ns": 77984272244,
+          "guest_tsc": 234552718009,
+          "host_seconds": 90.746998083,
+          "marker": 2,
+          "tsc_frequency": 2995200000,
+          "ubuntu_received_monotonic_seconds": 58600.657010283
+        }
+      ],
+      "full_exit_tracing": false,
+      "workload_passed": true,
+      "bedrock_lifetime": {
+        "guest_virtual_seconds": 79.54568937333066,
+        "host_seconds": 91.261021563
+      },
+      "launcher_exit_code": 0,
+      "launcher_host_seconds": 95.57975425699988,
+      "bench_command": {
+        "guest_monotonic_seconds": 16.289401408,
+        "guest_virtual_tsc_seconds": 16.289400016025642,
+        "host_seconds": 30.053667808999997,
+        "ubuntu_marker_receipt_seconds": 30.05345015400235,
+        "host_clock_vs_ubuntu_receipt_difference_seconds": 0.00021765499764825336,
+        "host_per_guest_second": 1.8449829466563537,
+        "host_transactions_per_second": 332.7380891927393
+      },
+      "benchmark": {
+        "sent": 10000,
+        "success": 10000,
+        "failed": 0,
+        "elapsed_secs": 15.229388709,
+        "tps": 656.6251732802889,
+        "run_stats": {
+          "start_block": 26,
+          "end_block": 86,
+          "total_blocks": 61,
+          "total_txs": 10000,
+          "total_gas": 310011832,
+          "duration_ms": 11999,
+          "avg_blocks_per_second": 5.083756979748312,
+          "avg_tps": 833.4027835652971,
+          "avg_gas_per_second": 25836472.372697722,
+          "block_time_p50_ms": 200,
+          "block_time_p95_ms": 201,
+          "block_time_p99_ms": 201
+        }
+      },
+      "zero_reverts": true
+    }
+  ],
+  "aggregate": {
+    "mean_guest_bench_seconds": 16.289401408,
+    "mean_host_bench_seconds": 30.1148884335,
+    "maximum_ubuntu_clock_check_difference_ms": 0.5197449969998047
+  }
+}

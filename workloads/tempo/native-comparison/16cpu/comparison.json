@@ -1,0 +1,40 @@
+{
+  "measurement": "Actual host elapsed time for the complete bench send command, excluding boot and transaction generation. 10000 pathUSD transfers, txgen seed99, rate cap0, max_pending200, max_concurrent16, 200ms blocks.",
+  "native_5cpu": {
+    "seconds": [
+      13.274087481,
+      13.275302551
+    ],
+    "mean_seconds": 13.274695015999999
+  },
+  "native_16cpu": {
+    "seconds": [
+      13.267595804,
+      13.266823942
+    ],
+    "mean_seconds": 13.267209873,
+    "cpu_set": "2-17"
+  },
+  "bedrock": {
+    "seconds": [
+      24.097009956,
+      24.077104940000005
+    ],
+    "mean_seconds": 24.087057448000003,
+    "actual_execution_vcpus": 1,
+    "reported_cpus": 5,
+    "nested_in_nixos_kvm": true,
+    "second_run_bookkeeping_recovered_from_console": true
+  },
+  "bedrock_vs_native_16cpu": {
+    "duration_ratio": 1.815533007962691,
+    "extra_wall_time_percent": 81.5533007962691
+  },
+  "native_16_vs_5_improvement_percent": 0.056386553446063914,
+  "all_benchmarks": {
+    "sent": 10000,
+    "included": 10000,
+    "failed": 0,
+    "reverted": 0
+  }
+}

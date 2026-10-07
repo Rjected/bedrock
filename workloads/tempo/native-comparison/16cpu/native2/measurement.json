@@ -1,0 +1,40 @@
+{
+  "run": 2,
+  "execution": "native Ubuntu Docker",
+  "cpu_set": "2-17",
+  "actual_execution_cpus": 16,
+  "txgen_count": 10000,
+  "target_tps": 0,
+  "bench_host_seconds": 13.266823942,
+  "bench_host_tps": 753.7599084542069,
+  "txgen_container_host_seconds": 15.694734545002575,
+  "markers": [
+    {
+      "marker": 1,
+      "host_monotonic_ns": 61388276243872
+    },
+    {
+      "marker": 2,
+      "host_monotonic_ns": 61401543067814
+    }
+  ],
+  "sent": 10000,
+  "success": 10000,
+  "failed": 0,
+  "zero_reverts": true,
+  "benchmark_elapsed_seconds": 13.050268295,
+  "block_run_stats": {
+    "start_block": 12,
+    "end_block": 61,
+    "total_blocks": 50,
+    "total_txs": 10000,
+    "total_gas": 310011832,
+    "duration_ms": 9800,
+    "avg_blocks_per_second": 5.1020408163265305,
+    "avg_tps": 1020.408163265306,
+    "avg_gas_per_second": 31633860.408163264,
+    "block_time_p50_ms": 200,
+    "block_time_p95_ms": 201,
+    "block_time_p99_ms": 201
+  }
+}

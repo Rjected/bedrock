@@ -1,0 +1,11 @@
+{
+  "/home/ubuntu/bedrock/workloads/tempo/fair-timing/fair-bench": "5813797204c0b8de5c8eb1157a15d1d29fb5e69d193845d755a1cbc5a0d33897",
+  "/home/ubuntu/bedrock/workloads/tempo/fair-timing/fair-bench.c": "42413f0d34b842509ba05b309289dd3865514ad808a1bb530328e79651b9fed8",
+  "/home/ubuntu/bedrock/workloads/tempo/fair-timing/fair-run.sh": "552f7d9e2e0d07215d1feab9c5e436b5ed96145987ae41599fdf0b28f5ce9d16",
+  "/home/ubuntu/bedrock/workloads/tempo/fair-timing/initrd.gz": "6051d3d729e66d0a03a9a25449cab8f1df523e2edba77e208278b7c297fcff90",
+  "/home/ubuntu/bedrock/workloads/tempo/fair-timing/compose.yaml": "71063ee5de025170efdee921070f851105f985856634dcaa16924f75c51e49b5",
+  "/home/ubuntu/bedrock/workloads/tempo/fair-timing/cli-instrumentation.patch": "5ec59111601738c66867cdecaa55ed3a3446008a883443cfafb0035cf58a0e31",
+  "/home/ubuntu/bedrock/workloads/tempo/images.tar": "7207c333d04845adf667ad59e948fe9f312693e61fff13d65f61df6eb203f6bf",
+  "/home/ubuntu/bedrock/workloads/tempo/traces-patched/bedrock.ko": "7e279679e838b1caf6270c3a39e0aeab44dce5ee9b95ec211aabf96a7d93a58f",
+  "/nix/store/q2y5cz1822a9fp01ws1gsvflaf6amyw0-bedrock-cli-0.1.0/bin/bedrock-cli": "11ff555b53aced5ce9285c96507747e256c75af478b5da26e069cf7a19f354a7"
+}

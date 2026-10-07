@@ -274,6 +274,13 @@ where
 
         inject_pending_interrupt(ctx).map_err(VmRunError::ExitHandler)?;
 
+        // Interrupt preparation may stage an event in the full trace buffer.
+        // Drain before entering the guest, or its next exit record is dropped.
+        if ctx.state().event_buffer_full() {
+            ctx.state_mut().exit_stats.total_run_cycles += rdtsc().saturating_sub(loop_start_tsc);
+            break Ok(ExitReason::EventBufferFull);
+        }
+
         let pre_entry_tsc = rdtsc();
         ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
             pre_entry_tsc.saturating_sub(loop_start_tsc);
@@ -402,4 +409,85 @@ where
 
     finish_result?;
     loop_result
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::events::{EventCategories, EventKind, EVENT_BUFFER_SIZE, EVENT_HEADER_SIZE};
+    use crate::test_mocks::{MockFrameAllocator, MockMachine, MockVmcs};
+    use crate::tests::MockVmContext;
+    use crate::traits::{VmEntryError, VmxContext};
+
+    struct MustNotEnterGuest;
+
+    impl VmRunner for MustNotEnterGuest {
+        type Vmcs = MockVmcs;
+
+        unsafe fn run(
+            &mut self,
+            _ctx: &mut VmxContext,
+            _vmcs: &Self::Vmcs,
+        ) -> Result<(), VmEntryError> {
+            panic!("guest entered before draining the staged timer event");
+        }
+    }
+
+    #[test]
+    fn timer_event_overflow_drains_before_guest_entry() {
+        let mut ctx = MockVmContext::new();
+        ctx.state()
+            .vmcs
+            .write32(VmcsField32::IdtVectoringInfo, 0)
+            .unwrap();
+        ctx.state()
+            .vmcs
+            .write_natural(VmcsFieldNatural::GuestRflags, 0)
+            .unwrap();
+        ctx.state()
+            .vmcs
+            .write32(VmcsField32::PrimaryProcBasedVmExecControls, 0)
+            .unwrap();
+        let mut buffer = std::vec![0u8; EVENT_BUFFER_SIZE];
+        ctx.state_mut().set_event_buffer(buffer.as_mut_ptr());
+        ctx.state_mut().set_event_categories(EventCategories(0x3f));
+        ctx.state_mut().enable_exit_capture();
+        let fill = std::vec![0u8; EVENT_BUFFER_SIZE - EVENT_HEADER_SIZE];
+        assert!(ctx.state_mut().event_append(EventKind::Serial, &fill));
+
+        ctx.state_mut().emulated_tsc = 1;
+        let apic = &mut ctx.state_mut().devices.apic;
+        apic.svr = 1 << 8;
+        apic.lvt_timer = 236;
+        apic.timer_deadline = 1;
+
+        // Mocks perform no hardware VM entry. The runner panics if the loop
+        // reaches it while the timer is waiting in the pending-event slot.
+        let result = unsafe {
+            run_loop(
+                &mut ctx,
+                &mut MustNotEnterGuest,
+                &MockMachine,
+                &mut MockFrameAllocator::new(),
+                0,
+            )
+        };
+        assert!(
+            matches!(result, Ok(ExitReason::EventBufferFull)),
+            "{result:?}"
+        );
+        assert!(ctx.state().event_buffer_full());
+
+        // The next RUN re-appends the timer, leaving room for the guest's
+        // following exit record rather than silently dropping that record.
+        ctx.state_mut().event_clear();
+        ctx.state_mut()
+            .capture_exit(ExitReason::CrAccess, 259, true);
+        assert_eq!(
+            ctx.state().event_buffer_len(),
+            EVENT_HEADER_SIZE + 16 + EVENT_HEADER_SIZE + 512
+        );
+    }
 }

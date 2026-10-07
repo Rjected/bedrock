@@ -1,0 +1,44 @@
+{
+  "cpu_set": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "qemu_cpu_affinity": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "native_reported_and_execution_cpus": 5,
+  "bedrock_reported_cpus": 5,
+  "bedrock_execution_vcpus": 1,
+  "outer_vm_vcpus": 5,
+  "txgen_count": 10000,
+  "target_tps": 0,
+  "txgen_seed": 99,
+  "bedrock_seed": 12345,
+  "block_time_ms": 200,
+  "max_concurrent": 16,
+  "max_pending": 200,
+  "retries": 0,
+  "native_data_storage": "tmpfs mounted at /data",
+  "native_report_storage_during_benchmark": "tmpfs mounted at /results",
+  "bedrock_data_and_reports": "guest tmpfs",
+  "guest_memory_mb": 16384,
+  "native_container_memory_limit": "16 GiB each; workload well below limit",
+  "measurement": "Real host wall time around the same full bench send command, including receipt drain and postprocessing, excluding kernel/container boot, tx generation, and report export. Same static wrapper binary and txgen script in both environments.",
+  "images": "[bedrock/tempo-localnet:pinned ghcr.io/tempoxyz/tempo-localnet:latest ghcr.io/tempoxyz/tempo-localnet@sha256:9ab8e4ffe86cd397106d7462657b41a2723374f2ed554d0aac3afb1b54f24aa6] sha256:9ab8e4ffe86cd397106d7462657b41a2723374f2ed554d0aac3afb1b54f24aa6\n[bedrock/tempo-txgen:latest] sha256:6cb8f524be404409d6ecb1535f5611699d8f8c6d9e88a92d8051d298cba03562\n",
+  "inputs_sha256": {
+    "/home/ubuntu/bedrock/workloads/tempo/native-comparison/fair-bench": "034c3124d0ed82d9b525f66042497ec4d2c68875b25461a6d5fed351fafd5968",
+    "/home/ubuntu/bedrock/workloads/tempo/native-comparison/fair-bench.c": "4a32808914139a2a757d17179b5c3b5f38343b9f74ca18d010a80bd9786fa5c9",
+    "/home/ubuntu/bedrock/workloads/tempo/native-comparison/fair-run.sh": "42f229bdb83aa8d99d9cc99f139985f8f2a7e688e7840b4dd757260fceee6f26",
+    "/home/ubuntu/bedrock/workloads/tempo/native-comparison/initrd.gz": "691e4c4e0d15c6c444b749f57953c61822c2006fb3cedda58d2aa1ff06d2e779",
+    "/home/ubuntu/bedrock/workloads/tempo/native-comparison/compose.yaml": "743a1a4bf28241c6c908ed21390dda34dbe7164af86a277524ea7cd5d8baebe1",
+    "/home/ubuntu/bedrock/workloads/tempo/images.tar": "7207c333d04845adf667ad59e948fe9f312693e61fff13d65f61df6eb203f6bf",
+    "/home/ubuntu/bedrock/workloads/tempo/traces-patched/bedrock.ko": "7e279679e838b1caf6270c3a39e0aeab44dce5ee9b95ec211aabf96a7d93a58f"
+  }
+}

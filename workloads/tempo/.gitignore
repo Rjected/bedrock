@@ -1,0 +1,22 @@
+images.tar
+initrd.gz
+*.log
+check/libvmcall.h
+check/shutdown.c
+txgen/bedrock-file-store
+baseline-txgen/
+txgen-report.json
+compose-txgen-run.yaml
+txgen-host-timing.json
+txgen-host-timing-*.json
+txgen-report-*.json
+txgen-results.json
+traces/
+traces-patched/
+
+# Generated timing helpers and local build references
+**/fair-bench
+**/cli-path.txt
+
+# Full benchmark reports are regenerated; compact measurements are tracked
+**/report.json

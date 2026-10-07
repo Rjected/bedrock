@@ -57,12 +57,12 @@ let
 
     # VM hardware settings
     virtualisation = {
-      cores = 4;
-      memorySize = 8192;
+      cores = 5;
+      memorySize = 32768;
       diskSize = 4096;
       # Share the project directory into the VM
       sharedDirectories.bedrock = {
-        source = toString ./..;
+        source = "/home/ubuntu/bedrock";
         target = "/home/dev/bedrock";
       };
       qemu.options = [

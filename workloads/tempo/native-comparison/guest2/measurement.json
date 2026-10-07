@@ -1,0 +1,103 @@
+{
+  "run": 2,
+  "recovered_from_console": true,
+  "note": "Full bench command completed with timing boundaries, 10000 successful transactions and zero reverts. Runner was interrupted before final guest shutdown/export bookkeeping.",
+  "txgen_count": 10000,
+  "target_tps": 0,
+  "markers": [
+    {
+      "guest_monotonic_ns": 61694521880,
+      "guest_tsc": 185761662634,
+      "host_seconds": 60.523387373,
+      "marker": 1,
+      "tsc_frequency": 2995200000
+    },
+    {
+      "guest_monotonic_ns": 75828799755,
+      "guest_tsc": 228096648110,
+      "host_seconds": 84.600492313,
+      "marker": 2,
+      "tsc_frequency": 2995200000
+    }
+  ],
+  "bench_command": {
+    "host_seconds": 24.077104940000005,
+    "guest_monotonic_seconds": 14.134277875
+  },
+  "benchmark": {
+    "sent": 10000,
+    "success": 10000,
+    "failed": 0,
+    "elapsed_secs": 13.071393168,
+    "tps": 765.0293944551328,
+    "success_rate": 100,
+    "latency": {
+      "min_ms": 0.2889,
+      "max_ms": 34.127874000000006,
+      "mean_ms": 3.0091050000000004,
+      "p50_ms": 2.566956,
+      "p95_ms": 6.656727,
+      "p99_ms": 9.838888
+    },
+    "run_stats": {
+      "start_block": 26,
+      "end_block": 75,
+      "total_blocks": 50,
+      "total_txs": 10000,
+      "total_gas": 310011832,
+      "duration_ms": 9801,
+      "avg_blocks_per_second": 5.101520253035405,
+      "avg_tps": 1020.3040506070809,
+      "avg_gas_per_second": 31630632.792572185,
+      "block_time_p50_ms": 200,
+      "block_time_p95_ms": 201,
+      "block_time_p99_ms": 202
+    },
+    "receipt_metrics": [
+      {
+        "labels": {
+          "input": "pathusd_transfer"
+        },
+        "gas_used": {
+          "count": 10000,
+          "min": 26406,
+          "mean": 31001.1832,
+          "p50": 31218,
+          "p95": 31218,
+          "p99": 31218
+        },
+        "effective_gas_price": {
+          "count": 10000,
+          "min": 1600000000,
+          "mean": 1600000000,
+          "p50": 1600000000,
+          "p95": 1600000000,
+          "p99": 1600000000
+        },
+        "fee_paid": {
+          "count": 10000,
+          "min": 42249600000000,
+          "mean": 49601893120000,
+          "p50": 49948800000000,
+          "p95": 49948800000000,
+          "p99": 49948800000000
+        }
+      }
+    ],
+    "block_composition": {
+      "tx_count": 10000,
+      "gas_used": "310011832",
+      "kinds": [
+        {
+          "input": "pathusd_transfer",
+          "tx_count": 10000,
+          "tx_count_pct": 100,
+          "gas_used": "310011832",
+          "gas_pct": 100,
+          "reverted_tx_count": 0
+        }
+      ]
+    }
+  },
+  "zero_reverts": true
+}

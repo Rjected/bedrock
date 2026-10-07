@@ -1,0 +1,13 @@
+services:
+  tempo:
+    image: bedrock/tempo-localnet:pinned
+    container_name: tempo
+    network_mode: host
+    command: ["--bare", "--block-time", "200ms"]
+    environment:
+      RUST_LOG: info,reth::engine::tree=debug
+  check:
+    image: bedrock/tempo-check:latest
+    container_name: tempo-check
+    network_mode: host
+    depends_on: [tempo]
