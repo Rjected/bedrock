@@ -160,9 +160,11 @@ remains valid; revoking that proof or changing CR3 rebuilds the cache.
 Code-page hazard scans can survive proof invalidation through an exact-byte
 cache. All 4KB are compared before reusing a scan; changed bytes are rescanned.
 The sixteen-page cache adds approximately 64KB to each VM's heap workspace.
-Page execution requires more than
-4,096 instructions before the next deadline. This margin has been exercised on
-the validation host; it is not a calibrated bound for every AMD processor.
+Page execution requires more than 512 instructions before the next deadline.
+The largest observed PMC overflow lag was 135 retired instructions in a
+200-million-TSC checkpoint and a complete boot on the validation host. The
+margin is not a calibrated bound for every AMD processor; a late exit fails
+closed rather than returning an incorrect instruction count.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.
@@ -234,13 +236,14 @@ accelerated replays of the span from 8 million to 9 million instructions match
 the stepped reference at the first checkpoint where an earlier cold-root pair
 diverged. Four accelerated replays from 100 million to 110 million instructions
 also match the stepped reference.
-Allowing exact outgoing-branch breakpoints inside the 4,096-instruction counter
-deadline margin reduces the complete boot from 31.55 to 28.07 seconds on this
-host and from 8.61 million to 6.34 million exits. Sixteen accelerated replays
-from 8 to 9 million instructions and eight from 100 to 110 million match the
-stepping reference. VM entry setup remains the largest measured cost; the
-near-native register-loop benchmark does not represent general Linux boot
-overhead.
+Allowing exact outgoing-branch breakpoints inside the former 4,096-instruction
+counter deadline margin reduced the complete boot from 31.55 to 28.07 seconds
+on this host, and from 8.61 million to 6.34 million exits. Reducing the margin
+to 512 instructions then reduced it to 22.16 seconds and 2.73 million exits.
+Thirty-two accelerated replays from 8 to 9 million instructions and sixteen
+from 100 to 110 million match the stepping reference at the smaller margin.
+VM entry setup remains the largest measured cost; the near-native register-loop
+benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,

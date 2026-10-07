@@ -249,9 +249,11 @@ impl InstructionBatch {
     /// state. They are distinct from an exact hardware single-step.
     pub(crate) const PAGE_EXECUTION_BOUNDARY: u64 = 1 << 62;
 
-    // Interrupt latency is not precise on AMD. Leave a conservative margin
-    // for stepping, then fail closed if an interrupt still arrives too late.
-    pub const COUNTER_DEADLINE_MARGIN: u64 = 4096;
+    // AMD PMC overflow interrupts are asynchronous. Leave room for their
+    // delivery before an exact deadline, then fail closed if one arrives late.
+    // The validation host's largest observed lag was 135 retired instructions
+    // over a 200M-TSC checkpoint and a complete Linux boot.
+    pub const COUNTER_DEADLINE_MARGIN: u64 = 512;
 
     pub fn counter_period(&self) -> u64 {
         if self.counter_bounded {
