@@ -36,8 +36,25 @@ pub(crate) struct SvmGuardScratch {
     pub saved: [SvmGuardSaved; 128 + SVM_CODE_PAGE_CAPACITY],
     pub aliases: [SvmAliasWalk; 512],
     pub alias_proof: SvmAliasProof,
+    pub alias_proofs: [SvmAliasProof; 32],
+    pub alias_cursor: usize,
+    pub region_proofs: [SvmRegionProof; 32],
+    pub region_cursor: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SvmRegionProof {
+    pub valid: bool,
+    pub revision: u64,
+    pub page: u64,
+    pub linear: u64,
+    pub breakpoints: [u64; 4],
+    pub count: usize,
+    pub outgoing: [u64; 16],
+    pub outgoing_count: usize,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct SvmAliasProof {
     pub valid: bool,
     pub pages: [u64; SVM_CODE_PAGE_CAPACITY],
@@ -68,6 +85,7 @@ pub(crate) struct SvmCodeProof {
 /// Kept in the boxed scratch workspace, never copied through the kernel stack.
 pub(crate) struct SvmHazardMemo {
     pub valid: bool,
+    pub revision: u64,
     pub proof: SvmCodeProof,
     pub bytes: [u8; 4096],
 }

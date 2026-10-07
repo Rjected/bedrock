@@ -450,6 +450,9 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
     }
     let scratch = &mut ctx.state_mut().svm_guard;
     scratch.alias_proof.valid = false;
+    for proof in &mut scratch.alias_proofs {
+        proof.valid = false;
+    }
     scratch.valid = false;
     scratch.translation_count = 0;
     scratch.translation_cursor = 0;
@@ -872,6 +875,9 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
     if !ctx.state().svm_guard.valid {
         ctx.state_mut().svm_guard.code_count = 0;
         ctx.state_mut().svm_guard.alias_proof.valid = false;
+        for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
+            proof.valid = false;
+        }
     }
     let cache = &ctx.state().svm_guard;
     if let Some(proof) = cache.code[..cache.code_count]
@@ -918,6 +924,8 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
     } else {
         let hazards = page_hazards(ctx, physical)?;
         let index = memo.unwrap_or(ctx.state().svm_guard.hazard_memo_cursor);
+        let cache = &mut ctx.state_mut().svm_guard;
+        cache.hazard_memos[index].revision = cache.hazard_memos[index].revision.wrapping_add(1);
         ctx.state_mut().svm_guard.hazard_memos[index].valid = false;
         for offset in (0..4096).step_by(bytes.len()) {
             ctx.read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
@@ -1065,30 +1073,31 @@ fn collect_page_breakpoints<C: VmContext>(
     {
         return Some(());
     }
-    let proof = &ctx.state().svm_guard.alias_proof;
     // Only hazardous pages require alias breakpoints. Their physical set is
     // independent of the order and membership of ordinary selected code pages.
     let hazard_pages = hazards[..batch.code_page_count]
         .iter()
         .filter(|h| h.count != 0)
         .count();
-    if ctx.state().svm_guard.valid
-        && proof.valid
-        && proof.page_count == hazard_pages
-        && hazards[..batch.code_page_count]
-            .iter()
-            .enumerate()
-            .all(|(i, h)| {
-                h.count == 0
-                    || proof.pages[..proof.page_count]
-                        .iter()
-                        .position(|&page| page == batch.pages[i])
-                        .is_some_and(|slot| {
-                            proof.counts[slot] == h.count
-                                && proof.offsets[slot][..h.count] == h.offsets[..h.count]
-                        })
-            })
-    {
+    let cached = ctx.state().svm_guard.alias_proofs.iter().find(|proof| {
+        ctx.state().svm_guard.valid
+            && proof.valid
+            && proof.page_count == hazard_pages
+            && hazards[..batch.code_page_count]
+                .iter()
+                .enumerate()
+                .all(|(i, h)| {
+                    h.count == 0
+                        || proof.pages[..proof.page_count]
+                            .iter()
+                            .position(|&page| page == batch.pages[i])
+                            .is_some_and(|slot| {
+                                proof.counts[slot] == h.count
+                                    && proof.offsets[slot][..h.count] == h.offsets[..h.count]
+                            })
+                })
+    });
+    if let Some(proof) = cached {
         batch.page_breakpoints = proof.breakpoints;
         batch.page_breakpoint_count = proof.breakpoint_count;
         return Some(());
@@ -1182,6 +1191,183 @@ fn collect_page_breakpoints<C: VmContext>(
     }
     proof.breakpoints = batch.page_breakpoints;
     proof.breakpoint_count = batch.page_breakpoint_count;
+    let cache = &mut ctx.state_mut().svm_guard;
+    let cursor = cache.alias_cursor;
+    let proof = cache.alias_proof;
+    cache.alias_proofs[cursor] = proof;
+    cache.alias_cursor = (cursor + 1) % cache.alias_proofs.len();
+    Some(())
+}
+
+/// A whole-page byte scan may need more than four breakpoints across virtual
+/// aliases. In that case follow only decoded control flow from this entry.
+/// Unknown instructions become breakpoints before execution; indirect jumps
+/// cannot silently switch to another executable alias of the same GPA.
+fn outgoing_region_target<C: VmContext>(
+    ctx: &C,
+    physical: u64,
+    address: u64,
+    outgoing: &mut [u64; 16],
+    count: &mut usize,
+) -> Option<()> {
+    if super::svm::physical(ctx, address)
+        .ok()
+        .is_some_and(|p| p.as_u64() & !4095 == physical)
+    {
+        return None;
+    }
+    if !outgoing[..*count].contains(&address) {
+        *outgoing.get_mut(*count)? = address;
+        *count += 1;
+    }
+    Some(())
+}
+
+fn enqueue_region_target<C: VmContext>(
+    ctx: &C,
+    physical: u64,
+    virtual_page: u64,
+    target: usize,
+    queue: &mut [u16; 256],
+    queued: &mut usize,
+    outgoing: &mut [u64; 16],
+    outgoing_count: &mut usize,
+) -> Option<()> {
+    if target < 4096 {
+        *queue.get_mut(*queued)? = target as u16;
+        *queued += 1;
+    } else {
+        let address = virtual_page.checked_add(target as u64)?;
+        outgoing_region_target(ctx, physical, address, outgoing, outgoing_count)?;
+    }
+    Some(())
+}
+
+fn collect_reachable_breakpoints<C: VmContext>(
+    ctx: &mut C,
+    batch: &mut InstructionBatch,
+    linear: u64,
+) -> Option<()> {
+    if batch.code_page_count != 1 {
+        return None;
+    }
+    let physical = batch.pages[0];
+    let memo = ctx
+        .state()
+        .svm_guard
+        .hazard_memos
+        .iter()
+        .find(|memo| memo.valid && memo.proof.page == physical)?;
+    let revision = memo.revision;
+    let cache = &ctx.state().svm_guard;
+    if let Some(proof) = cache.region_proofs.iter().find(|proof| {
+        proof.valid
+            && proof.revision == revision
+            && proof.page == physical
+            && proof.linear == linear
+            && proof.outgoing[..proof.outgoing_count]
+                .iter()
+                .all(|&address| {
+                    !super::svm::physical(ctx, address)
+                        .ok()
+                        .is_some_and(|p| p.as_u64() & !4095 == physical)
+                })
+    }) {
+        batch.page_breakpoints = proof.breakpoints;
+        batch.page_breakpoint_count = proof.count;
+        return Some(());
+    }
+    let bytes = &memo.bytes;
+    let virtual_page = linear & !4095;
+    let mut seen = [0u8; 512];
+    let mut queue = [0u16; 256];
+    let mut queued = 1;
+    let mut cursor = 0;
+    let mut outgoing = [0u64; 16];
+    let mut outgoing_count = 0;
+    queue[0] = (linear & 4095) as u16;
+    batch.page_breakpoint_count = 0;
+    while cursor < queued {
+        let offset = usize::from(queue[cursor]);
+        cursor += 1;
+        let bit = 1u8 << (offset & 7);
+        if seen[offset >> 3] & bit != 0 {
+            continue;
+        }
+        seen[offset >> 3] |= bit;
+        let tail = &bytes[offset..];
+        if let Some((length, displacement)) = relative_branch(tail, true, false) {
+            let next = offset.checked_add(length)?;
+            let target = (virtual_page as i128) + (next as i128) + (displacement as i128);
+            if !(0..=u64::MAX as i128).contains(&target) {
+                return None;
+            }
+            let target = target as u64;
+            if target & !4095 == virtual_page {
+                enqueue_region_target(
+                    ctx,
+                    physical,
+                    virtual_page,
+                    (target & 4095) as usize,
+                    &mut queue,
+                    &mut queued,
+                    &mut outgoing,
+                    &mut outgoing_count,
+                )?;
+            } else {
+                outgoing_region_target(ctx, physical, target, &mut outgoing, &mut outgoing_count)?;
+            }
+            let prefix = usize::from(tail[0] == 0x2e);
+            let opcode = *tail.get(prefix)?;
+            if !matches!(opcode, 0xeb | 0xe9) {
+                enqueue_region_target(
+                    ctx,
+                    physical,
+                    virtual_page,
+                    next,
+                    &mut queue,
+                    &mut queued,
+                    &mut outgoing,
+                    &mut outgoing_count,
+                )?;
+            }
+            continue;
+        }
+        if let Some((length, _, _)) = safe_len(tail, true, false) {
+            enqueue_region_target(
+                ctx,
+                physical,
+                virtual_page,
+                offset.checked_add(length)?,
+                &mut queue,
+                &mut queued,
+                &mut outgoing,
+                &mut outgoing_count,
+            )?;
+            continue;
+        }
+        let address = virtual_page.checked_add(offset as u64)?;
+        if !batch.page_breakpoints[..batch.page_breakpoint_count].contains(&address) {
+            if batch.page_breakpoint_count == batch.page_breakpoints.len() {
+                return None;
+            }
+            batch.page_breakpoints[batch.page_breakpoint_count] = address;
+            batch.page_breakpoint_count += 1;
+        }
+    }
+    let cache = &mut ctx.state_mut().svm_guard;
+    let index = cache.region_cursor;
+    cache.region_proofs[index] = super::super::vm_state::SvmRegionProof {
+        valid: true,
+        revision,
+        page: physical,
+        linear,
+        breakpoints: batch.page_breakpoints,
+        count: batch.page_breakpoint_count,
+        outgoing,
+        outgoing_count,
+    };
+    cache.region_cursor = (index + 1) % cache.region_proofs.len();
     Some(())
 }
 
@@ -1451,11 +1637,6 @@ pub(crate) fn prepare<C: VmContext>(
         }
     }
     let prepared = prepare_verified(ctx, can_loop, allow_page, can_guard_page_tables, window);
-    if allow_page && !prepared.as_ref().is_some_and(|b| b.page_execution) {
-        let state = ctx.state_mut();
-        state.svm_rejected_pages[state.svm_rejected_cursor] = page;
-        state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
-    }
     let mut batch = prepared?;
     if batch.guarded_stores {
         if !can_guard_page_tables || collect_translation_tree(ctx, &batch).is_none() {
@@ -1487,6 +1668,20 @@ pub(crate) fn prepare<C: VmContext>(
             state.svm_rejected_pages[state.svm_rejected_cursor] = page;
             state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
             return prepare_verified(ctx, can_loop, false, false, window);
+        }
+        // Once a page has a reachable-region proof, use it before enumerating
+        // every executable alias again. The region proof rechecks outgoing
+        // translations and is tied to the validated physical code bytes.
+        if (hazards[0].count == batch.page_breakpoints.len()
+            || ctx
+                .state()
+                .svm_guard
+                .region_proofs
+                .iter()
+                .any(|proof| proof.valid && proof.page == page))
+            && collect_reachable_breakpoints(ctx, &mut batch, window.linear).is_some()
+        {
+            return Some(batch);
         }
         let current = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
@@ -1556,6 +1751,9 @@ pub(crate) fn prepare<C: VmContext>(
         ctx.state_mut().svm_recent_pages = updated;
         while collect_page_breakpoints(ctx, &mut batch, &hazards).is_none() {
             if batch.code_page_count == 1 {
+                if collect_reachable_breakpoints(ctx, &mut batch, window.linear).is_some() {
+                    break;
+                }
                 let state = ctx.state_mut();
                 state.svm_rejected_pages[state.svm_rejected_cursor] = page;
                 state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
@@ -2996,6 +3194,40 @@ mod tests {
     }
 
     #[test]
+    fn alias_proofs_reuse_multiple_hazardous_pages() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.memory[0x7100..0x7103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(
+            &first.page_breakpoints[..first.page_breakpoint_count],
+            &[0x1100]
+        );
+
+        ctx.set_guest_rip(0x7000);
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let second = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(
+            &second.page_breakpoints[..second.page_breakpoint_count],
+            &[0x7100]
+        );
+
+        ctx.state_mut().svm_guard.aliases[0].table = 0;
+        ctx.set_guest_rip(0x1000);
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first_again = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(
+            &first_again.page_breakpoints[..first_again.page_breakpoint_count],
+            &[0x1100]
+        );
+        assert_eq!(ctx.state().svm_guard.aliases[0].table, 0);
+    }
+
+    #[test]
     fn alias_proofs_rebuild_after_table_and_hazard_changes() {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
@@ -3028,6 +3260,82 @@ mod tests {
             &batch.page_breakpoints[..batch.page_breakpoint_count],
             &[0x1200, 0x9200]
         );
+    }
+
+    #[test]
+    fn reachable_region_traps_unknowns_without_guarding_unreachable_alias_hazards() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1000..0x1003].copy_from_slice(&[0x90, 0xeb, 0x2e]);
+        ctx.memory[0x1020..0x1022].copy_from_slice(&[0xf3, 0xa4]);
+        ctx.memory[0x1031] = 0xc3;
+        for offset in [0x100, 0x200] {
+            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf3, 0xa4]);
+        }
+        // A second executable virtual alias needs six hazard breakpoints.
+        ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x1031]
+        );
+        // An indirect transfer must stop before it can select the alias.
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.memory[0x1001..0x1003].copy_from_slice(&[0xff, 0xe0]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x1001]
+        );
+        // A direct branch to the executable alias cannot use the NPT fetch
+        // boundary, because both virtual addresses map to one physical page.
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.memory[0x1000..0x1005].copy_from_slice(&[0xe9, 0xfb, 0x7f, 0, 0]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(!prepare(&mut ctx, true, true, &window).is_some_and(|b| b.page_execution));
+    }
+
+    #[test]
+    fn transient_resume_flag_does_not_blacklist_safe_page() {
+        let mut ctx = paged_context(&[0x90]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        ctx.set_guest_rflags(2 | (1 << 16));
+        assert!(prepare(&mut ctx, true, true, &window).is_none());
+        assert!(!ctx.state().svm_rejected_pages.contains(&0x1000));
+        ctx.set_guest_rflags(2);
+        assert!(
+            prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
+    }
+
+    #[test]
+    fn reachable_region_cache_rechecks_outgoing_aliases() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1000..0x1005].copy_from_slice(&[0xe9, 0xfb, 0x7f, 0, 0]);
+        for offset in [0x100, 0x200, 0x300] {
+            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf3, 0xa4]);
+        }
+        ctx.memory[0x6050..0x6058].copy_from_slice(&0x1007u64.to_le_bytes());
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(first.page_execution);
+        assert!(ctx.state().svm_guard.region_proofs.iter().any(|proof| {
+            proof.valid
+                && proof.linear == 0x1000
+                && proof.outgoing[..proof.outgoing_count] == [0x9000]
+        }));
+        // Remap the outgoing address to this same physical code page. Its
+        // cached proof must not bypass the new executable alias.
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
+        assert!(!prepare(&mut ctx, true, true, &window).is_some_and(|b| b.page_execution));
     }
 
     #[test]

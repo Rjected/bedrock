@@ -119,7 +119,10 @@ up to sixteen recently visited code pages. Hardware execution breakpoints stop
 before possible RDRAND/RDSEED/RDPID, repeated-string encodings, and SYSRET;
 their prefix entry points and executable virtual aliases must fit in four
 breakpoint slots. Alias enumeration uses a preallocated workspace of 512
-virtual table paths and falls back if that capacity is exceeded. SYSRET uses the scalar path because it can restore guest
+virtual table paths and falls back if that capacity is exceeded. When alias
+breakpoints do not fit, a reachable-region proof can instead stop at unknown
+instructions and indirect transfers before they can reach an unguarded alias.
+SYSRET uses the scalar path because it can restore guest
 TF from R11. Ambiguous encodings across page boundaries use the fallback.
 A temporary NPT guard makes the selected code pages read-only and blocks
 instruction fetch from every other page. It also protects all reachable guest
@@ -148,11 +151,13 @@ workspace capacity. Those pages remain guarded as data, allowing their hazard
 scans to survive the entry without another full-page byte comparison. A write
 fault on such a page restores permissions and uses scalar replay; pages that
 cannot be guarded lose their scan approval.
-Alias proofs are reused while the table-frame proof remains valid, with
+Up to 32 alias proofs are reused while the table-frame proof remains valid, with
 hazardous physical pages and hazard offsets as the cache key, independent of
 selection order and ordinary code pages. Cached edge summaries check cross-page
 boundaries on each preparation. Optional pages that cannot fit the four
 breakpoints are omitted before alias enumeration.
+Reachable-region proofs are tied to exact code bytes and recheck outgoing
+branch translations before reuse.
 NPT permission guards reuse a heap workspace and cached executable-entry masks;
 write guards restore leaf permissions directly without another table walk.
 Optional code-page translations are cached while the guarded guest table proof
@@ -273,14 +278,20 @@ integration runs to 19.72 and 19.94 seconds, with about 1.82 million exits.
 Another 1,024 fork replays from 8 to 8.1 million instructions match. Profiling
 shows that frequent CR3 writes change the translation root, so their table
 proofs still need rebuilding.
-The remaining boot has about 1.7 million scalar MTF exits. Roughly 130,000
+Before the reachable-region path, the boot had about 1.7 million scalar MTF exits. Roughly 130,000
 sampled scalar returns land on one `memcpy`/`memmove` page: it has four real
 `REP MOVS`/`REP STOS` hazards and two executable virtual aliases, requiring
 more than the four available address breakpoints. A prototype that retired
 about 129,000 such returns in software passed the boot/fork comparison but
 left wall time near 19.6 seconds because per-entry planning still dominated;
-it was not retained. The fast path needs to execute larger verified regions
-through that page, with a proof that unreachable hazards cannot execute.
+it was not retained. The reachable-region proof now lets the hot page execute
+without breakpoints for hazards outside its decoded control flow. A 32-entry
+alias-proof cache avoids repeating expensive page-table walks across code
+pages. A full Linux boot and fork replay pass at 19.44 seconds and about
+0.93 million exits on the validation host, versus 19.72–19.94 seconds and
+about 1.82 million exits before these changes. The lower exit count has not
+yet produced a large wall-time improvement; alias-cache-only boot time was
+19.18 seconds in one A/B run.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
