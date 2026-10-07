@@ -777,7 +777,60 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
             count: proof.count,
         });
     }
-    let hazards = page_hazards(ctx, physical)?;
+    // Translation invalidation does not necessarily change code. Reuse a
+    // previous scan only after comparing every byte, including page edges.
+    let memo = ctx
+        .state()
+        .svm_guard
+        .hazard_memos
+        .iter()
+        .position(|memo| memo.valid && memo.proof.page == physical);
+    let mut bytes = [0u8; 512];
+    let unchanged = memo.is_some_and(|index| {
+        for offset in (0..4096).step_by(bytes.len()) {
+            if ctx
+                .read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
+                .is_err()
+                || ctx.state().svm_guard.hazard_memos[index].bytes[offset..offset + bytes.len()]
+                    != bytes
+            {
+                return false;
+            }
+        }
+        true
+    });
+    let hazards = if unchanged {
+        let proof = ctx.state().svm_guard.hazard_memos[memo.unwrap()].proof;
+        PageHazards {
+            boundary: proof.boundary,
+            edge: proof.edge,
+            offsets: proof.offsets,
+            count: proof.count,
+        }
+    } else {
+        let hazards = page_hazards(ctx, physical)?;
+        let index = memo.unwrap_or(ctx.state().svm_guard.hazard_memo_cursor);
+        ctx.state_mut().svm_guard.hazard_memos[index].valid = false;
+        for offset in (0..4096).step_by(bytes.len()) {
+            ctx.read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
+                .ok()?;
+            ctx.state_mut().svm_guard.hazard_memos[index].bytes[offset..offset + bytes.len()]
+                .copy_from_slice(&bytes);
+        }
+        let cache = &mut ctx.state_mut().svm_guard;
+        cache.hazard_memos[index].proof = super::super::vm_state::SvmCodeProof {
+            page: physical,
+            boundary: hazards.boundary,
+            edge: hazards.edge,
+            offsets: hazards.offsets,
+            count: hazards.count,
+        };
+        cache.hazard_memos[index].valid = true;
+        if memo.is_none() {
+            cache.hazard_memo_cursor = (index + 1) % cache.hazard_memos.len();
+        }
+        hazards
+    };
     let cache = &mut ctx.state_mut().svm_guard;
     let index = if cache.code_count < cache.code.len() {
         let index = cache.code_count;
@@ -2557,6 +2610,24 @@ mod tests {
         ctx.memory[0x1100..0x1105].copy_from_slice(&[0xf3, 0x66, 0x48, 0xa4, 0x90]);
         let b = prepare(&mut ctx, true, true, &window).unwrap();
         assert_eq!(&b.page_breakpoints[..b.page_breakpoint_count], &[0x1100]);
+    }
+
+    #[test]
+    fn hazard_memos_recheck_changed_bytes_after_proof_invalidation() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        assert_eq!(cached_page_hazards(&mut ctx, 0x1000).unwrap().count, 0);
+        ctx.state_mut().svm_guard.valid = false;
+        assert_eq!(cached_page_hazards(&mut ctx, 0x1000).unwrap().count, 0);
+        // New hazards crossing a chunk boundary must invalidate the memo.
+        ctx.memory[0x11ff..0x1203].copy_from_slice(&[0x48, 0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().svm_guard.valid = false;
+        let hazards = cached_page_hazards(&mut ctx, 0x1000).unwrap();
+        assert_eq!(&hazards.offsets[..hazards.count], &[0x1ff, 0x200]);
+        // Page-edge hazards must also be rescanned and rejected.
+        ctx.memory[0x1ffd..0x2000].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().svm_guard.valid = false;
+        assert!(cached_page_hazards(&mut ctx, 0x1000).is_none());
     }
 
     #[test]

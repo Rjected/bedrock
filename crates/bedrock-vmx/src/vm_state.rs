@@ -28,6 +28,8 @@ pub(crate) struct SvmGuardScratch {
     pub code: [SvmCodeProof; SVM_CODE_PAGE_CAPACITY],
     pub code_count: usize,
     pub code_cursor: usize,
+    pub hazard_memos: [SvmHazardMemo; SVM_CODE_PAGE_CAPACITY],
+    pub hazard_memo_cursor: usize,
     pub translations: [(u64, u64); SVM_CODE_PAGE_CAPACITY],
     pub translation_count: usize,
     pub translation_cursor: usize,
@@ -60,6 +62,14 @@ pub(crate) struct SvmCodeProof {
     pub edge: u16,
     pub offsets: [u16; 4],
     pub count: usize,
+}
+
+/// Exact code bytes allow reusing a scan after a translation proof expires.
+/// Kept in the boxed scratch workspace, never copied through the kernel stack.
+pub(crate) struct SvmHazardMemo {
+    pub valid: bool,
+    pub proof: SvmCodeProof,
+    pub bytes: [u8; 4096],
 }
 
 #[derive(Clone, Copy)]

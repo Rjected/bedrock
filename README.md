@@ -125,6 +125,9 @@ NPT permission guards reuse a heap workspace and cached executable-entry masks;
 write guards restore leaf permissions directly without another table walk.
 Optional code-page translations are cached while the guarded guest table proof
 remains valid; revoking that proof or changing CR3 rebuilds the cache.
+Code-page hazard scans can survive proof invalidation through an exact-byte
+cache. All 4KB are compared before reusing a scan; changed bytes are rescanned.
+The sixteen-page cache adds approximately 64KB to each VM's heap workspace.
 Page execution requires more than
 4,096 instructions before the next deadline. This margin has been exercised on
 the validation host; it is not a calibrated bound for every AMD processor.
@@ -150,10 +153,12 @@ Linux checkpoints with matching registers and guest-memory hashes, plus loop
 and REP deadline/fork tests. Its complete Linux integration test also passes:
 boot to a userspace snapshot, matching clock/randomness/registers/instruction
 counts in two children, and isolation of the parent's memory.
-Fresh roots match at the 100-million instruction checkpoint using guest IRPERF;
-the earlier GuestOnly programmable-counter clock diverged there. Both full
-boots pass child replay and parent isolation, but fresh boot snapshots still
-differ later in startup; full-boot reproducibility remains unresolved.
+Fresh roots have matched at the 100-million instruction checkpoint using guest
+IRPERF; the earlier GuestOnly programmable-counter clock diverged there.
+Repeated 50-million instruction runs have also produced different RAM hashes,
+sometimes despite matching registers, so those passing pairs do not establish fresh-boot
+determinism. Both full boots pass child replay and parent isolation, but fresh
+boot snapshots differ; full-boot reproducibility remains unresolved.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
