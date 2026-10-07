@@ -144,6 +144,25 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> V
         Ok(())
     }
 
+    fn guest_memory_matches(
+        &self,
+        gpa: GuestPhysAddr,
+        expected: &[u8],
+    ) -> Result<bool, MemoryError> {
+        let offset = gpa.as_u64() as usize;
+        let end = offset
+            .checked_add(expected.len())
+            .ok_or(MemoryError::OutOfRange)?;
+        if end > self.memory.size() {
+            return Err(MemoryError::OutOfRange);
+        }
+        // SAFETY: the range was checked against the contiguous guest allocation.
+        let actual = unsafe {
+            core::slice::from_raw_parts(self.memory.as_ptr().add(offset), expected.len())
+        };
+        Ok(actual == expected)
+    }
+
     fn write_guest_memory(&mut self, gpa: GuestPhysAddr, buf: &[u8]) -> Result<(), MemoryError> {
         let offset = gpa.as_u64() as usize;
         let end = offset

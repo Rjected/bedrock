@@ -32,6 +32,27 @@ pub trait VmContext {
 
     fn read_guest_memory(&self, gpa: GuestPhysAddr, buf: &mut [u8]) -> Result<(), MemoryError>;
 
+    /// Compare guest bytes without requiring a full-page temporary buffer.
+    /// Backends with direct guest page pointers can override the default.
+    fn guest_memory_matches(
+        &self,
+        gpa: GuestPhysAddr,
+        expected: &[u8],
+    ) -> Result<bool, MemoryError> {
+        let mut bytes = [0u8; 512];
+        for (offset, chunk) in expected.chunks(512).enumerate() {
+            let address = gpa
+                .as_u64()
+                .checked_add((offset * 512) as u64)
+                .ok_or(MemoryError::OutOfRange)?;
+            self.read_guest_memory(GuestPhysAddr::new(address), &mut bytes[..chunk.len()])?;
+            if bytes[..chunk.len()] != *chunk {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn write_guest_memory(&mut self, gpa: GuestPhysAddr, buf: &[u8]) -> Result<(), MemoryError>;
 
     /// Fill in the pending log entry's memory_hash by hashing dirty pages found

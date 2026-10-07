@@ -457,6 +457,42 @@ mod tests {
     }
 
     #[test]
+    fn guest_memory_comparison_crosses_parent_and_cow_pages() {
+        let (mut root, mut allocator) = create_test_root_vm();
+        let address = GuestPhysAddr::new(0x1ffe);
+        root.write_guest_memory(address, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(root.guest_memory_matches(address, &[1, 2, 3, 4]), Ok(true));
+
+        let mut forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
+            &root,
+            &MockMachine,
+            &mut allocator,
+            0xDEAD_BEEF_0000,
+            NullInstructionCounter,
+        )
+        .unwrap();
+        assert_eq!(
+            forked.guest_memory_matches(address, &[1, 2, 3, 4]),
+            Ok(true)
+        );
+        forked
+            .handle_cow_fault(GuestPhysAddr::new(0x2000), &mut allocator)
+            .unwrap();
+        forked
+            .write_guest_memory(GuestPhysAddr::new(0x2000), &[5, 6])
+            .unwrap();
+        assert_eq!(
+            forked.guest_memory_matches(address, &[1, 2, 3, 4]),
+            Ok(false)
+        );
+        assert_eq!(
+            forked.guest_memory_matches(address, &[1, 2, 5, 6]),
+            Ok(true)
+        );
+        assert_eq!(root.guest_memory_matches(address, &[1, 2, 3, 4]), Ok(true));
+    }
+
+    #[test]
     fn test_forkedvm_nested_fork() {
         let (mut root, mut allocator) = create_test_root_vm();
         let machine = MockMachine;

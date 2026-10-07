@@ -275,6 +275,40 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         Ok(())
     }
 
+    fn guest_memory_matches(
+        &self,
+        gpa: GuestPhysAddr,
+        expected: &[u8],
+    ) -> Result<bool, MemoryError> {
+        if expected.is_empty() {
+            return Ok(true);
+        }
+        let page = GuestPhysAddr::new(gpa.as_u64() & !0xfff);
+        let offset = (gpa.as_u64() & 0xfff) as usize;
+        let first_len = expected.len().min(PAGE_SIZE - offset);
+        let base = if let Some(cow_page) = <CowPageMap<P>>::get(&self.cow_pages, page) {
+            Page::virtual_address(cow_page).as_u64() as *const u8
+        } else {
+            self.parent_read_page(page).ok_or(MemoryError::OutOfRange)?
+        };
+        // SAFETY: the selected page is resident and first_len stays within it.
+        let actual = unsafe { core::slice::from_raw_parts(base.add(offset), first_len) };
+        if actual != &expected[..first_len] {
+            return Ok(false);
+        }
+        if first_len == expected.len() {
+            return Ok(true);
+        }
+        self.guest_memory_matches(
+            GuestPhysAddr::new(
+                page.as_u64()
+                    .checked_add(PAGE_SIZE as u64)
+                    .ok_or(MemoryError::OutOfRange)?,
+            ),
+            &expected[first_len..],
+        )
+    }
+
     fn write_guest_memory(&mut self, gpa: GuestPhysAddr, buf: &[u8]) -> Result<(), MemoryError> {
         let page_gpa = GuestPhysAddr::new(gpa.as_u64() & !0xFFF);
         let page_offset = (gpa.as_u64() & 0xFFF) as usize;

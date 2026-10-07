@@ -900,19 +900,11 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
         .hazard_memos
         .iter()
         .position(|memo| memo.valid && memo.proof.page == physical);
-    let mut bytes = [0u8; 512];
     let unchanged = memo.is_some_and(|index| {
-        for offset in (0..4096).step_by(bytes.len()) {
-            if ctx
-                .read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
-                .is_err()
-                || ctx.state().svm_guard.hazard_memos[index].bytes[offset..offset + bytes.len()]
-                    != bytes
-            {
-                return false;
-            }
-        }
-        true
+        ctx.guest_memory_matches(
+            GuestPhysAddr::new(physical),
+            &ctx.state().svm_guard.hazard_memos[index].bytes,
+        ) == Ok(true)
     });
     let hazards = if unchanged {
         let proof = ctx.state().svm_guard.hazard_memos[memo.unwrap()].proof;
@@ -924,6 +916,7 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
         }
     } else {
         let hazards = page_hazards(ctx, physical)?;
+        let mut bytes = [0u8; 512];
         let index = memo.unwrap_or(ctx.state().svm_guard.hazard_memo_cursor);
         let cache = &mut ctx.state_mut().svm_guard;
         cache.hazard_memos[index].revision = cache.hazard_memos[index].revision.wrapping_add(1);
