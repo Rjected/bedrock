@@ -1723,8 +1723,7 @@ fn prepare_verified<C: VmContext>(
     let mut stores = StorePlan::default();
     let mut offset = 0;
     let mut branch_targets = [0i64; 64];
-    let mut allow_branch_exits =
-        long && allow_guarded_stores && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN;
+    let mut allow_branch_exits = long && allow_guarded_stores;
     let mut branch_sources = [0u16; 64];
     let mut branch_count = 0;
     let mut first_branch = 0;
@@ -1898,6 +1897,12 @@ fn prepare_verified<C: VmContext>(
             batch.uses_counter = false;
             batch.counter_bounded = true;
         }
+    }
+    if batch.uses_counter
+        && !batch.counter_bounded
+        && budget <= InstructionBatch::COUNTER_DEADLINE_MARGIN
+    {
+        return None;
     }
     if batch.repeat.is_none() && batch.count < 2 && batch.branch_exit_count == 0 {
         return None;
@@ -3346,6 +3351,21 @@ mod tests {
         ctx.state_mut().stop_at_tsc = Some(100_000);
         let b = planned(&ctx).unwrap();
         assert!(b.uses_counter && !b.counter_bounded);
+    }
+
+    #[test]
+    fn outgoing_branch_uses_exact_breakpoints_inside_deadline_margin() {
+        let mut ctx = paged_context(&[0x90, 0x75, 0x20, 0x90, 0x90, 0x90]);
+        ctx.state_mut().stop_at_tsc = Some(4);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_verified(&ctx, true, false, true, &window).unwrap();
+        assert!(!batch.uses_counter);
+        assert_eq!(batch.count, 4);
+        assert_eq!(&batch.branch_exits[..batch.branch_exit_count], &[0x1023]);
+        let mut backward = paged_context(&[0x90, 0x75, 0xfc]);
+        backward.state_mut().stop_at_tsc = Some(4);
+        let window = super::super::svm::InstructionWindow::read(&backward).unwrap();
+        assert!(prepare_verified(&backward, true, false, true, &window).is_none());
     }
 
     #[test]

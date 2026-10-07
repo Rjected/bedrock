@@ -234,11 +234,13 @@ accelerated replays of the span from 8 million to 9 million instructions match
 the stepped reference at the first checkpoint where an earlier cold-root pair
 diverged. Four accelerated replays from 100 million to 110 million instructions
 also match the stepped reference.
-The complete boot still takes about 31.5 seconds on this host. An exit-stats
-sample at the userspace snapshot counted 8.61 million exits, including 8.49
-million synthetic step exits; VM entry setup used 55.6% of run-loop cycles.
-The near-native register-loop benchmark therefore does not represent general
-Linux boot overhead.
+Allowing exact outgoing-branch breakpoints inside the 4,096-instruction counter
+deadline margin reduces the complete boot from 31.55 to 28.07 seconds on this
+host and from 8.61 million to 6.34 million exits. Sixteen accelerated replays
+from 8 to 9 million instructions and eight from 100 to 110 million match the
+stepping reference. VM entry setup remains the largest measured cost; the
+near-native register-loop benchmark does not represent general Linux boot
+overhead.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
