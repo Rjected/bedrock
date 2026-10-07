@@ -68,8 +68,8 @@ page-fault recovery, and IRET stack restoration:
 
 ```sh
 cargo build --release -p bedrock-vm --examples
-sudo target/release/examples/svm_smoke
-sudo target/release/examples/svm_transitions
+sudo timeout 10 target/release/examples/svm_smoke
+sudo timeout 10 target/release/examples/svm_transitions
 ```
 
 The Linux integration example uses a userspace snapshot, then compares two
@@ -93,6 +93,29 @@ The reference backend supports real mode and four-level long-mode paging.
 Legacy protected-mode interrupt delivery and legacy paging are unsupported;
 legacy paging is rejected before instructions can bypass RNG decoding. Guest
 debugging and fault delivery during software emulation need further coverage.
+
+The default guest kernel's ftrace and BTF initialization is expensive under
+instruction stepping. A native run hit its 30-minute wall-clock timeout during
+BTF initialization, before reaching userspace; use the reference kernel for
+the validated AMD boot and fork tests above.
+
+For workloads that size thread pools from CPU affinity, add `bedrock_ncpus=8`
+to the guest kernel command line. On either backend, the guest reports eight
+CPUs through `sched_getaffinity` and accepts affinity changes as no-ops.
+Threads still share one vCPU; sysfs and `/proc` report the actual topology.
+Omitting the parameter retains the normal affinity behavior.
+
+Use unit tests and these short native examples while changing the backend;
+reserve Linux boot and fork replay for integration checks. The affinity patch
+can be checked independently through KVM, with a 20-second limit per boot:
+
+```sh
+# With Bedrock unloaded and KVM available:
+python3 contrib/check-guest-affinity.py /path/to/patched-guest/bzImage
+```
+
+This checks the default, eight-CPU, and zero-CPU-override settings. It exercises
+Linux affinity behavior; the native examples validate the Bedrock backend.
 
 `contrib/run-svm-test.py` runs these executables in a diskless nested test
 host. Its required `--expect` marker prevents a successful CLI return after
