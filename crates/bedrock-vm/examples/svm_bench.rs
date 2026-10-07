@@ -26,6 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "page-loops" {
         return test_page_loops(false, false);
     }
+    if args.len() == 2 && args[1] == "rep-proof" {
+        return test_rep_cached_code_write();
+    }
     if args.len() == 2 && args[1] == "control-flow" {
         for _ in 0..64 {
             test_hardware_control_flow()?;
@@ -66,11 +69,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | control-flow | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
+            "Usage: svm_bench [native | native-branches | control-flow | rep-proof | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
                 .into(),
         );
     }
     test_repeat()?;
+    test_rep_cached_code_write()?;
     test_paged_stores()?;
     test_self_modifying()?;
     test_guarded_code_and_translation_writes()?;
@@ -240,6 +244,70 @@ fn thread_cpu_seconds() -> Result<f64, std::io::Error> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(time.tv_sec as f64 + time.tv_nsec as f64 * 1e-9)
+}
+
+fn test_rep_cached_code_write() -> Result<(), Box<dyn std::error::Error>> {
+    let mut results = Vec::new();
+    for reference in [true, false] {
+        let mut vm = Vm::create(2 * 1024 * 1024)?;
+        vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+        for (address, entry) in [(0x3000, 0x4027u64), (0x4000, 0x5027), (0x5000, 0xe7)] {
+            vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        // Warm page 0x2000, then write RDRAND into it with REP MOVSB.
+        // Re-enter at NOPs before the new opcode to exercise its cached scan.
+        let code = [
+            0xe8, 0xfb, 0x0f, 0, 0, // CALL 0x2000
+            0xb9, 3, 0, 0, 0, // MOV ECX, 3
+            0xbe, 0, 0xb0, 0, 0, // MOV ESI, 0xb000
+            0xbf, 0x10, 0x20, 0, 0, // MOV EDI, 0x2010
+            0xf3, 0xa4, // REP MOVSB
+            0xe9, 0xed, 0x0f, 0, 0, // JMP 0x2008
+        ];
+        vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+        vm.memory_mut()?[0x2000..0x2020].fill(0x90);
+        vm.memory_mut()?[0x2000] = 0xc3;
+        vm.memory_mut()?[0x2013..0x2018].copy_from_slice(&[0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+        // Reject the copying page for whole-page execution so REP uses its
+        // bounded native executor instead of hitting an entry breakpoint.
+        for address in [0x1800, 0x1820, 0x1840, 0x1860, 0x1880] {
+            vm.memory_mut()?[address..address + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        vm.memory_mut()?[0xb000..0xb003].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        let mut regs = Regs::long_mode();
+        regs.control_regs.cr3 = Cr3::new(0x3000);
+        regs.rip = 0x1000;
+        regs.gprs.rsp = 0x8000;
+        vm.set_regs(&regs)?;
+        if reference {
+            vm.set_single_step_range(0, 100)?;
+        }
+        let mut random_exits = 0;
+        loop {
+            let exit = vm.run()?;
+            match exit.exit_reason {
+                256 => continue,
+                57 => {
+                    assert_eq!(vm.get_regs()?.rip, 0x2010);
+                    random_exits += 1;
+                    vm.set_rdrand_value(0x1234)?;
+                }
+                258 => {
+                    assert_eq!(
+                        random_exits, 1,
+                        "REP write must revoke the cached hazard-free scan"
+                    );
+                    let regs = vm.get_regs()?;
+                    results.push((exit.emulated_tsc, regs.rip, regs.rflags, regs.gprs.rcx));
+                    break;
+                }
+                reason => return Err(format!("Unexpected REP proof result: {reason}").into()),
+            }
+        }
+    }
+    assert_eq!(results[0], results[1]);
+    println!("SVM_REP_CACHED_CODE_WRITE_PASS");
+    Ok(())
 }
 
 fn test_hardware_control_flow() -> Result<(), Box<dyn std::error::Error>> {

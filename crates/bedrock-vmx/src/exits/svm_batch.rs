@@ -1730,6 +1730,9 @@ fn prepare_verified<C: VmContext>(
             batch.offsets[1] = length as u16;
             batch.count = 1;
             batch.accesses_memory = true;
+            // MOVS/STOS write RAM, including unrelated code or table frames.
+            // Their range proof protects this execution, not cached RAM proofs.
+            batch.writes_memory = true;
         }
     }
     while batch.repeat.is_none() && batch.count < limit.min(64) {
@@ -2977,6 +2980,26 @@ mod tests {
         assert!(ctx.state().svm_guard.code_count > 0);
         for other in [[0xf3, 0x0f, 0x1e, 0xfb], [0xf3, 0x0f, 0x1e, 0xf8]] {
             assert_eq!(safe_len(&other, true, false), None);
+        }
+    }
+
+    #[test]
+    fn native_rep_stores_revoke_cached_ram_proofs() {
+        for destination in [0xb000, 0x7000, 0xa000] {
+            let mut ctx = paged_context(&[0xf3, 0xaa]);
+            ctx.state_mut().gprs.rcx = 16;
+            ctx.state_mut().gprs.rdi = destination;
+            for (address, entry) in [(0x3008, 0x8007u64), (0x8000, 0x9007), (0x9000, 0xa007)] {
+                ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+            }
+            let batch = planned(&ctx).unwrap();
+            collect_translation_tree(&mut ctx, &batch).unwrap();
+            assert!(cached_page_hazards(&mut ctx, 0x7000).is_some());
+            assert!(batch.repeat.is_some() && batch.writes_memory);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            retain_translation_cache(&mut ctx, Some(&batch), Some(&window), false);
+            assert!(!ctx.state().svm_guard.valid);
+            assert_eq!(ctx.state().svm_guard.code_count, 0);
         }
     }
 

@@ -87,6 +87,11 @@ paths use IRPERF. Other instructions terminate the block. Without table-guard
 support or enough deadline margin, stores need
 static destination proofs or fall back to stepping. Unsupported instructions
 also use stepping.
+Bounded native REP MOVS/STOS chunks are marked as RAM writes and revoke
+cached code and table proofs before entry. Their destination validation protects
+the current execution; it does not protect unrelated cached pages that the copy
+may rewrite. A hardware regression warms a code page, installs RDRAND there
+with REP MOVSB, and checks that re-entry traps for controlled randomness.
 Control-flow acceleration requires AMD PerfMonV2, PMC virtualization, virtual
 NMI, and IRPERF enabled by the host kernel; unavailable features or a failed
 perf counter reservation disable it. VMRUN saves and restores the host's
@@ -181,7 +186,9 @@ intermittently stopped one instruction away from its expected boundary.
 Bounded non-paged forward branches now stop at either successor and use exact
 prefix counts instead of IRPERF. The isolated deadline/fork test passes 1,024
 consecutive repetitions; instruction-count correctness is not established
-across all execution paths.
+across all execution paths. Fresh 50-million checkpoint comparisons have also
+reproduced a one-instruction divergence on the clock-proof baseline after a
+module reload; the earlier matching pairs do not establish cold-run repeatability.
 
 Native validation on an AMD EPYC 4585PX with Ubuntu Linux 7.0.0-38-generic
 includes Linux 6.18 booting to userspace and matching executions of two Linux
@@ -231,6 +238,7 @@ sudo timeout 15 target/release/examples/svm_bench page-loops
 sudo timeout 15 target/release/examples/svm_bench guarded-loops
 sudo timeout 15 target/release/examples/svm_bench loop-deadlines
 sudo timeout 15 target/release/examples/svm_bench control-flow
+sudo timeout 10 target/release/examples/svm_bench rep-proof
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native-branches
 ```
