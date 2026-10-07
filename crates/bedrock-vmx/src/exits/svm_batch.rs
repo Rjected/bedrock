@@ -1422,7 +1422,9 @@ pub(crate) fn prepare<C: VmContext>(
     }; SVM_CODE_PAGE_CAPACITY];
     let v = &ctx.state().vmcs;
     let long = v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) != 0;
+    let repeat_entry = long && repeat_len(&window.bytes).is_some();
     if long
+        && !repeat_entry
         && can_loop
         && can_guard_page_tables
         && instruction_budget(ctx) > InstructionBatch::COUNTER_DEADLINE_MARGIN
@@ -1674,7 +1676,14 @@ fn prepare_verified<C: VmContext>(
         instruction_budget: budget,
     };
     batch.pages[0] = physical.as_u64() & !4095;
-    if long && allow_page && can_loop && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN {
+    // A page guard would stop immediately at REP and force one scalar
+    // iteration. Prefer its validated, deadline-bounded native chunk instead.
+    if long
+        && allow_page
+        && can_loop
+        && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN
+        && repeat_len(&bytes[..available]).is_none()
+    {
         batch.page_execution = true;
         batch.uses_counter = true;
         batch.counter_bounded = false;
@@ -2980,6 +2989,22 @@ mod tests {
         assert!(ctx.state().svm_guard.code_count > 0);
         for other in [[0xf3, 0x0f, 0x1e, 0xfb], [0xf3, 0x0f, 0x1e, 0xf8]] {
             assert_eq!(safe_len(&other, true, false), None);
+        }
+    }
+
+    #[test]
+    fn rep_entries_prefer_bounded_chunks_without_rejecting_the_page() {
+        let mut ctx = paged_context(&[0xf3, 0xaa]);
+        ctx.state_mut().gprs.rdi = 0x7000;
+        ctx.state_mut().gprs.rcx = 16;
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.repeat.is_some() && !batch.page_execution);
+        assert!(!ctx.state().svm_rejected_pages.contains(&0x1000));
+        for count in [0, 1] {
+            ctx.state_mut().gprs.rcx = count;
+            assert!(prepare(&mut ctx, true, true, &window).is_none());
+            assert!(!ctx.state().svm_rejected_pages.contains(&0x1000));
         }
     }
 

@@ -26,6 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "page-loops" {
         return test_page_loops(false, false);
     }
+    if args.len() == 2 && args[1] == "rep" {
+        return test_repeat();
+    }
     if args.len() == 2 && args[1] == "rep-proof" {
         return test_rep_cached_code_write();
     }
@@ -69,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | control-flow | rep-proof | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
+            "Usage: svm_bench [native | native-branches | control-flow | rep | rep-proof | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
                 .into(),
         );
     }
@@ -955,6 +958,12 @@ fn test_repeat() -> Result<(), Box<dyn std::error::Error>> {
             results.push((r.rip, r.rflags, r.gprs.rax, r.gprs.rcx, r.gprs.rdi));
             break;
         }
+        let exits = child.get_exit_stats()?.total_exit_count();
+        assert!(
+            exits < 100,
+            "REP copy should use bounded native chunks: {exits} exits"
+        );
+        println!("SVM_REP_NATIVE_EXITS count={exits}");
     }
     assert_eq!(results[0], results[1]);
     let mut hash = DefaultHasher::new();

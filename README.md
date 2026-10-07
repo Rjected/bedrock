@@ -92,6 +92,10 @@ cached code and table proofs before entry. Their destination validation protects
 the current execution; it does not protect unrelated cached pages that the copy
 may rewrite. A hardware regression warms a code page, installs RDRAND there
 with REP MOVSB, and checks that re-entry traps for controlled randomness.
+REP entry points bypass whole-page execution, which would stop immediately at
+the string-instruction breakpoint and fall back to one scalar iteration. They
+instead use the validated, deadline-bounded native chunk directly. A 10,000-byte
+REP copy completes in seven exits on the validation host.
 Control-flow acceleration requires AMD PerfMonV2, PMC virtualization, virtual
 NMI, and IRPERF enabled by the host kernel; unavailable features or a failed
 perf counter reservation disable it. VMRUN saves and restores the host's
@@ -223,6 +227,13 @@ Retaining proofs across CPUID and RDTSC/RDTSCP exits reduces the matching
 50-million checkpoint pair to 2.80 and 2.79 seconds, and the full fresh-boot
 pair to 33.40 and 33.37 seconds. Four replays of the one-million-instruction
 span from 100 million to 101 million also match the stepped reference.
+Prioritizing bounded native REP chunks reduces two 50-million runs to 2.48 and
+2.41 seconds and approximately 528,000 exits. Those cold roots diverged by four
+instructions, so these timings are not a successful pair comparison. Eight
+accelerated replays of the span from 8 million to 9 million instructions match
+the stepped reference at the first checkpoint where an earlier cold-root pair
+diverged. Four accelerated replays from 100 million to 110 million instructions
+also match the stepped reference.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
