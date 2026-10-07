@@ -3,7 +3,7 @@
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
-use super::super::traits::{CowAllocator, InstructionBatch, RepeatBatch};
+use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
@@ -543,6 +543,7 @@ fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
 // or control transfers require the ordinary conservative planner.
 fn counted_store_loop<C: VmContext>(
     ctx: &C,
+    linear: u64,
     bytes: &[u8],
     gprs: &[u64; 16],
     batch: &mut InstructionBatch,
@@ -552,7 +553,7 @@ fn counted_store_loop<C: VmContext>(
     }
     let mut candidate = *batch;
     let mut offset = 0;
-    let mut decrement = false;
+    let mut decrement = None;
     let mut stride = None;
     let mut first = u64::MAX;
     let mut last = 0;
@@ -561,7 +562,7 @@ fn counted_store_loop<C: VmContext>(
         if tail.starts_with(&[0x75]) || tail.starts_with(&[0x0f, 0x85]) {
             let (length, displacement) = relative_branch(tail, true, false)?;
             if offset as i64 + length as i64 + displacement != 0
-                || !decrement
+                || decrement.is_none()
                 || stride.is_none()
                 || first == u64::MAX
             {
@@ -574,8 +575,8 @@ fn counted_store_loop<C: VmContext>(
         }
         let (length, _, writes) = safe_len(tail, true, false)?;
         let instruction = &tail[..length];
-        if instruction == [0x48, 0xff, 0xc9] && !decrement {
-            decrement = true;
+        if instruction == [0x48, 0xff, 0xc9] && decrement.is_none() {
+            decrement = Some(candidate.count as u64);
         } else if instruction.len() == 4
             && instruction[..3] == [0x48, 0x8d, 0x7f]
             && instruction[3] > 0
@@ -588,6 +589,14 @@ fn counted_store_loop<C: VmContext>(
             if !matches!(instruction[p], 0x88 | 0x89 | 0xc6 | 0xc7)
                 || rex & 1 != 0
                 || instruction.get(p + 1)? & 7 != 7
+            {
+                return None;
+            }
+            // Clamping RCX must not change a store's payload, including CH.
+            let source = (instruction[p + 1] >> 3) & 7;
+            if matches!(instruction[p], 0x88 | 0x89)
+                && rex & 4 == 0
+                && (source == 1 || (instruction[p] == 0x88 && rex == 0 && source == 5))
             {
                 return None;
             }
@@ -607,13 +616,25 @@ fn counted_store_loop<C: VmContext>(
     if candidate.count == 64 || last > stride {
         return None;
     }
+    let iterations = gprs[1]
+        .min(candidate.instruction_budget / candidate.count as u64)
+        .min(65536);
+    if iterations == 0 {
+        return None;
+    }
     let start = gprs[7].checked_add(first)?;
     let end = gprs[7]
-        .checked_add(gprs[1].checked_sub(1)?.checked_mul(stride)?)?
+        .checked_add(iterations.checked_sub(1)?.checked_mul(stride)?)?
         .checked_add(last.checked_sub(1)?)?;
+    collect_code_tables(ctx, &mut candidate, linear)?;
     validate_contiguous_store_range(ctx, &candidate, start, end)?;
-    candidate.uses_counter = true;
-    candidate.counter_bounded = false;
+    candidate.counted_loop = Some(CountedLoopBatch {
+        original_count: gprs[1],
+        iterations,
+        decrement_index: decrement?,
+    });
+    candidate.uses_counter = false;
+    candidate.counter_bounded = true;
     candidate.accesses_memory = true;
     candidate.writes_memory = true;
     candidate.validated_stores = true;
@@ -779,6 +800,7 @@ fn prepare_verified<C: VmContext>(
         offsets: [0; 65],
         count: 0,
         repeat: None,
+        counted_loop: None,
         pages: [0; 5],
         page_count: 1,
         accesses_memory: false,
@@ -819,15 +841,10 @@ fn prepare_verified<C: VmContext>(
         g.r14,
         g.r15,
     ];
-    if long && paged && can_loop && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN {
-        let mut candidate = batch;
-        collect_code_tables(ctx, &mut candidate, linear)?;
-        if counted_store_loop(ctx, &bytes[..available], &gprs, &mut candidate).is_some() {
-            return Some(candidate);
+    if long && paged && can_loop {
+        if counted_store_loop(ctx, linear, &bytes[..available], &gprs, &mut batch).is_some() {
+            return Some(batch);
         }
-        // Failed loop recognition leaves the collected translation frames
-        // intact, so the ordinary planner need not walk them again.
-        batch = candidate;
     }
     let mut changed = 0u16;
     let mut stores = StorePlan::default();
@@ -1215,17 +1232,17 @@ mod tests {
         let mut ctx = paged_context(&code);
         ctx.state_mut().gprs.rcx = 100;
         let b = planned(&ctx).unwrap();
-        assert!(b.uses_counter && b.validated_stores && !b.counter_bounded);
+        assert!(b.counted_loop.is_some() && b.validated_stores && !b.uses_counter);
         assert_eq!(b.count, 4);
         for address in [0x1000, 0x3000, 0x4000, 0x5000] {
             ctx.state_mut().gprs.rdi = address;
-            assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+            assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
         }
         ctx.state_mut().gprs.rdi = 0x7000;
         ctx.state_mut().gprs.rcx = 0;
-        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
         ctx.state_mut().gprs.rcx = u64::MAX;
-        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
     }
 
     #[test]
@@ -1241,22 +1258,47 @@ mod tests {
         let mut ctx = paged_context(&code);
         ctx.state_mut().gprs.rcx = 128;
         let b = planned(&ctx).unwrap();
-        assert!(b.uses_counter && b.validated_stores && !b.counter_bounded);
+        assert!(b.counted_loop.is_some() && b.validated_stores && !b.uses_counter);
         assert_eq!(b.count, 11);
         assert_eq!(b.offsets[b.count] as usize, length);
 
         // A later destination aliases a translation table, even though the
         // first destination does not. Reject the whole loop.
         ctx.memory[0x6040..0x6048].copy_from_slice(&0x6007u64.to_le_bytes());
-        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
         // A noncontiguous mapping requires a different proof.
         ctx.memory[0x6040..0x6048].copy_from_slice(&0xa007u64.to_le_bytes());
-        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
         ctx.memory[0x6040..0x6048].copy_from_slice(&0x8007u64.to_le_bytes());
-        assert!(planned(&ctx).unwrap().uses_counter);
+        assert!(planned(&ctx).unwrap().counted_loop.is_some());
         // Moving stores after the pointer advance invalidates the range.
         ctx.memory[0x1000..0x1004].copy_from_slice(&[0x48, 0x8d, 0x7f, 64]);
-        assert!(!planned(&ctx).is_some_and(|b| b.uses_counter));
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+    }
+
+    #[test]
+    fn counted_loops_fit_inside_deadline_margin_and_reject_rcx_payloads() {
+        let code = [
+            0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf4,
+        ];
+        let mut ctx = paged_context(&code);
+        ctx.state_mut().gprs.rcx = 100;
+        ctx.state_mut().stop_at_tsc = Some(13);
+        let b = planned(&ctx).unwrap();
+        assert_eq!(b.counted_loop.unwrap().iterations, 3);
+        assert!(!b.uses_counter);
+        for store in [[0x48, 0x89, 0x0f], [0x40, 0x88, 0x0f]] {
+            ctx.memory[0x1000..0x1003].copy_from_slice(&store);
+            assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+        }
+        // REX.R selects R9 rather than RCX and must remain eligible.
+        ctx.memory[0x1000..0x1003].copy_from_slice(&[0x4c, 0x89, 0x0f]);
+        assert!(planned(&ctx).unwrap().counted_loop.is_some());
+        let mut ctx = paged_context(&[
+            0x88, 0x2f, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf5,
+        ]);
+        ctx.state_mut().gprs.rcx = 100;
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some())); // CH
     }
 
     #[test]
@@ -1560,6 +1602,7 @@ mod tests {
             offsets: [0; 65],
             count: 4,
             repeat: None,
+            counted_loop: None,
             pages: [0; 5],
             page_count: 0,
             accesses_memory: false,
@@ -1621,6 +1664,7 @@ mod tests {
             offsets: [0; 65],
             count: 2,
             repeat: None,
+            counted_loop: None,
             pages: [0; 5],
             page_count: 0,
             accesses_memory: false,

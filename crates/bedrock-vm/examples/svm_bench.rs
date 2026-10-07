@@ -18,6 +18,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "guarded-loops" {
         return test_page_loops(true);
     }
+    if args.len() == 2 && args[1] == "loop-deadlines" {
+        return test_counted_loop_deadlines();
+    }
     if args.len() == 2 && args[1] == "page-loops" {
         return test_page_loops(false);
     }
@@ -34,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | stores | page-loops | guarded-loops | VMLINUX INITRD [INSTRUCTIONS]]"
+            "Usage: svm_bench [native | native-branches | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS]]"
                 .into(),
         );
     }
@@ -50,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_forward_stores()?;
     test_page_loops(false)?;
     test_page_loops(true)?;
+    test_counted_loop_deadlines()?;
     const LOOPS: u16 = 4096;
     const EXPECTED: u64 = 1 + LOOPS as u64 * 66 + 1;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
@@ -522,6 +526,87 @@ fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(hash.finish(), parent);
     println!(
         "SVM_STORE_LOOP_FORK_PASS guarded={guarded} seconds={:.6}",
+        start.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn test_counted_loop_deadlines() -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    for decrement_first in [false, true] {
+        for original_count in [5u64, 16, 257, (1 << 63) + 1, u64::MAX] {
+            for deadline in 4..20 {
+                let mut vm = Vm::create(2 * 1024 * 1024)?;
+                for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+                    vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+                }
+                let code = if decrement_first {
+                    [
+                        0x48, 0xff, 0xc9, 0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x75, 0xf4,
+                    ]
+                } else {
+                    [
+                        0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf4,
+                    ]
+                };
+                vm.memory_mut()?[0x1000..0x100c].copy_from_slice(&code);
+                vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+                let mut regs = Regs::long_mode();
+                regs.control_regs.cr3 = Cr3::new(0x3000);
+                regs.rip = 0x1000;
+                regs.rflags = 0x203;
+                regs.gprs.rsp = 0x8000;
+                regs.gprs.rdi = 0x10000;
+                regs.gprs.rcx = original_count;
+                regs.gprs.rax = 0x123456789abcdef0;
+                vm.set_regs(&regs)?;
+                vm.set_stop_at_tsc(Some(deadline))?;
+                loop {
+                    let exit = vm.run()?;
+                    if exit.exit_reason == 256 {
+                        continue;
+                    }
+                    assert_eq!(exit.exit_reason, 259);
+                    assert_eq!(exit.emulated_tsc, deadline);
+                    break;
+                }
+                let r = vm.get_regs()?;
+                let instruction = deadline % 4;
+                let loops = deadline / 4;
+                let decrements =
+                    loops + u64::from(instruction > if decrement_first { 0 } else { 2 });
+                let advances = loops + u64::from(instruction > if decrement_first { 2 } else { 1 });
+                let stores = loops + u64::from(instruction > if decrement_first { 1 } else { 0 });
+                let offsets = if decrement_first {
+                    [0, 3, 6, 10]
+                } else {
+                    [0, 3, 7, 10]
+                };
+                assert_eq!(r.rip, 0x1000 + offsets[instruction as usize]);
+                assert_eq!(r.gprs.rcx, original_count - decrements);
+                assert_eq!(r.gprs.rdi, 0x10000 + advances * 8);
+                let flags: u64;
+                unsafe {
+                    core::arch::asm!("stc", "dec {value}", "pushfq", "pop {flags}",
+                        value = inout(reg) original_count - decrements + 1 => _,
+                        flags = lateout(reg) flags);
+                }
+                assert_eq!(r.rflags & 0x8d5, flags & 0x8d5);
+                for index in 0..stores as usize {
+                    assert_eq!(
+                        &vm.memory()?[0x10000 + index * 8..0x10008 + index * 8],
+                        &regs.gprs.rax.to_le_bytes()
+                    );
+                }
+                assert_eq!(
+                    &vm.memory()?[0x10000 + stores as usize * 8..0x10008 + stores as usize * 8],
+                    &[0; 8]
+                );
+            }
+        }
+    }
+    println!(
+        "SVM_COUNTED_LOOP_DEADLINES_PASS seconds={:.6}",
         start.elapsed().as_secs_f64()
     );
     Ok(())

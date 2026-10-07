@@ -140,6 +140,9 @@ pub(crate) unsafe fn run(
     if let Some(repeat) = batch.and_then(|b| b.repeat) {
         ctx.guest_rcx = repeat.iterations;
     }
+    if let Some(counted) = batch.and_then(|b| b.counted_loop) {
+        ctx.guest_rcx = counted.iterations;
+    }
     let breakpoint = if let Some(batch) = batch {
         if batch.page_execution || batch.endpoint_intercepted {
             0 // The endpoint itself exits through an unconditional SVM intercept.
@@ -203,9 +206,17 @@ pub(crate) unsafe fn run(
     if let Some(batch) = batch.filter(|b| b.page_execution) {
         // Free execution starts with TF and guest breakpoints disabled.
         // SYSRET pages are excluded because it can restore guest TF mid-run.
-        if code == 0x41 { return Err(VmEntryError::VmEntryFailed); }
+        if code == 0x41 {
+            kernel::pr_err!("SVM page execution unexpected debug trap: rip={:#x} dr6={:#x}\n",
+                v.read(o::RIP, 8), v.read(o::DR6, 8));
+            return Err(VmEntryError::VmEntryFailed);
+        }
         let count = if pmu_ready { exits::retired_instructions(before, after, code) }
-            else { None }.ok_or(VmEntryError::VmEntryFailed)?;
+            else { None }.ok_or_else(|| {
+                kernel::pr_err!("SVM page execution invalid count: ready={} before={} after={} code={:#x} rip={:#x}\n",
+                    pmu_ready, before, after, code, v.read(o::RIP, 8));
+                VmEntryError::VmEntryFailed
+            })?;
         if count > batch.instruction_budget {
             kernel::pr_err!("SVM page execution exceeded deadline: count={} budget={} code={:#x}\n",
                 count, batch.instruction_budget, code);
@@ -320,6 +331,29 @@ pub(crate) unsafe fn run(
                 return Err(VmEntryError::VmEntryFailed);
             }
             if rip == batch.endpoint() && ctx.guest_rcx != 0 {
+                v.write(o::RIP, 8, batch.start);
+            }
+            completed
+        } else if let Some(counted) = batch.counted_loop {
+            let instruction = batch.completed_at(v.read(o::RIP, 8))
+                .ok_or_else(|| {
+                    kernel::pr_err!("SVM counted loop invalid boundary: rip={:#x} code={:#x} rcx={:#x} batch={:?}\n",
+                        v.read(o::RIP, 8), code, ctx.guest_rcx, batch);
+                    VmEntryError::VmEntryFailed
+                })?;
+            let (completed, remaining, flags) = counted
+                .account(instruction, batch.count as u64, ctx.guest_rcx, v.read(o::RFLAGS, 8))
+                .ok_or_else(|| {
+                    kernel::pr_err!("SVM counted loop invalid accounting: rip={:#x} code={:#x} rcx={:#x} batch={:?}\n",
+                        v.read(o::RIP, 8), code, ctx.guest_rcx, batch);
+                    VmEntryError::VmEntryFailed
+                })?;
+            if completed > batch.instruction_budget {
+                return Err(VmEntryError::VmEntryFailed);
+            }
+            ctx.guest_rcx = remaining;
+            v.write(o::RFLAGS, 8, flags);
+            if instruction == batch.count as u64 && remaining != 0 {
                 v.write(o::RIP, 8, batch.start);
             }
             completed

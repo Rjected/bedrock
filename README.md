@@ -65,8 +65,12 @@ can join a batch when their address registers retain their entry values and
 their destinations cannot rewrite the code or subsequent store translations.
 These stores can also join forward-only branches when their address registers
 are stable across every decoded path.
-Counted MOV-store loops using DEC RCX, an advancing RDI, and JNZ can run on
-the retired-instruction counter after validating their entire destination range.
+Counted MOV-store loops using DEC RCX, an advancing RDI, and JNZ run in bounded
+chunks after validating each chunk's destination range. Entry temporarily clamps
+RCX to iterations that fit before the deadline; exit restores RCX and DEC flags,
+and rewinds an artificial loop termination. RCX and the exit instruction boundary
+give the exact retirement count without a performance-counter interrupt margin.
+Stores using RCX, CL, or CH as their payload use the stepping fallback.
 The range must map to contiguous physical pages and cannot overlap code or
 any page table used by the code or destination translations.
 Outside guarded page execution, unsupported instructions and other stores
@@ -115,6 +119,7 @@ sudo timeout 10 target/release/examples/svm_transitions
 sudo timeout 15 target/release/examples/svm_bench
 sudo timeout 15 target/release/examples/svm_bench page-loops
 sudo timeout 15 target/release/examples/svm_bench guarded-loops
+sudo timeout 15 target/release/examples/svm_bench loop-deadlines
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native-branches
 ```
@@ -128,6 +133,8 @@ verified loop path; it does not represent Linux or general guest workloads.
 mid-loop deadline, and two forks with matching final state and parent isolation.
 `guarded-loops` exercises a counted store loop on a page excluded from page-wide
 execution, including the same deadline and fork checks.
+`loop-deadlines` checks every instruction boundary with DEC before and after the
+store, including large RCX values and arithmetic-flag restoration.
 `svm_bench VMLINUX INITRD [INSTRUCTIONS]` stops Linux at an exact instruction
 checkpoint (one million by default), reports its registers and RAM hash, and
 limits each check to ten seconds.

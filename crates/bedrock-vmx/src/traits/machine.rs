@@ -42,6 +42,7 @@ pub struct InstructionBatch {
     pub offsets: [u16; 65],
     pub count: usize,
     pub repeat: Option<RepeatBatch>,
+    pub counted_loop: Option<CountedLoopBatch>,
     pub pages: [u64; 5],
     pub page_count: usize,
     pub accesses_memory: bool,
@@ -60,6 +61,116 @@ pub struct InstructionBatch {
 pub struct RepeatBatch {
     pub original_count: u64,
     pub iterations: u64,
+}
+
+/// A MOV/LEA/DEC RCX/JNZ loop with no other RCX or flags consumers.
+#[derive(Clone, Copy, Debug)]
+pub struct CountedLoopBatch {
+    pub original_count: u64,
+    pub iterations: u64,
+    pub decrement_index: u64,
+}
+
+impl CountedLoopBatch {
+    /// Recover architectural RCX, flags, and retirements at any body boundary.
+    /// RCX is temporarily clamped on entry; only the final JNZ can observe
+    /// different flags, and its artificial fall-through is rewound by the caller.
+    pub fn account(
+        &self,
+        instruction: u64,
+        body_length: u64,
+        rcx: u64,
+        flags: u64,
+    ) -> Option<(u64, u64, u64)> {
+        if instruction > body_length || self.decrement_index >= body_length {
+            return None;
+        }
+        let decrements = self.iterations.checked_sub(rcx)?;
+        let remaining = self.original_count.checked_sub(decrements)?;
+        let completed = if instruction == body_length {
+            if rcx != 0 {
+                return None;
+            }
+            decrements.checked_mul(body_length)?
+        } else {
+            let loops = decrements.checked_sub(u64::from(instruction > self.decrement_index))?;
+            if loops >= self.iterations {
+                return None;
+            }
+            loops.checked_mul(body_length)?.checked_add(instruction)?
+        };
+        let flags = if decrements == 0 {
+            flags
+        } else {
+            // DEC preserves CF and sets PF/AF/ZF/SF/OF from the real result.
+            let arithmetic = (u64::from((remaining as u8).count_ones() % 2 == 0) << 2)
+                | (u64::from(remaining & 15 == 15) << 4)
+                | (u64::from(remaining == 0) << 6)
+                | (remaining & (1 << 63)) >> 56
+                | (u64::from(remaining == 0x7fff_ffff_ffff_ffff) << 11);
+            (flags & !0x8d4) | arithmetic
+        };
+        Some((completed, remaining, flags))
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod counted_loop_tests {
+    use super::CountedLoopBatch;
+
+    fn native_dec_flags(value: u64) -> u64 {
+        let flags: u64;
+        unsafe {
+            core::arch::asm!(
+                "stc", "dec {value}", "pushfq", "pop {flags}",
+                value = inout(reg) value => _, flags = lateout(reg) flags,
+            );
+        }
+        flags
+    }
+
+    #[test]
+    fn every_partial_loop_boundary_matches_scalar_retirements_and_native_flags() {
+        for original_count in [3, 4, 16, 256, 1 << 63, (1 << 63) + 1, u64::MAX] {
+            for decrement_index in 0..3 {
+                let batch = CountedLoopBatch {
+                    original_count,
+                    iterations: 3,
+                    decrement_index,
+                };
+                for loops in 0..3 {
+                    for instruction in 0..4 {
+                        let decrements = loops + u64::from(instruction > decrement_index);
+                        let temporary = 3 - decrements;
+                        let flags = if decrements == 0 {
+                            0x203
+                        } else {
+                            native_dec_flags(temporary + 1)
+                        };
+                        let (completed, remaining, actual_flags) =
+                            batch.account(instruction, 4, temporary, flags).unwrap();
+                        assert_eq!(completed, loops * 4 + instruction);
+                        assert_eq!(remaining, original_count - decrements);
+                        let expected_flags = if decrements == 0 {
+                            flags
+                        } else {
+                            native_dec_flags(remaining + 1)
+                        };
+                        assert_eq!(actual_flags & 0x8d5, expected_flags & 0x8d5);
+                        assert_eq!(actual_flags & !0x8d4, flags & !0x8d4);
+                    }
+                }
+                let (completed, remaining, flags) =
+                    batch.account(4, 4, 0, native_dec_flags(1)).unwrap();
+                assert_eq!(completed, 12);
+                assert_eq!(remaining, original_count - 3);
+                assert_eq!(flags & 0x8d5, native_dec_flags(remaining + 1) & 0x8d5);
+                assert!(batch.account(4, 4, 1, 2).is_none());
+                assert!(batch.account(0, 4, 0, 2).is_none());
+                assert!(batch.account(0, 4, 4, 2).is_none());
+            }
+        }
+    }
 }
 
 impl InstructionBatch {
