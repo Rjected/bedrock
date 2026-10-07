@@ -5,7 +5,7 @@
 
 use super::c_helpers;
 use super::svm_core::{
-    exits, fields,
+    exits, fields, pmu::PmcEntry,
     vmcb::{offset as o, Vmcb},
 };
 use super::vmx::{InstructionBatch, VmEntryError, VmxContext};
@@ -133,6 +133,7 @@ extern "C" {
         host_pa: u64,
         breakpoints: *const u64,
         pmu_mask: u64,
+        vmcb: *mut Vmcb,
     ) -> i32;
 }
 
@@ -171,32 +172,46 @@ pub(crate) unsafe fn run(
         v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) | (1 << 8));
     }
     let host_pa = unsafe { c_helpers::bedrock_svm_host_vmcb() };
-    let mut before = 0;
     let counting = batch.is_some_and(|b| b.uses_counter);
-    let pmu_ready = if let Some(batch) = batch.filter(|b| b.uses_counter) {
-        (unsafe { c_helpers::bedrock_svm_pmu_arm(batch.counter_period(), &mut before) }) == 0
-    } else {
-        false
-    };
     let pmu_mask = unsafe { c_helpers::bedrock_svm_pmu_mask() };
+    let counter = if let Some(batch) = batch.filter(|b| b.uses_counter) {
+        let mut host_count = 0;
+        if pmu_mask == 0
+            || unsafe { c_helpers::bedrock_svm_pmu_arm(batch.counter_period(), &mut host_count) } != 0
+        {
+            return Err(VmEntryError::VmEntryFailed);
+        }
+        Some(PmcEntry::prepare(v, batch.counter_period()).ok_or(VmEntryError::VmEntryFailed)?)
+    } else {
+        None
+    };
+    // Retain the serialized host PMU handoff around hardware autoswap.
+    // The host event supplies readiness, not the guest retirement count.
     let guest_mask = if pmu_mask != 0 {
         (1 << 63) | if counting { pmu_mask } else { 0 }
     } else {
         0
     };
     unsafe {
-        svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), guest_mask);
+        // Pass the virtual pointer as well as the physical address: VMRUN
+        // modifies this allocation, which the compiler must see at the FFI
+        // boundary. Assembly uses the physical address and ignores arg six.
+        svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), guest_mask, v);
     }
-    let mut after = 0;
-    let pmu_ready = pmu_ready && unsafe { c_helpers::bedrock_svm_pmu_read(&mut after) } == 0;
+    let mut host_count = 0;
+    let pmu_ready = !counting || unsafe { c_helpers::bedrock_svm_pmu_read(&mut host_count) } == 0;
+    let retired = counter.and_then(|counter| counter.finish(v));
+    if !pmu_ready {
+        return Err(VmEntryError::VmEntryFailed);
+    }
     #[cfg(kernel_log)]
-    if pmu_ready {
+    if counting {
         static SAMPLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         if SAMPLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
             log_info!(
-                "SVM PMU: batch={:?} delta={} rip={:#x} exit={:#x}\n",
+                "SVM PMU: batch={:?} retired={:?} rip={:#x} exit={:#x}\n",
                 batch.map(|b| (b.start, b.count, b.repeat)),
-                after.wrapping_sub(before) & ((1 << 48) - 1),
+                retired,
                 v.read(o::RIP, 8),
                 v.read(o::EXIT_CODE, 8)
             );
@@ -231,12 +246,11 @@ pub(crate) unsafe fn run(
         v.write(o::DR7, 8, original_dr7);
         v.write(o::DR6, 8, original_dr6);
         if trapped { v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) & !(1 << 16)); }
-        let count = if pmu_ready { exits::retired_instructions_at(before, after, code, entry_rip, v.read(o::RIP, 8)) }
-            else { None }.ok_or_else(|| {
-                kernel::pr_err!("SVM page execution invalid count: ready={} before={} after={} code={:#x} entry_rip={:#x} rip={:#x}\n",
-                    pmu_ready, before, after, code, entry_rip, v.read(o::RIP, 8));
-                VmEntryError::VmEntryFailed
-            })?;
+        let count = retired.ok_or_else(|| {
+            kernel::pr_err!("SVM page execution invalid count: code={:#x} entry_rip={:#x} rip={:#x}\n",
+                code, entry_rip, v.read(o::RIP, 8));
+            VmEntryError::VmEntryFailed
+        })?;
         if count > batch.instruction_budget {
             kernel::pr_err!("SVM page execution exceeded deadline: count={} budget={} code={:#x}\n",
                 count, batch.instruction_budget, code);
@@ -397,12 +411,11 @@ pub(crate) unsafe fn run(
             }
             completed
         } else if batch.uses_counter {
-            if !pmu_ready || batch.completed_at(v.read(o::RIP, 8)).is_none() {
-                kernel::pr_err!("SVM PMU invalid boundary: ready={} before={} after={} rip={:#x} code={:#x} batch={:?}\n", pmu_ready, before, after, v.read(o::RIP,8), code, batch);
+            if retired.is_none() || batch.completed_at(v.read(o::RIP, 8)).is_none() {
+                kernel::pr_err!("SVM PMU invalid boundary: retired={:?} rip={:#x} code={:#x} batch={:?}\n", retired, v.read(o::RIP,8), code, batch);
                 return Err(VmEntryError::VmEntryFailed);
             }
-            let count = exits::retired_instructions_at(before, after, code, entry_rip, v.read(o::RIP, 8))
-                .ok_or(VmEntryError::VmEntryFailed)?;
+            let count = retired.ok_or(VmEntryError::VmEntryFailed)?;
             if count > batch.instruction_budget
                 || (batch.counter_bounded && count > batch.count as u64)
             {

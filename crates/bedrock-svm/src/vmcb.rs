@@ -24,6 +24,7 @@ pub mod offset {
     pub const NESTED_CONTROL: usize = 0x090;
     pub const EVENT_INJECTION: usize = 0x0a8;
     pub const NESTED_CR3: usize = 0x0b0;
+    pub const VIRT_EXT: usize = 0x0b8;
     pub const CLEAN_BITS: usize = 0x0c0;
     pub const NEXT_RIP: usize = 0x0c8;
     pub const INSTRUCTION_LEN: usize = 0x0d0;
@@ -40,6 +41,8 @@ pub mod offset {
     pub const TR: usize = 0x490;
     pub const CPL: usize = 0x4cb;
     pub const EFER: usize = 0x4d0;
+    pub const PERF_CTL0: usize = 0x4e0;
+    pub const PERF_CTR0: usize = 0x4e8;
     pub const CR4: usize = 0x548;
     pub const CR3: usize = 0x550;
     pub const CR0: usize = 0x558;
@@ -47,6 +50,9 @@ pub mod offset {
     pub const DR6: usize = 0x568;
     pub const RFLAGS: usize = 0x570;
     pub const RIP: usize = 0x578;
+    pub const INSTR_RETIRED_CTR: usize = 0x5c0;
+    pub const PERF_GLOBAL_STATUS: usize = 0x5c8;
+    pub const PERF_GLOBAL_CONTROL: usize = 0x5d0;
     pub const RSP: usize = 0x5d8;
     pub const RAX: usize = 0x5f8;
     pub const STAR: usize = 0x600;

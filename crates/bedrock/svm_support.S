@@ -59,7 +59,9 @@
 #define VMXCTX_HOST_XCR0	272
 #define VMXCTX_GUEST_CR2	280
 
-/* SVM entry: ctx, guest VMCB PA, host VMCB PA. Host RSP is saved by
+/* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints, PMU mask,
+ * guest VMCB virtual pointer. The final argument exposes hardware writes to
+ * the compiler; assembly uses the physical address. Host RSP is saved by
  * VMRUN, so the stack remains our anchor without guest-visible scratch GPRs. */
 SYM_FUNC_START(svm_run_guest)
  push %rbp

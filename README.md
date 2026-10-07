@@ -56,9 +56,9 @@ testing.
 The AMD backend implements SVM entry/exit, VMCB state, nested page tables,
 and MSR/I/O intercept bitmaps. The common device, randomness and fork logic is
 shared with the Intel backend. AMD execution batches verified straight-line
-instructions and bounded REP stores, and uses a perf-owned retired-instruction
-counter for verified regions containing conditional branches and relative jumps.
-SVM entry and physical NMI ticks are removed from that count; REP iterations
+instructions and bounded REP stores, and uses hardware-swapped guest IRPERF
+for verified regions containing conditional branches and relative jumps.
+One SVM entry tick is removed from that count; REP iterations
 use RCX accounting. Code and translation guards prevent a batch
 from modifying the instructions it has decoded. Long-mode MOV stores and PUSH
 can join a batch when their address registers retain their entry values and
@@ -75,8 +75,17 @@ The range must map to contiguous physical pages and cannot overlap code or
 any page table used by the code or destination translations.
 Outside guarded page execution, unsupported instructions and other stores
 fall back to instruction stepping.
-Control-flow acceleration requires AMD PerfMonV2; counter allocation failure
-disables it. Forward-only regions stop at their endpoint and can run inside
+Control-flow acceleration requires AMD PerfMonV2, PMC virtualization, virtual
+NMI, and IRPERF enabled by the host kernel; unavailable features or a failed
+perf counter reservation disable it. VMRUN saves and restores the host's
+performance counters in hardware. A guest programmable counter drives the
+overflow interrupt while the dedicated guest IRPERF supplies instruction counts;
+the programmable retired-instruction event can overcount at nested page faults.
+Counter overflow raises a virtual NMI. During counted execution a temporary
+zero IDT limit traps its delivery before an interrupt frame is written, and
+SIDT/LIDT intercepts stop execution before observing or changing that limit.
+Guest IDT and interrupt controls are restored before handling the exit.
+Forward-only regions stop at their endpoint and can run inside
 the performance-counter interrupt margin when their maximum instruction count
 fits before the next deadline. Backward branches still require that margin.
 Long-mode execution can also run across calls, returns, and store loops within
@@ -141,9 +150,10 @@ Linux checkpoints with matching registers and guest-memory hashes, plus loop
 and REP deadline/fork tests. Its complete Linux integration test also passes:
 boot to a userspace snapshot, matching clock/randomness/registers/instruction
 counts in two children, and isolation of the parent's memory.
-Fresh boots on the same accelerated build currently diverge at the 100-million
-instruction checkpoint despite matching 50-million checkpoints; full-boot
-reproducibility remains an unresolved issue.
+Fresh roots match at the 100-million instruction checkpoint using guest IRPERF;
+the earlier GuestOnly programmable-counter clock diverged there. Both full
+boots pass child replay and parent isolation, but fresh boot snapshots still
+differ later in startup; full-boot reproducibility remains unresolved.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,

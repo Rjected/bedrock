@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Native instruction-throughput benchmark with an exact stop inside a block.
 use bedrock_vm::{
-    load_kernel, Cr3, LinuxBootConfig, RdrandConfig, Regs, SegmentRegister, Vm, VmBuilder,
+    load_kernel, Cr3, Idtr, LinuxBootConfig, RdrandConfig, Regs, SegmentRegister, Vm, VmBuilder,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -80,6 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_page_loops(false)?;
     test_page_loops(true)?;
     test_counted_loop_deadlines()?;
+    test_counter_idt_shadow()?;
     const LOOPS: u16 = 4096;
     const EXPECTED: u64 = 1 + LOOPS as u64 * 66 + 1;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
@@ -464,6 +465,62 @@ fn test_forward_stores() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("SVM_FORWARD_STORE_DEADLINE_FORK_PASS");
+    Ok(())
+}
+
+fn test_counter_idt_shadow() -> Result<(), Box<dyn std::error::Error>> {
+    const LOOPS: u32 = 65_536;
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    let mut code = vec![0xb9]; // mov ecx,LOOPS
+    code.extend(LOOPS.to_le_bytes());
+    code.extend([0x90; 64]);
+    code.extend([0xff, 0xc9, 0x75, 0xbc]); // dec ecx; jnz over NOPs
+    code.extend([0x0f, 0x01, 0x0f, 0x31, 0xc0, 0x0f, 0x01, 0xd9]); // sidt [rdi]; xor; vmmcall
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.descriptor_tables.idtr = Idtr::new(0x9000, 0xfff);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rdi = 0x7000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(200_000))?;
+    let mut stopped = false;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        let regs = vm.get_regs()?;
+        let idt = regs.descriptor_tables.idtr;
+        assert_eq!((idt.base, idt.limit), (0x9000, 0xfff));
+        assert_eq!(regs.gprs.rsp, 0x8000, "PMI wrote a guest interrupt frame");
+        if exit.exit_reason == 259 {
+            assert!(!stopped);
+            assert_eq!(exit.emulated_tsc, 200_000);
+            vm.set_stop_at_tsc(None)?;
+            stopped = true;
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 258);
+        assert_eq!(exit.emulated_tsc, 1 + u64::from(LOOPS) * 66 + 2);
+        assert_eq!(regs.gprs.rcx, 0);
+        assert!(stopped);
+        let memory = vm.memory()?;
+        assert_eq!(
+            u16::from_le_bytes(memory[0x7000..0x7002].try_into()?),
+            0xfff
+        );
+        assert_eq!(
+            u64::from_le_bytes(memory[0x7002..0x700a].try_into()?),
+            0x9000
+        );
+        break;
+    }
+    println!("SVM_COUNTER_IDT_SHADOW_PASS");
     Ok(())
 }
 

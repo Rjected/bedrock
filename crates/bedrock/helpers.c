@@ -68,7 +68,8 @@ struct bedrock_svm_cpu {
 static DEFINE_PER_CPU(struct bedrock_svm_cpu, bedrock_pcpu_svm);
 static DEFINE_PER_CPU(struct perf_event *, bedrock_svm_counter);
 
-/* Allocate through perf, rather than stealing a counter from host users. */
+/* Perf owns the host PMU and initializes its NMI LVT. A pinned reservation
+ * verifies availability; VMRUN autoswap isolates the guest's six counters. */
 void bedrock_svm_pmu_cleanup(void)
 {
     int cpu;
@@ -84,12 +85,20 @@ int bedrock_svm_pmu_init(void)
     struct perf_event_attr attr = {
         .type = PERF_TYPE_RAW,
         .size = sizeof(attr),
-        .config = 0xc0, /* Retired instructions; SVM entry/NMI ticks are removed. */
+        .config = 0xc0, /* Host reservation, not the guest instruction clock. */
         .pinned = 1,
         .exclude_host = 1, /* AMD GuestOnly, including guest CPL0 and CPL3. */
     };
     int cpu;
-    if (!boot_cpu_has(X86_FEATURE_PERFMON_V2)) return -EOPNOTSUPP;
+    u32 eax, ebx, ecx, edx;
+    u64 hwcr;
+    if (!boot_cpu_has(X86_FEATURE_PERFMON_V2)
+        || !boot_cpu_has(X86_FEATURE_IRPERF)) return -EOPNOTSUPP;
+    cpuid(0x8000000a, &eax, &ebx, &ecx, &edx);
+    if ((edx & (BIT(8) | BIT(25))) != (BIT(8) | BIT(25)))
+        return -EOPNOTSUPP; /* PMC virtualization and virtual NMI. */
+    rdmsrl(MSR_K7_HWCR, hwcr);
+    if (!(hwcr & BIT_ULL(30))) return -EOPNOTSUPP; /* IRPERF enabled by Linux. */
     for_each_online_cpu(cpu) {
         struct perf_event *event = perf_event_create_kernel_counter(
             &attr, cpu, NULL, NULL, NULL);
@@ -112,9 +121,10 @@ u64 bedrock_svm_pmu_mask(void)
     return BIT_ULL(event->hw.idx);
 }
 
-/* Arm on the pinned caller's CPU, with IRQs disabled. Keep attr.sample_period
- * zero: this is a counting event, whose rollovers exit SVM through NMI without
- * perf's sampling-rate throttle. Perf owns and acknowledges the counter. */
+/* Serialize the perf reservation's rearm with IRQs and migration disabled.
+ * Its count is only used for readiness; guest IRPERF supplies retirement and
+ * a separate hardware-swapped guest counter drives virtual NMI overflow.
+ * Keep attr.sample_period zero to avoid host perf sampling-rate throttling. */
 int bedrock_svm_pmu_arm(u64 period, u64 *value)
 {
     struct perf_event *event = this_cpu_read(bedrock_svm_counter);

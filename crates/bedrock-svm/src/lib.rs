@@ -4,4 +4,5 @@
 
 pub mod exits;
 pub mod fields;
+pub mod pmu;
 pub mod vmcb;
