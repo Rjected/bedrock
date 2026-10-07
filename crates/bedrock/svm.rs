@@ -259,6 +259,7 @@ pub(crate) unsafe fn run(
         // timers. Guest debug state was restored above before exposing it.
         let mut e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
             .map_err(|_| VmEntryError::VmEntryFailed)?;
+        e.qualification = InstructionBatch::PAGE_EXECUTION_BOUNDARY;
         if code == 0x400 && v.read(o::EXIT_INFO1, 8) & 0x13 == 0x11
             && v.read(o::EXIT_INFO2, 8) & 4095 == v.read(o::RIP, 8) & 4095
             && !batch.pages[..batch.code_page_count].contains(&(v.read(o::EXIT_INFO2, 8) & !4095)) {
@@ -267,7 +268,7 @@ pub(crate) unsafe fn run(
             // split instruction still needs unrestricted scalar execution.
             // No instruction retired on the new page; fresh planning validates
             // its contents and translations before the next hardware entry.
-            e.qualification = InstructionBatch::PAGE_FETCH_BOUNDARY;
+            e.qualification |= InstructionBatch::PAGE_FETCH_BOUNDARY;
         }
         fields::record_exit(v, &e);
         return Ok(count);

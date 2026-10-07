@@ -55,6 +55,7 @@ use misc::{dump_triple_fault_state, handle_exception_nmi, handle_xsetbv};
 use msr::{handle_msr_read, handle_msr_write};
 use rdrand::{handle_rdrand, handle_rdseed};
 pub(crate) use svm::InstructionWindow;
+pub(crate) use svm_batch::retain_translation_cache;
 use time::{handle_idle, handle_rdpmc, handle_rdtsc, handle_rdtscp};
 use vmcall::handle_vmcall;
 
@@ -254,7 +255,12 @@ pub fn handle_exit<C: VmContext, K: Kernel, A: CowAllocator<C::CowPage>>(
                 Some((start, end)) => tsc >= start && tsc < end,
                 None => false,
             };
-            !(on_boundary || in_single_step_range)
+            // AMD TF steps retire exactly one instruction. Intel margin
+            // steps depend on PEBS skid; synthetic AMD page stops can depend
+            // on host IRQs or NPT state and carry a separate qualification.
+            let exact_svm_step = C::V::uses_nested_paging()
+                && qual & super::traits::InstructionBatch::PAGE_EXECUTION_BOUNDARY == 0;
+            !(on_boundary || in_single_step_range || exact_svm_step)
         }
         _ => false,
     };

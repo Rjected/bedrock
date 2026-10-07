@@ -2,10 +2,11 @@
 
 //! Logging macros for bedrock.
 //!
-//! Each macro has three cfg-gated definitions (evaluated at definition time in this crate):
+//! Info, warning, and debug macros have three cfg-gated definitions:
 //! - `feature = "cargo"`: no-op (Cargo/test builds)
 //! - `kernel_log` cfg set (kernel builds with `KERNEL_LOG=1`): calls the corresponding `pr_*!`
 //! - neither: no-op (kernel builds without logging)
+//! Errors are always reported in kernel builds.
 //!
 //! The `$dollar:tt` parameter passes a literal `$` into the generated inner `macro_rules!`
 //! so its metavariable patterns don't conflict with the outer macro's parser.
@@ -45,12 +46,19 @@ define_log_macro!(
     pr_info
 );
 
-define_log_macro!(
-    $
-    /// Log an error message. Expands to `pr_err!` when `kernel_log` is set.
-    log_err,
-    pr_err
-);
+/// Report kernel errors even when verbose logging is disabled. In particular,
+/// a failed RUN must expose its cause instead of returning an unexplained EIO.
+#[macro_export]
+#[cfg(not(feature = "cargo"))]
+macro_rules! log_err {
+    ($($arg:tt)*) => {{ ::kernel::pr_err!($($arg)*); }};
+}
+
+#[macro_export]
+#[cfg(feature = "cargo")]
+macro_rules! log_err {
+    ($($arg:tt)*) => { let _ = ::core::format_args!($($arg)*); };
+}
 
 define_log_macro!(
     $

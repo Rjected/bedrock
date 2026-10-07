@@ -88,7 +88,8 @@ TF from R11. Ambiguous encodings across page boundaries use the fallback.
 A temporary NPT guard makes the selected code pages read-only and blocks
 instruction fetch from every other page. It also protects all reachable guest
 page tables, preventing translation changes during the run. The code and guest
-table frames must fit in a bounded set of twenty pages; larger trees use the
+table frames must fit in a preallocated workspace of 128 table frames;
+larger trees use the
 verified-region fallback. This path requires AMD ROGPT
 (CPUID 8000000A:EDX[21]); VMCB nested-control
 bit 6 makes page-table walks request nested writes only for actual A/D updates.
@@ -101,10 +102,17 @@ instructions, code/table writes, and other intercepts use scalar replay after
 timer handling. Guest exceptions
 and software interrupts are delivered through the shared exit handlers.
 Guest single-step traps use
-the scalar path and are reported after retirement. Accepted pages are rescanned
-before each entry;
-only conservative rejections are cached. Page execution requires more than
+the scalar path and are reported after retirement. Page hazard scans are cached
+within a RUN while guarded execution protects their bytes or scalar stores are
+proven disjoint from the cached pages. Pages omitted from a guard lose their
+scan approval before execution; emulation and a new RUN revoke approvals.
+Virtual aliases and cross-page boundaries are checked on each preparation.
+Page execution requires more than
 65,536 instructions before the next deadline.
+The table-frame list can be reused within a RUN while guarded execution,
+known non-writing instructions, or MOV/PUSH stores proven disjoint from table
+frames preserve its shape. Unproven writes,
+emulation, and a new RUN invalidate it; a changed CR3 rebuilds it.
 
 Regions ending at an unconditional SVM intercept omit the execution breakpoint,
 then replay that intercept after timer and deadline handling at the boundary.
@@ -123,6 +131,8 @@ Linux checkpoints with matching registers and guest-memory hashes, plus loop
 and REP deadline/fork tests. Its complete Linux integration test also passes:
 boot to a userspace snapshot, matching clock/randomness/registers/instruction
 counts in two children, and isolation of the parent's memory.
+Fresh boots on the same accelerated build currently differ in virtual time
+later in initialization; full-boot reproducibility remains an unresolved issue.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
@@ -169,6 +179,9 @@ sudo target/release/examples/svm_linux \
   "$(nix path-info .#svmGuestKernel)/vmlinux" \
   "$(nix path-info .#svmGuestInitrd)"
 ```
+
+Append `repeat` to compare two fresh boots as well, including the snapshot RAM
+hash, registers, virtual TSC, and both children's results.
 
 This reference kernel disables ftrace and ORC metadata to reduce boot-time
 stepping. The integration test uses a 100 MHz virtual TSC: a very low frequency

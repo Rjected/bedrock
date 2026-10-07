@@ -10,6 +10,58 @@ use crate::prelude::*;
 type DeviceStatesBox = HeapBox<DeviceStates>;
 type ExitStatsBox = HeapBox<AllExitStats>;
 
+/// Preallocated AMD guard workspace. Planning and permission restoration run
+/// with IRQs disabled and must neither allocate nor grow the kernel stack.
+pub(crate) struct SvmGuardScratch {
+    pub tables: [u64; 128],
+    pub levels: [u8; 128],
+    pub count: usize,
+    pub root: u64,
+    pub valid: bool,
+    pub code: [SvmCodeProof; 4],
+    pub code_count: usize,
+    pub code_cursor: usize,
+    pub saved: [SvmGuardSaved; 132],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SvmCodeProof {
+    pub page: u64,
+    pub offsets: [u16; 4],
+    pub count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SvmGuardSaved {
+    pub guest: u64,
+    pub host: u64,
+    pub permissions: u64,
+    pub valid: bool,
+}
+
+#[cfg(feature = "cargo")]
+fn box_svm_guard() -> VmallocBox<SvmGuardScratch> {
+    extern crate alloc;
+    let mut boxed = alloc::boxed::Box::<SvmGuardScratch>::new_uninit();
+    // SAFETY: integers and bools admit zero; there are no references or enums.
+    unsafe {
+        boxed.as_mut_ptr().write_bytes(0, 1);
+        boxed.assume_init()
+    }
+}
+
+#[cfg(not(feature = "cargo"))]
+fn box_svm_guard() -> VmallocBox<SvmGuardScratch> {
+    let mut boxed: kernel::alloc::KVBox<core::mem::MaybeUninit<SvmGuardScratch>> =
+        kernel::alloc::KVBox::new_uninit(kernel::alloc::flags::GFP_KERNEL)
+            .expect("Failed to allocate AMD guard workspace");
+    // SAFETY: integers and bools admit zero; there are no references or enums.
+    unsafe {
+        boxed.as_mut_ptr().write_bytes(0, 1);
+        boxed.assume_init()
+    }
+}
+
 /// Unbounded set of registered feedback buffers. Each ~2KB entry is boxed
 /// separately so the vector only holds pointers and never needs a large
 /// contiguous allocation. Append-only (no unregister), so a buffer's slot index
@@ -754,8 +806,9 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     /// Conservative scan rejections can remain cached after code changes.
     pub svm_rejected_pages: [u64; 64],
     pub svm_rejected_cursor: usize,
-    /// Recent virtual code pages; approvals are rescanned on every entry.
+    /// Recent virtual code pages; immutable hazard scans live in `svm_guard`.
     pub svm_recent_pages: [u64; 4],
+    pub(crate) svm_guard: VmallocBox<SvmGuardScratch>,
     /// Emulated TSC: `last_instruction_count + tsc_offset`.
     pub emulated_tsc: u64,
     /// Added to the instruction count; grows when HLT/MWAIT skips to a deadline.
@@ -1008,6 +1061,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; 4],
+            svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
             tsc_offset: 0,
@@ -1784,6 +1838,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; 4],
+            svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
             tsc_offset: 0,
@@ -2000,6 +2055,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; 4],
+            svm_guard: box_svm_guard(),
             last_instruction_count: 0, // Child's counter starts from 0
             emulated_tsc: parent_state.emulated_tsc,
             tsc_offset: parent_state.emulated_tsc,

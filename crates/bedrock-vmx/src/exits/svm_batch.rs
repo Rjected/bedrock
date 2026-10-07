@@ -417,7 +417,7 @@ fn collect_code_tables<C: VmContext>(
     Some(())
 }
 
-fn collect_translation_tree<C: VmContext>(ctx: &C, batch: &mut InstructionBatch) -> Option<()> {
+fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch) -> Option<()> {
     let root = ctx
         .state()
         .vmcs
@@ -427,15 +427,24 @@ fn collect_translation_tree<C: VmContext>(ctx: &C, batch: &mut InstructionBatch)
     if batch.pages[..batch.code_page_count].contains(&root) {
         return None;
     }
-    let mut levels = [0u8; 20];
-    let mut cursor = batch.page_count;
-    batch.pages[cursor] = root;
-    levels[cursor] = 4;
-    batch.page_count += 1;
+    let scratch = &ctx.state().svm_guard;
+    if scratch.valid && scratch.root == root {
+        return (!batch.pages[..batch.code_page_count]
+            .iter()
+            .any(|page| scratch.tables[..scratch.count].contains(page)))
+        .then_some(());
+    }
+    let scratch = &mut ctx.state_mut().svm_guard;
+    scratch.valid = false;
+    scratch.root = root;
+    scratch.tables[0] = root;
+    scratch.levels[0] = 4;
+    scratch.count = 1;
+    let mut cursor = 0;
     let mut bytes = [0u8; 512];
-    while cursor < batch.page_count {
-        let level = levels[cursor];
-        let table = batch.pages[cursor];
+    while cursor < ctx.state().svm_guard.count {
+        let level = ctx.state().svm_guard.levels[cursor];
+        let table = ctx.state().svm_guard.tables[cursor];
         if level > 1 {
             for offset in (0..4096).step_by(512) {
                 ctx.read_guest_memory(GuestPhysAddr::new(table + offset), &mut bytes)
@@ -455,27 +464,135 @@ fn collect_translation_tree<C: VmContext>(ctx: &C, batch: &mut InstructionBatch)
                     if batch.pages[..batch.code_page_count].contains(&child) {
                         return None;
                     }
-                    if let Some(index) = batch.pages[..batch.page_count]
+                    let scratch = &mut ctx.state_mut().svm_guard;
+                    if let Some(index) = scratch.tables[..scratch.count]
                         .iter()
                         .position(|&p| p == child)
                     {
-                        if levels[index] != level - 1 {
+                        if scratch.levels[index] != level - 1 {
                             return None;
                         }
                         continue;
                     }
-                    if batch.page_count == batch.pages.len() {
+                    if scratch.count == scratch.tables.len() {
                         return None;
                     }
-                    batch.pages[batch.page_count] = child;
-                    levels[batch.page_count] = level - 1;
-                    batch.page_count += 1;
+                    let index = scratch.count;
+                    scratch.tables[index] = child;
+                    scratch.levels[index] = level - 1;
+                    scratch.count += 1;
                 }
             }
         }
         cursor += 1;
     }
+    ctx.state_mut().svm_guard.valid = true;
     Some(())
+}
+
+/// Retain table and code proofs across guarded entries or scalar instructions
+/// whose writes are proven disjoint. A/D updates cannot add table frames.
+pub(crate) fn retain_translation_cache<C: VmContext>(
+    ctx: &mut C,
+    batch: Option<&InstructionBatch>,
+    window: Option<&super::svm::InstructionWindow>,
+    software: bool,
+) {
+    if !ctx.state().svm_guard.valid {
+        ctx.state_mut().svm_guard.code_count = 0;
+        return;
+    }
+    let keep = !software
+        && match batch {
+            Some(batch) => batch.page_execution || !batch.writes_memory,
+            None => window.is_some_and(|window| {
+                let long = ctx
+                    .state()
+                    .vmcs
+                    .read32(VmcsField32::GuestCsAccessRights)
+                    .unwrap_or(0)
+                    & (1 << 13)
+                    != 0;
+                long && (matches!(window.bytes[0], 0xc3 | 0xe9 | 0xeb)
+                    || safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| !writes)
+                    || scalar_store_preserves_guard(ctx, window, false))
+            }),
+        };
+    if !keep {
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.state_mut().svm_guard.code_count = 0;
+        return;
+    }
+    match batch {
+        Some(batch) if batch.page_execution => {
+            // Other cached pages may be written as data during this entry.
+            let cache = &mut ctx.state_mut().svm_guard;
+            let mut index = 0;
+            while index < cache.code_count {
+                if !batch.pages[..batch.code_page_count].contains(&cache.code[index].page) {
+                    cache.code_count -= 1;
+                    cache.code[index] = cache.code[cache.code_count];
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        None => {
+            if let Some(window) = window {
+                if safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| writes)
+                    && !scalar_store_preserves_guard(ctx, window, true)
+                {
+                    ctx.state_mut().svm_guard.code_count = 0;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scalar_store_preserves_guard<C: VmContext>(
+    ctx: &C,
+    window: &super::svm::InstructionWindow,
+    protect_code: bool,
+) -> bool {
+    let state = ctx.state();
+    let g = &state.gprs;
+    let Ok(rsp) = state.vmcs.read_natural(VmcsFieldNatural::GuestRsp) else {
+        return false;
+    };
+    let Ok(rip) = state.vmcs.read_natural(VmcsFieldNatural::GuestRip) else {
+        return false;
+    };
+    let gprs = [
+        g.rax, g.rcx, g.rdx, g.rbx, rsp, g.rbp, g.rsi, g.rdi, g.r8, g.r9, g.r10, g.r11, g.r12,
+        g.r13, g.r14, g.r15,
+    ];
+    let Some((address, width)) = store_range(&window.bytes, rip, &gprs, 0) else {
+        return false;
+    };
+    let Some(end) = address.checked_add(width - 1) else {
+        return false;
+    };
+    let mut page = address & !4095;
+    loop {
+        let Ok(physical) = super::svm::physical(ctx, page) else {
+            return false;
+        };
+        if state.svm_guard.tables[..state.svm_guard.count].contains(&(physical.as_u64() & !4095)) {
+            return false;
+        }
+        if protect_code
+            && state.svm_guard.code[..state.svm_guard.code_count]
+                .iter()
+                .any(|proof| proof.page == physical.as_u64() & !4095)
+        {
+            return false;
+        }
+        if page == end & !4095 {
+            return true;
+        }
+        page += 4096;
+    }
 }
 
 #[derive(Default)]
@@ -604,6 +721,39 @@ fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
 struct PageHazards {
     offsets: [u16; 4],
     count: usize,
+}
+
+fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHazards> {
+    if !ctx.state().svm_guard.valid {
+        ctx.state_mut().svm_guard.code_count = 0;
+    }
+    let cache = &ctx.state().svm_guard;
+    if let Some(proof) = cache.code[..cache.code_count]
+        .iter()
+        .find(|p| p.page == physical)
+    {
+        return Some(PageHazards {
+            offsets: proof.offsets,
+            count: proof.count,
+        });
+    }
+    let hazards = page_hazards(ctx, physical)?;
+    let cache = &mut ctx.state_mut().svm_guard;
+    let index = if cache.code_count < cache.code.len() {
+        let index = cache.code_count;
+        cache.code_count += 1;
+        index
+    } else {
+        let index = cache.code_cursor;
+        cache.code_cursor = (cache.code_cursor + 1) % cache.code.len();
+        index
+    };
+    cache.code[index] = super::super::vm_state::SvmCodeProof {
+        page: physical,
+        offsets: hazards.offsets,
+        count: hazards.count,
+    };
+    Some(hazards)
 }
 
 fn hazardous_entry(bytes: &[u8]) -> bool {
@@ -967,8 +1117,8 @@ pub(crate) fn prepare<C: VmContext>(
 ) -> Option<InstructionBatch> {
     let page = window.physical.as_u64() & !4095;
     let mut allow_page = false;
-    // Reuse scans only within this preparation, while the guest is stopped.
-    // Every subsequent hardware entry still validates the current contents.
+    // Reuse hazard scans while the guard proves the bytes have not changed.
+    // Virtual aliases and cross-page instruction boundaries are checked anew.
     let mut hazards = [PageHazards {
         offsets: [0; 4],
         count: 0,
@@ -981,7 +1131,7 @@ pub(crate) fn prepare<C: VmContext>(
         && instruction_budget(ctx) > InstructionBatch::COUNTER_DEADLINE_MARGIN
         && !ctx.state().svm_rejected_pages.contains(&page)
     {
-        if let Some(hazard) = page_hazards(ctx, page) {
+        if let Some(hazard) = cached_page_hazards(ctx, page) {
             hazards[0] = hazard;
             allow_page = true;
         }
@@ -999,6 +1149,31 @@ pub(crate) fn prepare<C: VmContext>(
     }
     let mut batch = prepared?;
     if batch.page_execution {
+        if ctx
+            .state()
+            .vmcs
+            .read_natural(VmcsFieldNatural::GuestCr0)
+            .ok()?
+            & (1 << 31)
+            == 0
+        {
+            ctx.state_mut().svm_guard.count = 0;
+            ctx.state_mut().svm_guard.valid = false;
+        }
+        if ctx
+            .state()
+            .vmcs
+            .read_natural(VmcsFieldNatural::GuestCr0)
+            .ok()?
+            & (1 << 31)
+            != 0
+            && collect_translation_tree(ctx, &batch).is_none()
+        {
+            let state = ctx.state_mut();
+            state.svm_rejected_pages[state.svm_rejected_cursor] = page;
+            state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
+            return prepare_verified(ctx, can_loop, false, window);
+        }
         let current = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
         let mut updated = [u64::MAX; 4];
@@ -1024,11 +1199,12 @@ pub(crate) fn prepare<C: VmContext>(
             // Translation tables can never become executable code. Duplicated
             // physical code aliases are already covered by the guarded tree.
             if batch.pages[..batch.page_count].contains(&physical)
+                || ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&physical)
                 || ctx.state().svm_rejected_pages.contains(&physical)
             {
                 continue;
             }
-            let Some(hazard) = page_hazards(ctx, physical) else {
+            let Some(hazard) = cached_page_hazards(ctx, physical) else {
                 continue;
             };
             if batch.pages[..batch.code_page_count].iter().any(|&page| {
@@ -1174,11 +1350,6 @@ fn prepare_verified<C: VmContext>(
         batch.counter_bounded = false;
         batch.accesses_memory = true;
         batch.writes_memory = true;
-        if paged {
-            if collect_translation_tree(ctx, &mut batch).is_none() {
-                return prepare_verified(ctx, can_loop, false, window);
-            }
-        }
         return Some(batch);
     }
 
@@ -1382,7 +1553,7 @@ fn prepare_verified<C: VmContext>(
 }
 
 pub(crate) struct BatchGuard {
-    saved: [Option<(GuestPhysAddr, HostPhysAddr, EptPermissions)>; 20],
+    saved_count: usize,
     execution: Option<NptExecutionGuard>,
 }
 
@@ -1392,7 +1563,7 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
     batch: &InstructionBatch,
 ) -> Option<BatchGuard> {
     let mut guard = BatchGuard {
-        saved: [None; 20],
+        saved_count: 0,
         execution: None,
     };
     if !batch.accesses_memory {
@@ -1403,7 +1574,19 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
     } else {
         1
     };
-    for (index, &page) in batch.pages[..protected].iter().enumerate() {
+    let tables = if batch.page_execution {
+        ctx.state().svm_guard.count
+    } else {
+        0
+    };
+    for index in 0..protected + tables {
+        let page = if index < protected {
+            batch.pages[index]
+        } else {
+            ctx.state().svm_guard.tables[index - protected]
+        };
+        ctx.state_mut().svm_guard.saved[index].valid = false;
+        guard.saved_count = index + 1;
         let gpa = GuestPhysAddr::new(page);
         let Some((host, permissions)) = ctx.state().ept.lookup(allocator, gpa) else {
             guard.restore(ctx, allocator);
@@ -1422,7 +1605,12 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
             guard.restore(ctx, allocator);
             return None;
         }
-        guard.saved[index] = Some((gpa, host, permissions));
+        ctx.state_mut().svm_guard.saved[index] = super::super::vm_state::SvmGuardSaved {
+            guest: page,
+            host: host.as_u64(),
+            permissions: permissions.bits(),
+            valid: true,
+        };
     }
     if batch.page_execution {
         let mut pages = [GuestPhysAddr::new(0); 4];
@@ -1456,8 +1644,9 @@ impl BatchGuard {
         let v = &ctx.state().vmcs;
         let delivered_exception = matches!(v.read32(VmcsField32::VmExitReason).ok(), Some(0 | 514));
         let fetch_boundary = v.read32(VmcsField32::VmExitReason).ok() == Some(37)
-            && v.read_natural(VmcsFieldNatural::ExitQualification).ok()
-                == Some(InstructionBatch::PAGE_FETCH_BOUNDARY)
+            && v.read_natural(VmcsFieldNatural::ExitQualification)
+                .ok()
+                .is_some_and(|q| q & InstructionBatch::PAGE_FETCH_BOUNDARY != 0)
             && super::svm::InstructionWindow::read(ctx)
                 .ok()
                 .is_some_and(|window| {
@@ -1474,17 +1663,26 @@ impl BatchGuard {
                 != 0;
         let fault_page = v.read64(VmcsField64::GuestPhysicalAddr).unwrap_or(0) & !4095;
         let retry_single = write_fault
-            && self
-                .saved
+            && ctx.state().svm_guard.saved[..self.saved_count]
                 .iter()
-                .flatten()
-                .any(|(gpa, _, _)| gpa.as_u64() == fault_page);
-        for (gpa, host, permissions) in self.saved.into_iter().flatten() {
+                .any(|saved| saved.valid && saved.guest == fault_page);
+        for index in 0..self.saved_count {
+            let saved = ctx.state().svm_guard.saved[index];
+            ctx.state_mut().svm_guard.saved[index].valid = false;
+            if !saved.valid {
+                continue;
+            }
             // Entries cannot disappear while the VM is stopped. Preserve the
             // original COW permission rather than promoting a shared page.
             ctx.state_mut()
                 .ept
-                .remap_4k(allocator, gpa, host, permissions, EptMemoryType::WriteBack)
+                .remap_4k(
+                    allocator,
+                    GuestPhysAddr::new(saved.guest),
+                    HostPhysAddr::new(saved.host),
+                    EptPermissions::from_bits(saved.permissions),
+                    EptMemoryType::WriteBack,
+                )
                 .expect("SVM batch mapping disappeared");
         }
         // Exceptions are delivered by the common handler after accounting.
@@ -1683,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn only_rejected_pages_are_cached_after_code_changes() {
+    fn new_run_revokes_code_approvals_after_userspace_changes() {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
@@ -1693,17 +1891,19 @@ mod tests {
                 .page_execution
         );
         let b = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(&b.pages[..b.page_count], &[0x1000]);
         assert_eq!(
-            &b.pages[..b.page_count],
-            &[0x1000, 0x3000, 0x4000, 0x5000, 0x6000]
+            &ctx.state().svm_guard.tables[..ctx.state().svm_guard.count],
+            &[0x3000, 0x4000, 0x5000, 0x6000]
         );
         assert!(
             prepare(&mut ctx, true, true, &window)
                 .unwrap()
                 .page_execution
         );
-        // Modification outside the small instruction window must revoke
-        // page-wide execution; accepted pages have no persistent cache entry.
+        // A new RUN revokes approvals before userspace changes become visible,
+        // including changes outside the small instruction window.
+        ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x1ff0..0x1ff3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         assert!(
             !prepare(&mut ctx, true, true, &window)
@@ -1762,6 +1962,7 @@ mod tests {
         assert_eq!(&b.pages[..2], &[0x1000, 0x2000]);
         // Each page is safe alone, but either virtual adjacency could execute
         // RDRAND across their physical boundary. Exclude the optional page.
+        ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x1ffe..0x2000].copy_from_slice(&[0x0f, 0xc7]);
         ctx.memory[0x2000] = 0xf0;
         assert!(page_safe(&ctx, 0x1000).is_some());
@@ -1772,11 +1973,60 @@ mod tests {
                 .code_page_count,
             1
         );
+        ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x1ffe..0x2003].fill(0x90);
         ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         let b = prepare(&mut ctx, true, true, &window).unwrap();
         assert_eq!(b.code_page_count, 2);
         assert_eq!(&b.page_breakpoints[..b.page_breakpoint_count], &[0x2100]);
+    }
+
+    #[test]
+    fn code_cache_drops_pages_before_they_can_be_written_as_data() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        ctx.state_mut().svm_recent_pages[0] = 0x2000;
+        let mut batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(ctx.state().svm_guard.code_count, 2);
+        batch.code_page_count = 1;
+        batch.page_count = 1;
+        retain_translation_cache(&mut ctx, Some(&batch), Some(&window), false);
+        assert_eq!(ctx.state().svm_guard.code_count, 1);
+        assert_eq!(ctx.state().svm_guard.code[0].page, 0x1000);
+        // The omitted page is writable during this entry, even with the
+        // translation tree protected. Its next inclusion must scan again.
+        ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        let next = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(next.code_page_count, 2);
+        assert_eq!(
+            &next.page_breakpoints[..next.page_breakpoint_count],
+            &[0x2100]
+        );
+    }
+
+    #[test]
+    fn scalar_code_writes_revoke_scans_without_revoking_disjoint_tables() {
+        for (opcode, address) in [(&[0x48, 0x89, 0x07][..], 0x1ff0), (&[0x50][..], 0x1ff8)] {
+            let mut ctx = paged_context(&[0x90]);
+            ctx.memory[0x1000..0x2000].fill(0x90);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            prepare(&mut ctx, true, true, &window).unwrap();
+            let mut store = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            store.bytes[..opcode.len()].copy_from_slice(opcode);
+            ctx.state_mut().gprs.rdi = address;
+            ctx.vmcs_setup()
+                .set_field_natural(VmcsFieldNatural::GuestRsp, address);
+            retain_translation_cache(&mut ctx, None, Some(&store), false);
+            assert!(ctx.state().svm_guard.valid);
+            assert_eq!(ctx.state().svm_guard.code_count, 0);
+            ctx.memory[0x1ff0..0x1ff3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+            assert!(
+                !prepare(&mut ctx, true, true, &window)
+                    .unwrap()
+                    .page_execution
+            );
+        }
     }
 
     #[test]
@@ -1791,11 +2041,114 @@ mod tests {
         let b = prepare(&mut ctx, true, true, &window).unwrap();
         assert!(b.page_execution);
         for table in [0x3000, 0x4000, 0x5000, 0x6000, 0x8000, 0x9000, 0xa000] {
-            assert!(b.pages[..b.page_count].contains(&table));
+            assert!(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&table));
         }
         // A code page reused as an unrelated page table cannot run freely.
+        let mut store = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        store.bytes[..3].copy_from_slice(&[0x48, 0x89, 0x07]);
+        ctx.state_mut().gprs.rdi = 0x9000;
+        retain_translation_cache(&mut ctx, None, Some(&store), false);
+        assert!(!ctx.state().svm_guard.valid);
         ctx.memory[0x9000..0x9008].copy_from_slice(&0x1007u64.to_le_bytes());
         assert!(!prepare(&mut ctx, true, true, &window).is_some_and(|b| b.page_execution));
+    }
+
+    #[test]
+    fn page_execution_accepts_large_trees_and_falls_back_at_workspace_capacity() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory.resize(1024 * 1024, 0);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        for index in 1..91 {
+            let table = 0x7000 + index * 4096;
+            ctx.memory[0x5000 + index * 8..0x5008 + index * 8]
+                .copy_from_slice(&(table as u64 | 7).to_le_bytes());
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(
+            prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
+        assert_eq!(ctx.state().svm_guard.count, 94);
+        assert!(ctx.state().svm_guard.tables[..94].contains(&(0x7000 + 90 * 4096)));
+        // Simulate returning to userspace before changing RAM.
+        ctx.state_mut().svm_guard.valid = false;
+        for index in 91..128 {
+            let table = 0x7000 + index * 4096;
+            ctx.memory[0x5000 + index * 8..0x5008 + index * 8]
+                .copy_from_slice(&(table as u64 | 7).to_le_bytes());
+        }
+        assert!(
+            !prepare(&mut ctx, true, true, &window)
+                .unwrap()
+                .page_execution
+        );
+    }
+
+    #[test]
+    fn translation_cache_tracks_root_and_invalidates_before_unprotected_writes() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        retain_translation_cache(&mut ctx, Some(&batch), Some(&window), false);
+        assert!(ctx.state().svm_guard.valid);
+        retain_translation_cache(&mut ctx, None, Some(&window), false);
+        assert!(ctx.state().svm_guard.valid);
+        // Emulation may write interrupt frames or device data into tables.
+        retain_translation_cache(&mut ctx, None, Some(&window), true);
+        assert!(!ctx.state().svm_guard.valid);
+        prepare(&mut ctx, true, true, &window).unwrap();
+        ctx.memory.copy_within(0x3000..0x4000, 0x8000);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x8000);
+        prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(ctx.state().svm_guard.root, 0x8000);
+        assert_eq!(ctx.state().svm_guard.tables[0], 0x8000);
+        let mut store = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        store.bytes[..3].copy_from_slice(&[0x48, 0x89, 0x07]);
+        ctx.state_mut().gprs.rdi = 0x6000;
+        retain_translation_cache(&mut ctx, None, Some(&store), false);
+        assert!(!ctx.state().svm_guard.valid);
+        prepare(&mut ctx, true, true, &window).unwrap();
+        // Unsupported instructions cannot retain the proof while unguarded.
+        store.bytes[..2].copy_from_slice(&[0x0f, 0x0b]);
+        retain_translation_cache(&mut ctx, None, Some(&store), false);
+        assert!(!ctx.state().svm_guard.valid);
+    }
+
+    #[test]
+    fn scalar_store_proofs_cover_both_pages_stack_writes_and_physical_aliases() {
+        for (address, keep) in [
+            (0x7000, true),
+            (0x6000, false),
+            (0x7ffc, true),
+            (0x5ffc, false),
+        ] {
+            let mut ctx = paged_context(&[0x48, 0x89, 0x07]);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            let batch = prepare(&mut ctx, true, true, &window).unwrap();
+            assert!(batch.page_execution);
+            ctx.state_mut().gprs.rdi = address;
+            retain_translation_cache(&mut ctx, None, Some(&window), false);
+            assert_eq!(ctx.state().svm_guard.valid, keep, "address={address:#x}");
+        }
+        let mut ctx = paged_context(&[0x48, 0x89, 0x07]);
+        ctx.memory[0x6038..0x6040].copy_from_slice(&0x6007u64.to_le_bytes());
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        prepare(&mut ctx, true, true, &window).unwrap();
+        ctx.state_mut().gprs.rdi = 0x7000; // GVA data alias to a protected table.
+        retain_translation_cache(&mut ctx, None, Some(&window), false);
+        assert!(!ctx.state().svm_guard.valid);
+        for (rsp, keep) in [(0x8008, true), (0x6008, false)] {
+            let mut ctx = paged_context(&[0x50]);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            prepare(&mut ctx, true, true, &window).unwrap();
+            ctx.vmcs_setup()
+                .set_field_natural(VmcsFieldNatural::GuestRsp, rsp);
+            retain_translation_cache(&mut ctx, None, Some(&window), false);
+            assert_eq!(ctx.state().svm_guard.valid, keep, "rsp={rsp:#x}");
+        }
     }
 
     #[test]
@@ -1809,6 +2162,7 @@ mod tests {
         for address in [0x1100, 0x1101, 0x1102] {
             assert!(b.page_breakpoints[..b.page_breakpoint_count].contains(&address));
         }
+        ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
         // Three hazards, two executable aliases exceed four debug registers.
         assert!(
@@ -1816,6 +2170,7 @@ mod tests {
                 .unwrap()
                 .page_execution
         );
+        ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x6048..0x6050].copy_from_slice(&(0x1007u64 | (1 << 63)).to_le_bytes());
         ctx.state_mut().svm_rejected_pages.fill(u64::MAX);
         assert!(
@@ -1823,6 +2178,7 @@ mod tests {
                 .unwrap()
                 .page_execution
         );
+        ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x1100..0x1105].copy_from_slice(&[0xf3, 0x66, 0x48, 0xa4, 0x90]);
         let b = prepare(&mut ctx, true, true, &window).unwrap();
         assert_eq!(&b.page_breakpoints[..b.page_breakpoint_count], &[0x1100]);

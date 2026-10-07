@@ -72,11 +72,30 @@ fn memory_hash(vm: &mut Vm) -> Result<u64, Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 3 {
-        return Err("Usage: svm_linux VMLINUX SVM_TEST_INITRD".into());
+    let repeat = args.len() == 4 && args[3] == "repeat";
+    if args.len() != 3 && !repeat {
+        return Err("Usage: svm_linux VMLINUX SVM_TEST_INITRD [repeat]".into());
     }
     let kernel = std::fs::read(&args[1])?;
     let initrd = std::fs::read(&args[2])?;
+    let first = run_linux(&kernel, &initrd)?;
+    if repeat {
+        let second = run_linux(&kernel, &initrd)?;
+        assert_eq!(first, second, "Fresh Linux boots diverged");
+        println!("SVM_LINUX_FRESH_REPLAY_PASS");
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RootReplay {
+    snapshot_tsc: u64,
+    parent_hash: u64,
+    snapshot_registers: [u64; 18],
+    children: Vec<(u64, Vec<u8>, [u64; 18])>,
+}
+
+fn run_linux(kernel: &[u8], initrd: &[u8]) -> Result<RootReplay, Box<dyn std::error::Error>> {
     let mut root = VmBuilder::new()
         .memory_mb(128)
         .tsc_frequency(100_000_000)
@@ -92,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot_tsc = run_until(&mut root, true)?;
     println!("SVM_LINUX_BOOT_PASS snapshot_tsc={snapshot_tsc}");
     let parent_hash = memory_hash(&mut root)?;
+    let snapshot_registers = register_signature(root.get_regs()?);
     let parent_id = root.get_vm_id()?;
     let mut results = Vec::new();
     for _ in 0..2 {
@@ -114,28 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "getrandom failed"
         );
         assert!(tsc > snapshot_tsc);
-        let regs = child.get_regs()?;
-        let g = regs.gprs;
-        let registers = [
-            regs.rip,
-            regs.rflags,
-            g.rax,
-            g.rbx,
-            g.rcx,
-            g.rdx,
-            g.rsi,
-            g.rdi,
-            g.rbp,
-            g.rsp,
-            g.r8,
-            g.r9,
-            g.r10,
-            g.r11,
-            g.r12,
-            g.r13,
-            g.r14,
-            g.r15,
-        ];
+        let registers = register_signature(child.get_regs()?);
         results.push((tsc, report, registers));
     }
     assert_eq!(
@@ -151,5 +150,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "SVM_LINUX_FORK_REPLAY_PASS shutdown_tsc={} report={:02x?}",
         results[0].0, results[0].1
     );
-    Ok(())
+    Ok(RootReplay {
+        snapshot_tsc,
+        parent_hash,
+        snapshot_registers,
+        children: results,
+    })
+}
+
+fn register_signature(regs: bedrock_vm::Regs) -> [u64; 18] {
+    let g = regs.gprs;
+    [
+        regs.rip,
+        regs.rflags,
+        g.rax,
+        g.rbx,
+        g.rcx,
+        g.rdx,
+        g.rsi,
+        g.rdi,
+        g.rbp,
+        g.rsp,
+        g.r8,
+        g.r9,
+        g.r10,
+        g.r11,
+        g.r12,
+        g.r13,
+        g.r14,
+        g.r15,
+    ]
 }

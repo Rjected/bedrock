@@ -283,6 +283,10 @@ where
     }
 
     let mut force_single_step = false;
+    if Ctx::V::uses_nested_paging() {
+        // Userspace may have changed RAM between RUN calls.
+        ctx.state_mut().svm_guard.valid = false;
+    }
     let loop_result = loop {
         let loop_start_tsc = rdtsc();
 
@@ -341,6 +345,14 @@ where
         });
         if batch.is_some() && guard.is_none() {
             batch = None;
+        }
+        if Ctx::V::uses_nested_paging() {
+            super::super::exits::retain_translation_cache(
+                ctx,
+                batch.as_ref(),
+                instruction_window.as_ref(),
+                software_exit,
+            );
         }
         runner.set_instruction_batch(batch);
         let state = ctx.state_mut();
@@ -423,6 +435,13 @@ where
             total_exit_overhead.saturating_sub(irq_window);
 
         let kernel = machine.kernel();
+        if Ctx::V::uses_nested_paging()
+            && ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok() != Some(37)
+        {
+            // Emulated exits can write guest RAM, including interrupt frames
+            // and device responses. Synthetic MTF handling writes no RAM.
+            ctx.state_mut().svm_guard.valid = false;
+        }
         match handle_exit(ctx, kernel, allocator) {
             ExitHandlerResult::Continue => {
                 ctx.finalize_exit_record(kernel);
