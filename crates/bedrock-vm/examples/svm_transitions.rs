@@ -6,6 +6,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("SVM_CASE").as_deref() == Ok("page-fault") {
         return test_page_fault();
     }
+    if std::env::var("SVM_CASE").as_deref() == Ok("mov-ss") {
+        return test_mov_ss_deadline();
+    }
+    test_mov_ss_deadline()?;
     test_syscall(false)?;
     test_syscall(true)?;
     test_interrupt()?;
@@ -13,6 +17,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_page_fault()?;
     test_guest_debug_trap()?;
     test_guest_breakpoint_trap()?;
+    Ok(())
+}
+
+fn test_mov_ss_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    for instruction in [
+        &[0x8e, 0xd0][..],             // AX
+        &[0x41, 0x8e, 0xd0][..],       // R8W
+        &[0x41, 0x66, 0x8e, 0xd0][..], // Legacy prefix cancels REX.
+        &[0x8e, 0xd4][..],             // SP comes from the VMCB, not the GPR save area.
+    ] {
+        test_mov_ss_register_deadline(instruction)?;
+    }
+    println!("SVM_MOV_SS_DEADLINE_PASS");
+    Ok(())
+}
+
+fn test_mov_ss_register_deadline(instruction: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x9018..0x9020].copy_from_slice(&0x00cf93000000ffffu64.to_le_bytes());
+    let next_rip = 0x1000 + instruction.len();
+    memory[0x1000..next_rip].copy_from_slice(instruction);
+    memory[next_rip..next_rip + 6].copy_from_slice(&[0x90, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.descriptor_tables.gdtr = Gdtr::new(0x9000, 0x1f);
+    regs.rip = 0x1000;
+    regs.gprs.rax = 0x18;
+    regs.gprs.r8 = 0x18;
+    regs.gprs.rsp = if instruction == [0x8e, 0xd4] {
+        0x18
+    } else {
+        0x8000
+    };
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(1))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259);
+        let stopped = vm.get_regs()?;
+        assert_eq!(exit.emulated_tsc, 1);
+        assert_eq!(
+            stopped.rip, next_rip as u64,
+            "MOV SS deadline crossed the following instruction"
+        );
+        assert_eq!(stopped.segment_regs.ss.selector.bits(), 0x18);
+        vm.set_stop_at_tsc(Some(2))?;
+        loop {
+            let exit = vm.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 259);
+            assert_eq!(exit.emulated_tsc, 2);
+            assert_eq!(vm.get_regs()?.rip, next_rip as u64 + 1);
+            break;
+        }
+        break;
+    }
     Ok(())
 }
 

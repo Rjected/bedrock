@@ -156,6 +156,92 @@ fn prepare_random_exit_with_window<C: VmContext>(
     Ok(true)
 }
 
+/// Load an already-accessed GDT stack descriptor without using TF. Hardware
+/// suppresses the trap for MOV SS and would also retire the next instruction.
+/// Other operand/descriptor forms still require equivalent software handling.
+fn prepare_mov_ss_register<C: VmContext>(
+    ctx: &C,
+    modrm: u8,
+    rex: u8,
+    length: usize,
+) -> Result<bool, ExitError> {
+    if modrm & 0xf8 != 0xd0 || rex & 4 != 0 {
+        return Ok(false);
+    }
+    let v = &ctx.state().vmcs;
+    let register = (modrm & 7) | ((rex & 1) << 3);
+    let selector = if register == 4 {
+        v.read_natural(VmcsFieldNatural::GuestRsp)? as u16
+    } else {
+        super::cr::get_gpr_value(&ctx.state().gprs, register) as u16
+    };
+    let cr0 = v.read_natural(VmcsFieldNatural::GuestCr0)?;
+    let (base, limit, attributes) = if cr0 & 1 == 0 {
+        (u64::from(selector) << 4, 0xffff, 0x93)
+    } else {
+        // Let hardware deliver invalid-selector faults before retirement.
+        // Null selectors, LDT descriptors, and unaccessed descriptors need
+        // separate handling; do not manufacture cached segment state for them.
+        let cpl = (v.read32(VmcsField32::GuestCsAccessRights)? >> 5) & 3;
+        if selector & 4 != 0 || selector & !7 == 0 || u32::from(selector & 3) != cpl {
+            return Ok(false);
+        }
+        let offset = u64::from(selector & !7);
+        if offset + 7 > u64::from(v.read32(VmcsField32::GuestGdtrLimit)?) {
+            return Ok(false);
+        }
+        let address = v
+            .read_natural(VmcsFieldNatural::GuestGdtrBase)?
+            .wrapping_add(offset);
+        let mut descriptor = [0u8; 8];
+        for (i, byte) in descriptor.iter_mut().enumerate() {
+            let Ok(address) = physical(ctx, address.wrapping_add(i as u64)) else {
+                return Ok(false);
+            };
+            if ctx
+                .read_guest_memory(address, core::slice::from_mut(byte))
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        if descriptor[5] & 0x9f != 0x93 || u32::from((descriptor[5] >> 5) & 3) != cpl {
+            return Ok(false);
+        }
+        let base = u64::from(u16::from_le_bytes([descriptor[2], descriptor[3]]))
+            | (u64::from(descriptor[4]) << 16)
+            | (u64::from(descriptor[7]) << 24);
+        let mut limit = u32::from(u16::from_le_bytes([descriptor[0], descriptor[1]]))
+            | (u32::from(descriptor[6] & 15) << 16);
+        if descriptor[6] & 0x80 != 0 {
+            limit = (limit << 12) | 0xfff;
+        }
+        (
+            base,
+            limit,
+            u32::from(descriptor[5]) | (u32::from(descriptor[6] & 0xf0) << 8),
+        )
+    };
+    v.write16(VmcsField16::GuestSsSelector, selector)?;
+    v.write_natural(VmcsFieldNatural::GuestSsBase, base)?;
+    v.write32(VmcsField32::GuestSsLimit, limit)?;
+    v.write32(VmcsField32::GuestSsAccessRights, attributes)?;
+    v.write_natural(
+        VmcsFieldNatural::GuestRip,
+        v.read_natural(VmcsFieldNatural::GuestRip)?
+            .wrapping_add(length as u64),
+    )?;
+    v.write_natural(
+        VmcsFieldNatural::GuestRflags,
+        v.read_natural(VmcsFieldNatural::GuestRflags)? & !(1 << 16),
+    )?;
+    // SVM stores its one-instruction interrupt shadow in bit zero.
+    v.write32(VmcsField32::GuestInterruptibilityState, 1)?;
+    v.write32(VmcsField32::VmExitReason, 37)?;
+    v.write_natural(VmcsFieldNatural::ExitQualification, 0)?;
+    Ok(true)
+}
+
 pub(crate) fn prepare_instruction_exit<
     C: VmContext,
     R: super::super::traits::VmRunner<Vmcs = C::Vmcs>,
@@ -216,6 +302,9 @@ pub(crate) fn prepare_instruction_exit<
         };
         prefix_len += 1;
         opcode = fetch(prefix_len)?;
+    }
+    if opcode == 0x8e {
+        return prepare_mov_ss_register(ctx, fetch(prefix_len + 1)?, rex, prefix_len + 2);
     }
     if opcode != 0x0f {
         return Ok(false);
@@ -461,6 +550,60 @@ mod tests {
         ctx.vmcs_setup()
             .set_field32(VmcsField32::GuestSsAccessRights, 0x93);
         ctx
+    }
+
+    #[test]
+    fn mov_ss_register_preserves_next_instruction_boundary() {
+        let mut ctx = context();
+        ctx.state_mut().gprs.rax = 0x18;
+        ctx.set_guest_rflags(0x202);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr0, 1);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestGdtrBase, 0x9000);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestGdtrLimit, 0x1f);
+        ctx.memory[0x9018..0x9020].copy_from_slice(&0x00cf93000000ffffu64.to_le_bytes());
+        assert!(prepare_mov_ss_register(&ctx, 0xd0, 0, 2).unwrap());
+        assert_eq!(ctx.get_guest_rip(), Some(0x1002));
+        assert_eq!(
+            ctx.state()
+                .vmcs
+                .read16(VmcsField16::GuestSsSelector)
+                .unwrap(),
+            0x18
+        );
+        assert_eq!(
+            ctx.state().vmcs.read32(VmcsField32::GuestSsLimit).unwrap(),
+            u32::MAX
+        );
+        assert_eq!(
+            ctx.state()
+                .vmcs
+                .read32(VmcsField32::GuestInterruptibilityState)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn mov_ss_invalid_descriptor_does_not_retire() {
+        let mut ctx = context();
+        ctx.state_mut().gprs.rax = 0x18;
+        ctx.set_guest_rflags(0x202);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr0, 1);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestGdtrBase, 0x9000);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestGdtrLimit, 0x1f);
+        for access in [0x13u8, 0x91, 0x9b, 0xf3] {
+            ctx.memory[0x901d] = access;
+            assert!(!prepare_mov_ss_register(&ctx, 0xd0, 0, 2).unwrap());
+            assert_eq!(ctx.get_guest_rip(), Some(0x1000));
+        }
+        assert!(!prepare_mov_ss_register(&ctx, 0xd0, 4, 3).unwrap());
+        assert!(!prepare_mov_ss_register(&ctx, 0x10, 0, 2).unwrap());
     }
 
     #[test]
