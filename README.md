@@ -245,9 +245,11 @@ from 100 to 110 million match the stepping reference at the smaller margin.
 These samples do not establish repeatability: a later run with 10,000-instruction
 intermediate checkpoints from 8 to 8.1 million diverged within 256 replays.
 It also diverged with the former 4,096-instruction margin and with whole-page
-execution disabled. Disabling every counter-backed batch, while retaining
+execution disabled. A separate trial that kept only whole-page counter batches
+also diverged. Disabling every counter-backed batch, while retaining
 exact-breakpoint batches, matched 256 replays; all-scalar execution did too.
-Counter-backed short-batch accounting remains an unresolved correctness issue.
+Counter-backed instruction accounting remains an unresolved correctness issue
+in both batch forms.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
