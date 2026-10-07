@@ -440,6 +440,8 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
     let scratch = &mut ctx.state_mut().svm_guard;
     scratch.alias_proof.valid = false;
     scratch.valid = false;
+    scratch.translation_count = 0;
+    scratch.translation_cursor = 0;
     scratch.root = root;
     scratch.tables[0] = root;
     scratch.levels[0] = 4;
@@ -492,6 +494,35 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
     }
     ctx.state_mut().svm_guard.valid = true;
     Some(())
+}
+
+/// The table proof covers every reachable frame, so A/D updates cannot change
+/// these mappings. Only call after collect_translation_tree validates CR3.
+fn cached_code_translation<C: VmContext>(ctx: &mut C, linear: u64) -> Option<u64> {
+    if ctx.state().svm_guard.valid {
+        let cache = &ctx.state().svm_guard;
+        if let Some(&(_, physical)) = cache.translations[..cache.translation_count]
+            .iter()
+            .find(|&&(page, _)| page == linear)
+        {
+            return Some(physical);
+        }
+    }
+    let physical = super::svm::physical(ctx, linear).ok()?.as_u64() & !4095;
+    let cache = &mut ctx.state_mut().svm_guard;
+    if cache.valid {
+        let slot = if cache.translation_count < cache.translations.len() {
+            let slot = cache.translation_count;
+            cache.translation_count += 1;
+            slot
+        } else {
+            let slot = cache.translation_cursor;
+            cache.translation_cursor = (slot + 1) % cache.translations.len();
+            slot
+        };
+        cache.translations[slot] = (linear, physical);
+    }
+    Some(physical)
 }
 
 /// Retain table and code proofs across guarded entries or scalar instructions
@@ -1287,10 +1318,7 @@ pub(crate) fn prepare<C: VmContext>(
             {
                 continue;
             }
-            let Some(physical) = super::svm::physical(ctx, linear)
-                .ok()
-                .map(|p| p.as_u64() & !4095)
-            else {
+            let Some(physical) = cached_code_translation(ctx, linear) else {
                 continue;
             };
             // Translation tables can never become executable code. Duplicated
@@ -1849,6 +1877,36 @@ mod tests {
     fn planned(ctx: &MockVmContext) -> Option<InstructionBatch> {
         let window = super::super::svm::InstructionWindow::read(ctx).unwrap();
         prepare_verified(ctx, true, false, &window)
+    }
+
+    #[test]
+    fn code_translations_follow_guard_revocation_and_root_changes() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.state_mut().svm_recent_pages[0] = 0x7000;
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(first.pages[..first.code_page_count].contains(&0x7000));
+        assert_eq!(ctx.state().svm_guard.translation_count, 1);
+        // Hardware A/D updates retain the physical mapping and table proof.
+        ctx.memory[0x6038..0x6040].copy_from_slice(&0x7067u64.to_le_bytes());
+        assert_eq!(cached_code_translation(&mut ctx, 0x7000), Some(0x7000));
+
+        // An unprotected table write must revoke the guard before replanning.
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.memory[0x6038..0x6040].copy_from_slice(&0x9007u64.to_le_bytes());
+        let second = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(second.pages[..second.code_page_count].contains(&0x9000));
+        assert_eq!(ctx.state().svm_guard.translation_count, 1);
+
+        // A different CR3 rebuilds even when the previous proof was valid.
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x2000);
+        ctx.memory[0x2000..0x2008].copy_from_slice(&0x4007u64.to_le_bytes());
+        ctx.memory[0x6038..0x6040].copy_from_slice(&0xa007u64.to_le_bytes());
+        let third = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(third.pages[..third.code_page_count].contains(&0xa000));
+        assert_eq!(ctx.state().svm_guard.root, 0x2000);
+        assert_eq!(ctx.state().svm_guard.translation_count, 1);
     }
 
     #[test]

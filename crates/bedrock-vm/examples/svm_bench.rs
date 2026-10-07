@@ -36,6 +36,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|s| s.parse())
             .transpose()?
             .unwrap_or(1_000_000);
+        if let Ok(start) = std::env::var("BEDROCK_CHECKPOINT_FORK_START") {
+            if !repeat_checkpoint {
+                return Err("Fork checkpoint replay requires repeat".into());
+            }
+            return linux_fork_checkpoints(&args[1], &args[2], start.parse()?, target);
+        }
         let first = linux_checkpoint(&args[1], &args[2], target)?;
         if repeat_checkpoint {
             let second = linux_checkpoint(&args[1], &args[2], target)?;
@@ -1121,7 +1127,7 @@ fn test_data_translation_write() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Debug, PartialEq, Eq)]
 struct LinuxCheckpoint {
     tsc: u64,
-    memory_hash: u64,
+    memory_hash: Option<u64>,
     registers: [u64; 22],
 }
 
@@ -1130,16 +1136,10 @@ fn linux_checkpoint(
     initrd: &str,
     target: u64,
 ) -> Result<Vec<LinuxCheckpoint>, Box<dyn std::error::Error>> {
-    let interval = std::env::var("BEDROCK_CHECKPOINT_INTERVAL")
-        .ok()
-        .map(|value| value.parse::<u64>())
-        .transpose()?
-        .unwrap_or(target);
-    if interval == 0 || target == 0 {
-        return Err("Checkpoint target and interval must be nonzero".into());
-    }
-    let mut next = interval.min(target);
-    let mut checkpoints = Vec::new();
+    linux_checkpoint_run(&mut linux_checkpoint_vm(kernel, initrd)?, 0, target)
+}
+
+fn linux_checkpoint_vm(kernel: &str, initrd: &str) -> Result<Vm, Box<dyn std::error::Error>> {
     let mut builder = VmBuilder::new().memory_mb(128).tsc_frequency(100_000_000);
     if let Ok(seed) = std::env::var("BEDROCK_CHECKPOINT_RNG_SEED") {
         let seed = seed.parse()?;
@@ -1155,6 +1155,69 @@ fn linux_checkpoint(
             .cmdline("console=ttyS0 nopti nokaslr mitigations=off audit=0")
             .initramfs(&initrd),
     )?;
+    Ok(vm)
+}
+
+fn linux_fork_checkpoints(
+    kernel: &str,
+    initrd: &str,
+    start: u64,
+    target: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let replays = std::env::var("BEDROCK_CHECKPOINT_FORK_REPLAYS")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(8);
+    if start == 0 || start >= target || replays < 2 {
+        return Err("Fork replay needs 0 < start < target and at least two replays".into());
+    }
+    let mut parent = linux_checkpoint_vm(kernel, initrd)?;
+    let snapshot = linux_checkpoint_run(&mut parent, 0, start)?;
+    let mut expected = None;
+    for replay in 0..replays {
+        let mut child = parent.fork()?;
+        if replay == 0 && std::env::var_os("BEDROCK_CHECKPOINT_REFERENCE_STEP").is_some() {
+            child.set_single_step_range(start, target)?;
+            println!("SVM_LINUX_FORK_REFERENCE_STEP start={start} target={target}");
+        }
+        let checkpoints = linux_checkpoint_run(&mut child, start, target)?;
+        if let Some(expected) = &expected {
+            assert_eq!(
+                expected, &checkpoints,
+                "Fork checkpoint replay {replay} diverged"
+            );
+        } else {
+            expected = Some(checkpoints);
+        }
+        println!("SVM_LINUX_FORK_CHECKPOINT_MATCH replay={replay} start={start} target={target}");
+    }
+    let mut hash = DefaultHasher::new();
+    hash.write(parent.memory()?);
+    assert_eq!(
+        Some(hash.finish()),
+        snapshot.last().unwrap().memory_hash,
+        "Fork replay changed parent RAM"
+    );
+    println!("SVM_LINUX_FORK_CHECKPOINT_PASS replays={replays} start={start} target={target}");
+    Ok(())
+}
+
+fn linux_checkpoint_run(
+    vm: &mut Vm,
+    start_tsc: u64,
+    target: u64,
+) -> Result<Vec<LinuxCheckpoint>, Box<dyn std::error::Error>> {
+    let interval = std::env::var("BEDROCK_CHECKPOINT_INTERVAL")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(target);
+    if interval == 0 || target <= start_tsc {
+        return Err("Checkpoint interval must be nonzero and target must exceed start".into());
+    }
+    let mut next = start_tsc.saturating_add(interval).min(target);
+    let mut checkpoints = Vec::new();
     vm.set_stop_at_tsc(Some(next))?;
     let timeout = Duration::from_secs(
         std::env::var("BEDROCK_CHECKPOINT_TIMEOUT_SECONDS")
@@ -1183,17 +1246,24 @@ fn linux_checkpoint(
                 wall_clock: start.elapsed()
             }
         );
-        let mut hash = DefaultHasher::new();
-        hash.write(vm.memory()?);
-        println!(
-            "SVM_LINUX_CHECKPOINT_PASS tsc={next} seconds={seconds:.6} memory_hash={:016x}",
-            hash.finish()
-        );
+        let memory_hash = if vm.is_root() {
+            let mut hash = DefaultHasher::new();
+            hash.write(vm.memory()?);
+            let value = hash.finish();
+            println!("SVM_LINUX_CHECKPOINT_PASS tsc={next} seconds={seconds:.6} memory_hash={value:016x}");
+            Some(value)
+        } else {
+            // Forks expose CoW RAM through the hypervisor rather than mmap.
+            println!("SVM_LINUX_CHECKPOINT_REGISTERS tsc={next} seconds={seconds:.6}");
+            None
+        };
         let r = vm.get_regs()?;
-        println!(
-            "SVM_GUEST_TABLES {:?}",
-            svm_tables::page_table_count(vm.memory()?, r.control_regs.cr3.bits())
-        );
+        if vm.is_root() {
+            println!(
+                "SVM_GUEST_TABLES {:?}",
+                svm_tables::page_table_count(vm.memory()?, r.control_regs.cr3.bits())
+            );
+        }
         let g = r.gprs;
         let registers = [
             r.rip,
@@ -1222,7 +1292,7 @@ fn linux_checkpoint(
         println!("REGISTERS {registers:x?}");
         checkpoints.push(LinuxCheckpoint {
             tsc: next,
-            memory_hash: hash.finish(),
+            memory_hash,
             registers,
         });
         if next == target {

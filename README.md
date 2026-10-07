@@ -114,6 +114,8 @@ boundaries on each preparation. Optional pages that cannot fit the four
 breakpoints are omitted before alias enumeration.
 NPT permission guards reuse a heap workspace and cached executable-entry masks;
 write guards restore leaf permissions directly without another table walk.
+Optional code-page translations are cached while the guarded guest table proof
+remains valid; revoking that proof or changing CR3 rebuilds the cache.
 Page execution requires more than
 4,096 instructions before the next deadline. This margin has been exercised on
 the validation host; it is not a calibrated bound for every AMD processor.
@@ -201,6 +203,13 @@ checkpoints in each boot; with `repeat`, the first mismatch is reported. These
 extra stops change where execution is replanned, so also check a single deadline
 when investigating a divergence. Each integration root reports its elapsed time,
 snapshot instruction count, and RAM hash after the fork checks.
+For repeated tests of a short span, `BEDROCK_CHECKPOINT_FORK_START` with `repeat`
+boots once to that snapshot, then compares child registers at the requested
+deadline and checks parent RAM isolation. Fork RAM hashes are unavailable through
+the SDK. `BEDROCK_CHECKPOINT_FORK_REPLAYS` controls the number of children (eight
+by default). This checks replay from a shared snapshot, rather than fresh boots.
+Set `BEDROCK_CHECKPOINT_REFERENCE_STEP` to run the first child with instruction
+stepping, then compare the accelerated replays against that reference.
 
 This reference kernel disables ftrace and ORC metadata to reduce boot-time
 stepping. The integration test uses a 100 MHz virtual TSC: a very low frequency
