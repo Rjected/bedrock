@@ -5,7 +5,7 @@ use bedrock_vm::{
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 #[path = "support/svm_tables.rs"]
 mod svm_tables;
 
@@ -29,17 +29,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
     }
-    if args.len() == 3 || args.len() == 4 {
+    let repeat_checkpoint = args.len() == 5 && args[4] == "repeat";
+    if args.len() == 3 || args.len() == 4 || repeat_checkpoint {
         let target = args
             .get(3)
             .map(|s| s.parse())
             .transpose()?
             .unwrap_or(1_000_000);
-        return linux_checkpoint(&args[1], &args[2], target);
+        let first = linux_checkpoint(&args[1], &args[2], target)?;
+        if repeat_checkpoint {
+            let second = linux_checkpoint(&args[1], &args[2], target)?;
+            assert_eq!(
+                first, second,
+                "Fresh Linux checkpoints diverged at {target}"
+            );
+            println!("SVM_LINUX_FRESH_CHECKPOINT_PASS tsc={target}");
+        }
+        return Ok(());
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS]]"
+            "Usage: svm_bench [native | native-branches | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
                 .into(),
         );
     }
@@ -1103,11 +1113,17 @@ fn test_data_translation_write() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct LinuxCheckpoint {
+    memory_hash: u64,
+    registers: [u64; 22],
+}
+
 fn linux_checkpoint(
     kernel: &str,
     initrd: &str,
     target: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<LinuxCheckpoint, Box<dyn std::error::Error>> {
     let mut vm = VmBuilder::new()
         .memory_mb(128)
         .tsc_frequency(100_000_000)
@@ -1121,10 +1137,17 @@ fn linux_checkpoint(
             .initramfs(&initrd),
     )?;
     vm.set_stop_at_tsc(Some(target))?;
+    let timeout = Duration::from_secs(
+        std::env::var("BEDROCK_CHECKPOINT_TIMEOUT_SECONDS")
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()?
+            .unwrap_or(10),
+    );
     let start = Instant::now();
     loop {
-        if start.elapsed().as_secs() >= 10 {
-            return Err("Linux checkpoint exceeded 10 seconds".into());
+        if start.elapsed() >= timeout {
+            return Err(format!("Linux checkpoint exceeded {timeout:?}").into());
         }
         let exit = vm.run()?;
         if exit.exit_reason == 256 {
@@ -1153,34 +1176,34 @@ fn linux_checkpoint(
             svm_tables::page_table_count(vm.memory()?, r.control_regs.cr3.bits())
         );
         let g = r.gprs;
-        println!(
-            "REGISTERS {:x?}",
-            [
-                r.rip,
-                r.rflags,
-                g.rax,
-                g.rbx,
-                g.rcx,
-                g.rdx,
-                g.rsi,
-                g.rdi,
-                g.rbp,
-                g.rsp,
-                g.r8,
-                g.r9,
-                g.r10,
-                g.r11,
-                g.r12,
-                g.r13,
-                g.r14,
-                g.r15,
-                r.control_regs.cr0.bits(),
-                r.control_regs.cr2.0,
-                r.control_regs.cr3.bits(),
-                r.control_regs.cr4.bits()
-            ]
-        );
-        break;
+        let registers = [
+            r.rip,
+            r.rflags,
+            g.rax,
+            g.rbx,
+            g.rcx,
+            g.rdx,
+            g.rsi,
+            g.rdi,
+            g.rbp,
+            g.rsp,
+            g.r8,
+            g.r9,
+            g.r10,
+            g.r11,
+            g.r12,
+            g.r13,
+            g.r14,
+            g.r15,
+            r.control_regs.cr0.bits(),
+            r.control_regs.cr2.0,
+            r.control_regs.cr3.bits(),
+            r.control_regs.cr4.bits(),
+        ];
+        println!("REGISTERS {registers:x?}");
+        return Ok(LinuxCheckpoint {
+            memory_hash: hash.finish(),
+            registers,
+        });
     }
-    Ok(())
 }

@@ -22,6 +22,25 @@ pub(crate) struct SvmGuardScratch {
     pub code_count: usize,
     pub code_cursor: usize,
     pub saved: [SvmGuardSaved; 132],
+    pub aliases: [SvmAliasWalk; 512],
+    pub alias_proof: SvmAliasProof,
+}
+
+pub(crate) struct SvmAliasProof {
+    pub valid: bool,
+    pub pages: [u64; 4],
+    pub offsets: [[u16; 4]; 4],
+    pub counts: [usize; 4],
+    pub page_count: usize,
+    pub breakpoints: [u64; 4],
+    pub breakpoint_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SvmAliasWalk {
+    pub table: u64,
+    pub base: u64,
+    pub level: u8,
 }
 
 #[derive(Clone, Copy)]

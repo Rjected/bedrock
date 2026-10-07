@@ -435,6 +435,7 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
         .then_some(());
     }
     let scratch = &mut ctx.state_mut().svm_guard;
+    scratch.alias_proof.valid = false;
     scratch.valid = false;
     scratch.root = root;
     scratch.tables[0] = root;
@@ -726,6 +727,7 @@ struct PageHazards {
 fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHazards> {
     if !ctx.state().svm_guard.valid {
         ctx.state_mut().svm_guard.code_count = 0;
+        ctx.state_mut().svm_guard.alias_proof.valid = false;
     }
     let cache = &ctx.state().svm_guard;
     if let Some(proof) = cache.code[..cache.code_count]
@@ -839,7 +841,7 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
 }
 
 fn collect_page_breakpoints<C: VmContext>(
-    ctx: &C,
+    ctx: &mut C,
     batch: &mut InstructionBatch,
     hazards: &[PageHazards; 4],
 ) -> Option<()> {
@@ -850,20 +852,28 @@ fn collect_page_breakpoints<C: VmContext>(
     {
         return Some(());
     }
+    let proof = &ctx.state().svm_guard.alias_proof;
+    if ctx.state().svm_guard.valid
+        && proof.valid
+        && proof.page_count == batch.code_page_count
+        && proof.pages[..proof.page_count] == batch.pages[..batch.code_page_count]
+        && hazards[..batch.code_page_count]
+            .iter()
+            .enumerate()
+            .all(|(i, h)| {
+                proof.counts[i] == h.count && proof.offsets[i][..h.count] == h.offsets[..h.count]
+            })
+    {
+        batch.page_breakpoints = proof.breakpoints;
+        batch.page_breakpoint_count = proof.breakpoint_count;
+        return Some(());
+    }
     // Enumerate executable virtual aliases. NPT alone protects physical pages;
     // a hardware breakpoint must cover every virtual entry to hazardous bytes.
-    #[derive(Clone, Copy)]
-    struct Walk {
-        table: u64,
-        base: u64,
-        level: u8,
-    }
-    let mut walks = [Walk {
-        table: 0,
-        base: 0,
-        level: 0,
-    }; 64];
-    walks[0] = Walk {
+    // A physical table may appear through several virtual paths. Keep each
+    // path to enumerate every executable alias, with a bounded heap workspace.
+    use super::super::vm_state::SvmAliasWalk;
+    ctx.state_mut().svm_guard.aliases[0] = SvmAliasWalk {
         table: ctx
             .state()
             .vmcs
@@ -878,7 +888,7 @@ fn collect_page_breakpoints<C: VmContext>(
     let mut bytes = [0u8; 512];
     batch.page_breakpoint_count = 0;
     while cursor < count {
-        let walk = walks[cursor];
+        let walk = ctx.state().svm_guard.aliases[cursor];
         let shift = 12 + 9 * (walk.level - 1);
         for offset in (0..4096).step_by(512) {
             ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes)
@@ -918,10 +928,10 @@ fn collect_page_breakpoints<C: VmContext>(
                         }
                     }
                 } else {
-                    if count == walks.len() {
+                    if count == ctx.state().svm_guard.aliases.len() {
                         return None;
                     }
-                    walks[count] = Walk {
+                    ctx.state_mut().svm_guard.aliases[count] = SvmAliasWalk {
                         table: physical,
                         base,
                         level: walk.level - 1,
@@ -932,6 +942,16 @@ fn collect_page_breakpoints<C: VmContext>(
         }
         cursor += 1;
     }
+    let proof = &mut ctx.state_mut().svm_guard.alias_proof;
+    proof.valid = true;
+    proof.page_count = batch.code_page_count;
+    proof.pages[..batch.code_page_count].copy_from_slice(&batch.pages[..batch.code_page_count]);
+    for (i, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
+        proof.offsets[i] = hazard.offsets;
+        proof.counts[i] = hazard.count;
+    }
+    proof.breakpoints = batch.page_breakpoints;
+    proof.breakpoint_count = batch.page_breakpoint_count;
     Some(())
 }
 
@@ -1118,7 +1138,7 @@ pub(crate) fn prepare<C: VmContext>(
     let page = window.physical.as_u64() & !4095;
     let mut allow_page = false;
     // Reuse hazard scans while the guard proves the bytes have not changed.
-    // Virtual aliases and cross-page instruction boundaries are checked anew.
+    // Alias proofs follow the guarded tree; cross-page bytes are checked anew.
     let mut hazards = [PageHazards {
         offsets: [0; 4],
         count: 0,
@@ -2082,6 +2102,64 @@ mod tests {
             !prepare(&mut ctx, true, true, &window)
                 .unwrap()
                 .page_execution
+        );
+    }
+
+    #[test]
+    fn hazardous_pages_cover_aliases_in_large_executable_trees() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory.resize(1024 * 1024, 0);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        for index in 1..91 {
+            let table = 0x7000 + index * 4096;
+            ctx.memory[0x5000 + index * 8..0x5008 + index * 8]
+                .copy_from_slice(&(table as u64 | 7).to_le_bytes());
+        }
+        // The same hazardous physical page also appears at a distant GVA.
+        ctx.memory[0x8000..0x8008].copy_from_slice(&0x1007u64.to_le_bytes());
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert_eq!(ctx.state().svm_guard.count, 94);
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x1100, 0x200100]
+        );
+    }
+
+    #[test]
+    fn alias_proofs_rebuild_after_table_and_hazard_changes() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x1100]
+        );
+        assert!(ctx.state().svm_guard.alias_proof.valid);
+        let mut store = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        store.bytes[..3].copy_from_slice(&[0x48, 0x89, 0x07]);
+        ctx.state_mut().gprs.rdi = 0x6048;
+        retain_translation_cache(&mut ctx, None, Some(&store), false);
+        ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x1100, 0x9100]
+        );
+        // The tree is intact, but a code write changes breakpoint offsets.
+        ctx.state_mut().gprs.rdi = 0x1100;
+        retain_translation_cache(&mut ctx, None, Some(&store), false);
+        assert!(ctx.state().svm_guard.valid);
+        ctx.memory[0x1100..0x1103].fill(0x90);
+        ctx.memory[0x1200..0x1203].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x1200, 0x9200]
         );
     }
 

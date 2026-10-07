@@ -83,7 +83,8 @@ Long-mode execution can also run across calls, returns, and store loops within
 up to four recently visited code pages. Hardware execution breakpoints stop
 before possible RDRAND/RDSEED/RDPID, repeated-string encodings, and SYSRET;
 their prefix entry points and executable virtual aliases must fit in four
-breakpoint slots. SYSRET uses the scalar path because it can restore guest
+breakpoint slots. Alias enumeration uses a preallocated workspace of 512
+virtual table paths and falls back if that capacity is exceeded. SYSRET uses the scalar path because it can restore guest
 TF from R11. Ambiguous encodings across page boundaries use the fallback.
 A temporary NPT guard makes the selected code pages read-only and blocks
 instruction fetch from every other page. It also protects all reachable guest
@@ -106,7 +107,9 @@ the scalar path and are reported after retirement. Page hazard scans are cached
 within a RUN while guarded execution protects their bytes or scalar stores are
 proven disjoint from the cached pages. Pages omitted from a guard lose their
 scan approval before execution; emulation and a new RUN revoke approvals.
-Virtual aliases and cross-page boundaries are checked on each preparation.
+Alias proofs are reused while the table-frame proof remains valid, with
+selected physical pages and hazard offsets as the cache key. Cross-page
+boundaries are checked on each preparation.
 Page execution requires more than
 65,536 instructions before the next deadline.
 The table-frame list can be reused within a RUN while guarded execution,
@@ -182,6 +185,10 @@ sudo target/release/examples/svm_linux \
 
 Append `repeat` to compare two fresh boots as well, including the snapshot RAM
 hash, registers, virtual TSC, and both children's results.
+For a shorter reproducibility check, run `svm_bench VMLINUX INITRD INSTRUCTIONS
+repeat`; it compares the RAM hash and registers at an exact instruction
+deadline. `BEDROCK_CHECKPOINT_TIMEOUT_SECONDS` overrides its default 10-second
+limit when checking a later checkpoint.
 
 This reference kernel disables ftrace and ORC metadata to reduce boot-time
 stepping. The integration test uses a 100 MHz virtual TSC: a very low frequency
