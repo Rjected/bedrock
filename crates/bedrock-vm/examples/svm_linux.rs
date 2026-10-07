@@ -10,11 +10,14 @@ use std::{
     hash::Hasher,
     time::{Duration, Instant},
 };
+#[path = "support/svm_tables.rs"]
+mod svm_tables;
 
 fn run_until(vm: &mut Vm, snapshot: bool) -> Result<u64, Box<dyn std::error::Error>> {
     let start = Instant::now();
+    let mut progress = start;
     loop {
-        if start.elapsed() > Duration::from_secs(1800) {
+        if start.elapsed() > Duration::from_secs(600) {
             return Err("Linux integration test timed out".into());
         }
         let exit = match vm.run() {
@@ -31,6 +34,19 @@ fn run_until(vm: &mut Vm, snapshot: bool) -> Result<u64, Box<dyn std::error::Err
                 return Err(error.into());
             }
         };
+        // RUN has returned, so registers and memory are no longer changing.
+        if progress.elapsed() >= Duration::from_secs(10) {
+            let registers = vm.get_regs()?;
+            let tables =
+                svm_tables::page_table_count(vm.memory()?, registers.control_regs.cr3.bits());
+            eprintln!(
+                "SVM_LINUX_PROGRESS seconds={:.3} tsc={} rip={:#x} guest_tables={tables:?}",
+                start.elapsed().as_secs_f64(),
+                exit.emulated_tsc,
+                registers.rip
+            );
+            progress = Instant::now();
+        }
         if let Some(buffer) = vm.event_buffer() {
             for record in EventStream::new(&buffer[..exit.event_len as usize]) {
                 if record.kind() == EventKind::Serial.as_u16() {

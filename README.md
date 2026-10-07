@@ -156,7 +156,9 @@ store, including large RCX values and arithmetic-flag restoration.
 checkpoint (one million by default), reports its registers and RAM hash, and
 limits each check to ten seconds.
 
-The Linux integration example uses a userspace snapshot, then compares two
+The Linux integration example reports progress every ten seconds, including
+the guest instruction count, RIP, and active page-table count. Each phase has
+a ten-minute timeout. It uses a userspace snapshot, then compares two
 forks' clock syscall, `getrandom`, RDRAND/RDSEED, final registers, and virtual
 TSC. It also checks that the children leave the parent's memory intact:
 

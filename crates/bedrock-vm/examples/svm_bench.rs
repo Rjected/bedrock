@@ -6,6 +6,8 @@ use bedrock_vm::{
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::time::Instant;
+#[path = "support/svm_tables.rs"]
+mod svm_tables;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -1146,6 +1148,10 @@ fn linux_checkpoint(
             hash.finish()
         );
         let r = vm.get_regs()?;
+        println!(
+            "SVM_GUEST_TABLES {:?}",
+            svm_tables::page_table_count(vm.memory()?, r.control_regs.cr3.bits())
+        );
         let g = r.gprs;
         println!(
             "REGISTERS {:x?}",
