@@ -15,8 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "native-branches" {
         return native_loop_comparison(true);
     }
+    if args.len() == 2 && args[1] == "guarded-loops" {
+        return test_page_loops(true);
+    }
     if args.len() == 2 && args[1] == "page-loops" {
-        return test_page_loops();
+        return test_page_loops(false);
     }
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
@@ -31,20 +34,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | stores | page-loops | VMLINUX INITRD [INSTRUCTIONS]]"
+            "Usage: svm_bench [native | native-branches | stores | page-loops | guarded-loops | VMLINUX INITRD [INSTRUCTIONS]]"
                 .into(),
         );
     }
     test_repeat()?;
     test_paged_stores()?;
     test_self_modifying()?;
+    test_guarded_code_and_translation_writes()?;
     test_debug_registers()?;
     test_hardware_loop()?;
     test_hardware_control_flow()?;
     test_endpoint_deadline()?;
     test_forward_deadline()?;
     test_forward_stores()?;
-    test_page_loops()?;
+    test_page_loops(false)?;
+    test_page_loops(true)?;
     const LOOPS: u16 = 4096;
     const EXPECTED: u64 = 1 + LOOPS as u64 * 66 + 1;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
@@ -432,7 +437,7 @@ fn test_forward_stores() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn test_page_loops() -> Result<(), Box<dyn std::error::Error>> {
+fn test_page_loops(guarded: bool) -> Result<(), Box<dyn std::error::Error>> {
     const VALUE: u64 = 0x123456789abcdef0;
     let mut vm = Vm::create(2 * 1024 * 1024)?;
     for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
@@ -448,6 +453,16 @@ fn test_page_loops() -> Result<(), Box<dyn std::error::Error>> {
         0x4c, 0x8b, 0x4f, 0xf8, 0x31, 0xc0, 0x0f, 0x01, 0xd9, 0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f,
         8, 0xc3,
     ]);
+    if guarded {
+        code = vec![
+            0x48, 0x89, 0x07, 0x48, 0x8d, 0x7f, 8, 0x48, 0xff, 0xc9, 0x75, 0xf4, 0x4c, 0x8b, 0x87,
+        ];
+        code.extend((-800_000i32).to_le_bytes());
+        code.extend([0x4c, 0x8b, 0x4f, 0xf8, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+        // Unreachable RNG bytes reject whole-page execution. The decoded
+        // loop must accelerate independently of unrelated page contents.
+        vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+    }
     vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
     let mut regs = Regs::long_mode();
     regs.control_regs.cr3 = Cr3::new(0x3000);
@@ -457,7 +472,8 @@ fn test_page_loops() -> Result<(), Box<dyn std::error::Error>> {
     regs.gprs.rcx = 100_000;
     regs.gprs.rax = VALUE;
     vm.set_regs(&regs)?;
-    vm.set_stop_at_tsc(Some(200_000))?;
+    let deadline = if guarded { 200_002 } else { 200_000 };
+    vm.set_stop_at_tsc(Some(deadline))?;
     let start = Instant::now();
     loop {
         let exit = vm.run()?;
@@ -465,12 +481,15 @@ fn test_page_loops() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         assert_eq!(exit.exit_reason, 259);
-        assert_eq!(exit.emulated_tsc, 200_000);
+        assert_eq!(exit.emulated_tsc, deadline);
         let r = vm.get_regs()?;
-        assert_eq!(r.rip, 0x101d);
-        assert_eq!(r.gprs.rcx, 66667);
-        assert_eq!(r.gprs.rdi, 0x10000 + 33333 * 8);
-        assert_eq!(r.gprs.rsp, 0x7ff8);
+        assert_eq!(r.rip, if guarded { 0x1007 } else { 0x101d });
+        assert_eq!(r.gprs.rcx, if guarded { 50000 } else { 66667 });
+        assert_eq!(
+            r.gprs.rdi,
+            0x10000 + if guarded { 50001 * 8 } else { 33333 * 8 }
+        );
+        assert_eq!(r.gprs.rsp, if guarded { 0x8000 } else { 0x7ff8 });
         break;
     }
     let mut hash = DefaultHasher::new();
@@ -486,7 +505,7 @@ fn test_page_loops() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             assert_eq!(exit.exit_reason, 258);
-            assert_eq!(exit.emulated_tsc, 600_003);
+            assert_eq!(exit.emulated_tsc, if guarded { 400_003 } else { 600_003 });
             let r = child.get_regs()?;
             assert_eq!(r.gprs.rdi, 0x10000 + 800_000);
             assert_eq!(r.gprs.rcx, 0);
@@ -502,7 +521,7 @@ fn test_page_loops() -> Result<(), Box<dyn std::error::Error>> {
     hash.write(vm.memory()?);
     assert_eq!(hash.finish(), parent);
     println!(
-        "SVM_PAGE_CALL_STORE_LOOP_FORK_PASS seconds={:.6}",
+        "SVM_STORE_LOOP_FORK_PASS guarded={guarded} seconds={:.6}",
         start.elapsed().as_secs_f64()
     );
     Ok(())
@@ -753,6 +772,58 @@ fn test_self_modifying() -> Result<(), Box<dyn std::error::Error>> {
         break;
     }
     println!("SVM_SELF_MODIFYING_RNG_PASS");
+    Ok(())
+}
+
+fn test_guarded_code_and_translation_writes() -> Result<(), Box<dyn std::error::Error>> {
+    for translation in [false, true] {
+        let mut vm = Vm::create(4 * 1024 * 1024)?;
+        vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+        for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+            vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        let tail = [0x90, 0x90, 0x90, 0x89, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9];
+        let mut code = vec![0x48, 0x89, 0x07];
+        if !translation {
+            code.extend([0x90, 0xeb, 8]);
+            code.extend([0x90; 8]);
+        }
+        code.extend(tail);
+        vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+        // Reject the entire page, exercising bounded code/translation guards.
+        vm.memory_mut()?[0x1800..0x1803].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        if translation {
+            vm.memory_mut()?[0x201000..0x201003].copy_from_slice(&[0x48, 0x89, 0x07]);
+            let new_tail = [0x0f, 0xc7, 0xf0, 0x89, 0xc3, 0x31, 0xc0, 0x0f, 0x01, 0xd9];
+            vm.memory_mut()?[0x201003..0x20100d].copy_from_slice(&new_tail);
+        }
+        let mut regs = Regs::long_mode();
+        regs.control_regs.cr3 = Cr3::new(0x3000);
+        regs.rip = 0x1000;
+        regs.gprs.rsp = 0x8000;
+        regs.gprs.rdi = if translation { 0x5000 } else { 0x100e };
+        regs.gprs.rax = if translation {
+            0x200087
+        } else {
+            0x0fc031c389f0c70f
+        };
+        vm.set_regs(&regs)?;
+        loop {
+            let exit = vm.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            if exit.exit_reason == 57 {
+                vm.set_rdrand_value(0x1234)?;
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, if translation { 3 } else { 5 });
+            assert_eq!(vm.get_regs()?.gprs.rbx, 0x1234);
+            break;
+        }
+    }
+    println!("SVM_GUARDED_CODE_TRANSLATION_RNG_PASS");
     Ok(())
 }
 
