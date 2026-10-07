@@ -273,6 +273,14 @@ integration runs to 19.72 and 19.94 seconds, with about 1.82 million exits.
 Another 1,024 fork replays from 8 to 8.1 million instructions match. Profiling
 shows that frequent CR3 writes change the translation root, so their table
 proofs still need rebuilding.
+The remaining boot has about 1.7 million scalar MTF exits. Roughly 130,000
+sampled scalar returns land on one `memcpy`/`memmove` page: it has four real
+`REP MOVS`/`REP STOS` hazards and two executable virtual aliases, requiring
+more than the four available address breakpoints. A prototype that retired
+about 129,000 such returns in software passed the boot/fork comparison but
+left wall time near 19.6 seconds because per-entry planning still dominated;
+it was not retained. The fast path needs to execute larger verified regions
+through that page, with a proof that unreachable hazards cannot execute.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
