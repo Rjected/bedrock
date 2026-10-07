@@ -79,6 +79,8 @@ fn safe_len(bytes: &[u8], long: bool, default32: bool) -> Option<(usize, bool, b
                 2
             };
         }
+        0xa8 => immediate = 1,       // TEST AL, imm8 does not write memory.
+        0xa9 => immediate = operand, // TEST AX/EAX/RAX, imm16/imm32.
         0xb0..=0xb7 => immediate = 1,
         0xb8..=0xbf => immediate = if long && rex & 8 != 0 { 8 } else { operand },
         0x00..=0x3d if op & 7 <= 3 => modrm = true,
@@ -665,7 +667,8 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
         }
         None => {
             if let Some(window) = window {
-                if safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| writes)
+                if (safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| writes)
+                    || window.bytes[0] == 0xe8)
                     && !scalar_store_preserves_guard(ctx, window, true)
                 {
                     ctx.state_mut().svm_guard.code_count = 0;
@@ -696,6 +699,10 @@ fn scalar_store_preserves_guard<C: VmContext>(
     let range = if window.bytes[0] == 0x9c {
         // Unprefixed PUSHFQ is emulated at an SVM intercept, but its stack
         // destination can be checked before entry just like an ordinary PUSH.
+        rsp.checked_sub(8).map(|address| (address, 8))
+    } else if window.bytes[0] == 0xe8 {
+        // A direct near CALL pushes the return address. Its displacement does
+        // not affect the write destination.
         rsp.checked_sub(8).map(|address| (address, 8))
     } else {
         safe_len(&window.bytes, true, false).and_then(|(length, _, _)| {
@@ -3142,12 +3149,12 @@ mod tests {
                 retain_translation_cache(&mut ctx, None, Some(&window), false);
                 assert!(ctx.state().svm_guard.valid);
                 assert_eq!(ctx.state().svm_guard.code_count, code_count);
-                // CALL still writes a return address; it must not inherit
-                // the memory-free classification of conditional branches.
+                // CALL writes a return address, but this stack slot is
+                // disjoint from the guarded table and code pages.
                 window.bytes[..5].copy_from_slice(&[0xe8, 0, 0, 0, 0]);
                 retain_translation_cache(&mut ctx, None, Some(&window), false);
-                assert!(!ctx.state().svm_guard.valid);
-                assert_eq!(ctx.state().svm_guard.code_count, 0);
+                assert!(ctx.state().svm_guard.valid);
+                assert_eq!(ctx.state().svm_guard.code_count, code_count);
             }
         }
     }
@@ -3231,14 +3238,20 @@ mod tests {
         ctx.state_mut().gprs.rdi = 0x7000; // GVA data alias to a protected table.
         retain_translation_cache(&mut ctx, None, Some(&window), false);
         assert!(!ctx.state().svm_guard.valid);
-        for (rsp, keep) in [(0x8008, true), (0x6008, false)] {
-            let mut ctx = paged_context(&[0x50]);
-            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
-            prepare(&mut ctx, true, true, &window).unwrap();
-            ctx.vmcs_setup()
-                .set_field_natural(VmcsFieldNatural::GuestRsp, rsp);
-            retain_translation_cache(&mut ctx, None, Some(&window), false);
-            assert_eq!(ctx.state().svm_guard.valid, keep, "rsp={rsp:#x}");
+        for opcode in [&[0x50][..], &[0xe8, 0, 0, 0, 0][..]] {
+            for (rsp, keep) in [(0x8008, true), (0x6008, false)] {
+                let mut ctx = paged_context(opcode);
+                let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+                prepare(&mut ctx, true, true, &window).unwrap();
+                ctx.vmcs_setup()
+                    .set_field_natural(VmcsFieldNatural::GuestRsp, rsp);
+                retain_translation_cache(&mut ctx, None, Some(&window), false);
+                assert_eq!(
+                    ctx.state().svm_guard.valid,
+                    keep,
+                    "opcode={opcode:02x?} rsp={rsp:#x}"
+                );
+            }
         }
     }
 

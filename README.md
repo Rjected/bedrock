@@ -267,6 +267,12 @@ code page replan without a scalar replay, while a split instruction still
 steps. The full Linux integration run passes at 20.71 seconds and 1.83 million
 exits; 1,024 sensitive fork replays from 8 to 8.1 million instructions also
 match the stepped reference with this change.
+Recognizing memory-free `TEST` immediates and retaining table proofs when a
+direct `CALL` pushes to a proved-disjoint stack slot reduces two full Linux
+integration runs to 19.72 and 19.94 seconds, with about 1.82 million exits.
+Another 1,024 fork replays from 8 to 8.1 million instructions match. Profiling
+shows that frequent CR3 writes change the translation root, so their table
+proofs still need rebuilding.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
