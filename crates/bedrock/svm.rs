@@ -165,10 +165,17 @@ pub(crate) unsafe fn run(
         let count = if batch.page_execution {
             breakpoints = batch.page_breakpoints;
             batch.page_breakpoint_count
-        } else if batch.endpoint_intercepted { 0 }
-        else {
-            breakpoints[0] = batch.endpoint() + v.read(o::CS + 8, 8);
-            1
+        } else {
+            let mut count = 0;
+            if !batch.endpoint_intercepted {
+                breakpoints[count] = batch.endpoint() + v.read(o::CS + 8, 8);
+                count += 1;
+            }
+            for target in &batch.branch_exits[..batch.branch_exit_count] {
+                breakpoints[count] = target + v.read(o::CS + 8, 8);
+                count += 1;
+            }
+            count
         };
         v.write(o::DR7, 8, 0x400 | (0..count).fold(0u64, |mask, i| mask | (1 << (i * 2))));
         v.write(o::DR6, 8, original_dr6 & !0x400f);
@@ -369,7 +376,7 @@ pub(crate) unsafe fn run(
         v.write(o::DR6, 8, original_dr6);
     }
     let batch_stop = batch.is_some_and(|b| {
-        code == 0x41 && v.read(o::DR6, 8) & 1 != 0 && v.read(o::RIP, 8) == b.endpoint()
+        code == 0x41 && v.read(o::DR6, 8) & 15 != 0 && b.is_execution_stop(v.read(o::RIP, 8))
     });
     // Replay the endpoint intercept on the next entry, as with an execution
     // breakpoint. Timer/deadline handling must run before that instruction's
@@ -431,7 +438,7 @@ pub(crate) unsafe fn run(
             }
             completed
         } else if batch.uses_counter {
-            if retired.is_none() || batch.completed_at(v.read(o::RIP, 8)).is_none() {
+            if retired.is_none() || !batch.is_boundary(v.read(o::RIP, 8)) {
                 kernel::pr_err!("SVM PMU invalid boundary: retired={:?} rip={:#x} code={:#x} batch={:?}\n", retired, v.read(o::RIP,8), code, batch);
                 return Err(VmEntryError::VmEntryFailed);
             }

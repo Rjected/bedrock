@@ -55,7 +55,13 @@ impl PmcEntry {
         // with #GP at the IDT limit check, before an interrupt frame is written.
         // SIDT/LIDT must stop the batch before observing/changing this shadow.
         v.write(o::IDTR + 4, 4, 0);
-        v.write(o::INTERCEPT_MISC1, 4, saved.misc | (1 << 6) | (1 << 10));
+        // Stop before IRET: its retirement is not reliably counted inside a
+        // native region on the validation host. Replay it with exact stepping.
+        v.write(
+            o::INTERCEPT_MISC1,
+            4,
+            saved.misc | (1 << 6) | (1 << 10) | (1 << 20),
+        );
         for i in 0..6 {
             v.write(o::PERF_CTL0 + i * 16, 8, 0);
             v.write(o::PERF_CTR0 + i * 16, 8, 0);
@@ -160,6 +166,7 @@ mod tests {
             let misc = v.read(o::INTERCEPT_MISC1, 4);
             let entry = PmcEntry::prepare(&mut v, 100).unwrap();
             assert_eq!(v.read(o::PERF_CTR0, 8), (1 << 48) - 100);
+            assert_ne!(v.read(o::INTERCEPT_MISC1, 4) & (1 << 20), 0);
             assert_eq!(v.read(o::IDTR + 4, 4), 0);
             v.write(o::INSTR_RETIRED_CTR, 8, 114);
             v.write(o::EXIT_CODE, 8, code);

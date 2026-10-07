@@ -48,6 +48,11 @@ pub struct InstructionBatch {
     /// Execution traps for otherwise unsafe entry points in permitted pages.
     pub page_breakpoints: [u64; 4],
     pub page_breakpoint_count: usize,
+    /// Direct transfers leaving the decoded region stop before target execution.
+    pub branch_exits: [u64; 3],
+    pub branch_exit_count: usize,
+    /// Exact retirements for straight-line paths stopped at outgoing targets.
+    pub branch_exit_counts: [u16; 3],
     pub page_count: usize,
     pub accesses_memory: bool,
     pub writes_memory: bool,
@@ -260,11 +265,26 @@ impl InstructionBatch {
     }
 
     pub fn completed_at(&self, rip: u64) -> Option<u64> {
+        if let Some(index) = self.branch_exits[..self.branch_exit_count]
+            .iter()
+            .position(|&target| target == rip)
+        {
+            return Some(u64::from(self.branch_exit_counts[index]));
+        }
         let offset = rip.checked_sub(self.start)?;
         self.offsets[..=self.count]
             .iter()
             .position(|&value| u64::from(value) == offset)
             .map(|index| index as u64)
+    }
+
+    pub fn is_boundary(&self, rip: u64) -> bool {
+        self.completed_at(rip).is_some()
+            || self.branch_exits[..self.branch_exit_count].contains(&rip)
+    }
+
+    pub fn is_execution_stop(&self, rip: u64) -> bool {
+        rip == self.endpoint() || self.branch_exits[..self.branch_exit_count].contains(&rip)
     }
 
     pub fn endpoint(&self) -> u64 {

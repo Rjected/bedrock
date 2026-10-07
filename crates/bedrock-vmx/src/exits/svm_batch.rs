@@ -531,6 +531,77 @@ fn cached_code_translation<C: VmContext>(ctx: &mut C, linear: u64) -> Option<u64
     Some(physical)
 }
 
+/// IRETQ reads its stack; descriptor loads can set only the accessed bit.
+/// Keep the proof when those descriptor updates cannot change guarded frames.
+fn scalar_iret_preserves_guard<C: VmContext>(
+    ctx: &C,
+    window: &super::svm::InstructionWindow,
+) -> bool {
+    if !window.bytes.starts_with(&[0x48, 0xcf]) {
+        return false;
+    }
+    let v = &ctx.state().vmcs;
+    let check = || -> Option<()> {
+        // Shadow-stack transitions require separate memory-write validation.
+        if v.read_natural(VmcsFieldNatural::GuestCr4).ok()? & (1 << 23) != 0 {
+            return None;
+        }
+        let rsp = v.read_natural(VmcsFieldNatural::GuestRsp).ok()?;
+        for slot in [1u64, 4] {
+            let selector_address = rsp.checked_add(slot * 8)?;
+            let mut selector = [0u8; 2];
+            for index in 0..2 {
+                let physical =
+                    super::svm::physical(ctx, selector_address.checked_add(index as u64)?).ok()?;
+                ctx.read_guest_memory(physical, &mut selector[index..index + 1])
+                    .ok()?;
+            }
+            let selector = u16::from_le_bytes(selector);
+            if slot == 4 && selector & !3 == 0 {
+                continue;
+            }
+            if selector & !3 == 0 {
+                return None;
+            }
+            let (base, limit) = if selector & 4 == 0 {
+                (
+                    v.read_natural(VmcsFieldNatural::GuestGdtrBase).ok()?,
+                    v.read32(VmcsField32::GuestGdtrLimit).ok()?,
+                )
+            } else {
+                if v.read32(VmcsField32::GuestLdtrAccessRights).ok()? & (1 << 16) != 0 {
+                    return None;
+                }
+                (
+                    v.read_natural(VmcsFieldNatural::GuestLdtrBase).ok()?,
+                    v.read32(VmcsField32::GuestLdtrLimit).ok()?,
+                )
+            };
+            let offset = u64::from(selector & !7);
+            if offset + 7 > u64::from(limit) {
+                return None;
+            }
+            let physical = super::svm::physical(ctx, base.checked_add(offset + 5)?).ok()?;
+            let mut access = [0];
+            ctx.read_guest_memory(physical, &mut access).ok()?;
+            if access[0] & 1 != 0 {
+                continue;
+            }
+            let page = physical.as_u64() & !4095;
+            let guard = &ctx.state().svm_guard;
+            if guard.tables[..guard.count].contains(&page)
+                || guard.code[..guard.code_count]
+                    .iter()
+                    .any(|proof| proof.page == page)
+            {
+                return None;
+            }
+        }
+        Some(())
+    };
+    check().is_some()
+}
+
 /// Retain table and code proofs across guarded entries or scalar instructions
 /// whose writes are proven disjoint. A/D updates cannot add table frames.
 pub(crate) fn retain_translation_cache<C: VmContext>(
@@ -554,7 +625,8 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
                     .unwrap_or(0)
                     & (1 << 13)
                     != 0;
-                long && (matches!(window.bytes[0], 0xc3 | 0x9d | 0xe4..=0xe7 | 0xec..=0xef)
+                long && (scalar_iret_preserves_guard(ctx, window)
+                    || matches!(window.bytes[0], 0xc3 | 0x9d | 0xe4..=0xe7 | 0xec..=0xef)
                     || relative_branch(&window.bytes, true, false).is_some()
                     || safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| !writes)
                     || scalar_store_preserves_guard(ctx, window, false))
@@ -1578,6 +1650,9 @@ fn prepare_verified<C: VmContext>(
         code_page_count: 1,
         page_breakpoints: [0; 4],
         page_breakpoint_count: 0,
+        branch_exits: [0; 3],
+        branch_exit_count: 0,
+        branch_exit_counts: [0; 3],
         page_count: 1,
         accesses_memory: false,
         writes_memory: false,
@@ -1626,7 +1701,10 @@ fn prepare_verified<C: VmContext>(
     let mut changed = 0u16;
     let mut stores = StorePlan::default();
     let mut offset = 0;
-    let mut branch_targets = [0u16; 64];
+    let mut branch_targets = [0i64; 64];
+    let allow_branch_exits =
+        long && allow_guarded_stores && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN;
+    let mut branch_sources = [0u16; 64];
     let mut branch_count = 0;
     let mut first_branch = 0;
     if long {
@@ -1654,8 +1732,7 @@ fn prepare_verified<C: VmContext>(
                 let end = offset + length;
                 let target = end as i64 + displacement;
                 let backward = target < end as i64;
-                if target < 0
-                    || target > available as i64
+                if (!allow_branch_exits && (target < 0 || target > available as i64))
                     || (backward
                         && (budget < InstructionBatch::COUNTER_DEADLINE_MARGIN
                             || (paged && batch.writes_memory && !batch.guarded_stores)))
@@ -1665,7 +1742,8 @@ fn prepare_verified<C: VmContext>(
                 if branch_count == 0 {
                     first_branch = batch.count;
                 }
-                branch_targets[branch_count] = target as u16;
+                branch_targets[branch_count] = target;
+                branch_sources[branch_count] = (batch.count + 1) as u16;
                 branch_count += 1;
                 offset = end;
                 batch.count += 1;
@@ -1718,17 +1796,55 @@ fn prepare_verified<C: VmContext>(
             break;
         }
     }
-    if batch.uses_counter
-        && branch_targets[..branch_count]
-            .iter()
-            .any(|target| !batch.offsets[..=batch.count].contains(target))
-    {
-        // An unknown instruction or boundary ends verification. Keep the
-        // straight-line prefix before the first transfer as an ordinary batch.
-        batch.count = first_branch;
+    if batch.guarded_stores && branch_count == 0 {
+        // Every boundary has a known prefix length, including write faults.
         batch.uses_counter = false;
     }
-    if batch.repeat.is_none() && batch.count < 2 {
+    if batch.uses_counter {
+        let mut invalid = false;
+        let mut exact_paths = allow_branch_exits && branch_count != 0;
+        for (index, &target) in branch_targets[..branch_count].iter().enumerate() {
+            let decoded = target >= 0
+                && target <= u16::MAX as i64
+                && batch.offsets[..=batch.count].contains(&(target as u16));
+            if decoded {
+                exact_paths = false;
+                continue;
+            }
+            let address = rip.wrapping_add(target as u64);
+            let canonical = matches!((address as i64) >> 47, 0 | -1);
+            if !allow_branch_exits || !canonical {
+                invalid = true;
+                break;
+            }
+            if let Some(slot) = batch.branch_exits[..batch.branch_exit_count]
+                .iter()
+                .position(|&target| target == address)
+            {
+                if batch.branch_exit_counts[slot] != branch_sources[index] {
+                    exact_paths = false;
+                }
+                continue;
+            }
+            if batch.branch_exit_count == batch.branch_exits.len() {
+                invalid = true;
+                break;
+            }
+            batch.branch_exit_counts[batch.branch_exit_count] = branch_sources[index];
+            batch.branch_exits[batch.branch_exit_count] = address;
+            batch.branch_exit_count += 1;
+        }
+        if invalid {
+            // Keep the straight-line prefix when targets exhaust the traps.
+            batch.count = first_branch;
+            batch.uses_counter = false;
+            batch.branch_exit_count = 0;
+        } else if exact_paths {
+            batch.uses_counter = false;
+            batch.counter_bounded = true;
+        }
+    }
+    if batch.repeat.is_none() && batch.count < 2 && batch.branch_exit_count == 0 {
         return None;
     }
     // Instruction fetch can set page-table A bits. Do not batch code that
@@ -1822,7 +1938,7 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
         saved_count: 0,
         execution: None,
     };
-    if !batch.accesses_memory {
+    if !batch.accesses_memory && batch.branch_exit_count == 0 {
         return Some(guard);
     }
     let protected = if batch.page_execution || (batch.writes_memory && !batch.validated_stores) {
@@ -2069,6 +2185,67 @@ mod tests {
         let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
+    }
+
+    #[test]
+    fn iret_descriptor_access_updates_revoke_aliasing_proofs() {
+        let mut ctx = paged_context(&[0x48, 0xcf]);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr4, 0);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestGdtrBase, 0x9000);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestGdtrLimit, 0x17);
+        ctx.memory[0x8008..0x8010].copy_from_slice(&8u64.to_le_bytes());
+        ctx.memory[0x8020..0x8028].copy_from_slice(&16u64.to_le_bytes());
+        ctx.memory[0x900d] = 0x9a;
+        ctx.memory[0x9015] = 0x92;
+        ctx.state_mut().svm_guard.tables[..4].copy_from_slice(&[0x3000, 0x4000, 0x5000, 0x6000]);
+        ctx.state_mut().svm_guard.count = 4;
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(scalar_iret_preserves_guard(&ctx, &window));
+        ctx.state_mut().svm_guard.code[0].page = 0x9000;
+        ctx.state_mut().svm_guard.code_count = 1;
+        assert!(!scalar_iret_preserves_guard(&ctx, &window));
+        ctx.memory[0x900d] |= 1;
+        ctx.memory[0x9015] |= 1;
+        assert!(scalar_iret_preserves_guard(&ctx, &window)); // No descriptor write is needed.
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestGdtrBase, 0x6380);
+        assert!(!scalar_iret_preserves_guard(&ctx, &window)); // Descriptor would update a table frame.
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestGdtrBase, 0x9000);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr4, 1 << 23);
+        assert!(!scalar_iret_preserves_guard(&ctx, &window)); // CET writes need separate validation.
+    }
+
+    #[test]
+    fn outgoing_branches_stop_before_unknown_targets_and_respect_trap_capacity() {
+        // ENDBR and a jump over REP: the unreachable REP need not be decoded.
+        let mut ctx = paged_context(&[0xf3, 0x0f, 0x1e, 0xfa, 0xeb, 0x2a, 0xf3, 0xa4]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_verified(&ctx, true, false, true, &window).unwrap();
+        assert_eq!(batch.count, 2);
+        assert_eq!(&batch.branch_exits[..batch.branch_exit_count], &[0x1030]);
+        assert!(batch.is_boundary(0x1030) && batch.is_execution_stop(0x1030));
+        assert!(!batch.is_boundary(0x102f));
+        // The same target reached after different prefix lengths needs a counter.
+        ctx.memory[0x1000..0x1008].copy_from_slice(&[0x90, 0x90, 0x74, 4, 0x74, 2, 0xf3, 0xa4]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let duplicate = prepare_verified(&ctx, true, false, true, &window).unwrap();
+        assert!(duplicate.uses_counter);
+        assert_eq!(
+            &duplicate.branch_exits[..duplicate.branch_exit_count],
+            &[0x1008]
+        );
+        // Four distinct unknown entries exceed the three outgoing trap slots.
+        ctx.memory[0x1000..0x100c].copy_from_slice(&[
+            0x90, 0x90, 0x74, 0x70, 0x74, 0x70, 0x74, 0x70, 0x74, 0x70, 0xf3, 0xa4,
+        ]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_verified(&ctx, true, false, true, &window).unwrap();
+        assert!(!batch.uses_counter && batch.branch_exit_count == 0 && batch.count == 2);
     }
 
     #[test]
@@ -3171,6 +3348,9 @@ mod tests {
             code_page_count: 1,
             page_breakpoints: [0; 4],
             page_breakpoint_count: 0,
+            branch_exits: [0; 3],
+            branch_exit_count: 0,
+            branch_exit_counts: [0; 3],
             page_count: 0,
             accesses_memory: false,
             writes_memory: false,
@@ -3237,6 +3417,9 @@ mod tests {
             code_page_count: 1,
             page_breakpoints: [0; 4],
             page_breakpoint_count: 0,
+            branch_exits: [0; 3],
+            branch_exit_count: 0,
+            branch_exit_counts: [0; 3],
             page_count: 0,
             accesses_memory: false,
             writes_memory: false,

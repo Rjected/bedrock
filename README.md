@@ -78,9 +78,13 @@ any page table used by the code or destination translations.
 Decoded long-mode memory blocks also use hardware-counter execution with code
 and every reachable page-table frame write-protected, including loops whose
 store addresses change. A guarded write fault restores permissions and replays
-the instruction with stepping before rebuilding the proof. Their direct branches
-may enter only decoded instruction boundaries; other instructions terminate
-the block. Without table-guard support or enough deadline margin, stores need
+the instruction with stepping before rebuilding the proof. Direct branches
+can enter decoded boundaries or stop before up to three outgoing targets using
+execution breakpoints, with the fourth slot reserved for the block endpoint.
+Straight-line blocks and outgoing branches with unambiguous prefix lengths use
+exact decoded counts without arming the PMU; internal branches and ambiguous
+paths use IRPERF. Other instructions terminate the block. Without table-guard
+support or enough deadline margin, stores need
 static destination proofs or fall back to stepping. Unsupported instructions
 also use stepping.
 Control-flow acceleration requires AMD PerfMonV2, PMC virtualization, virtual
@@ -93,6 +97,11 @@ Counter overflow raises a virtual NMI. During counted execution a temporary
 zero IDT limit traps its delivery before an interrupt frame is written, and
 SIDT/LIDT intercepts stop execution before observing or changing that limit.
 Guest IDT and interrupt controls are restored before handling the exit.
+Counted regions also intercept IRET and replay it with exact stepping: a native
+region containing IRET retired 45 instructions in the stepped reference but
+reported 44 on the validation host. Scalar IRETQ retains RAM proofs only when
+its descriptor accessed-bit updates cannot modify protected code or table
+frames; CET-enabled transitions revoke them.
 Forward-only regions stop at their endpoint and can run inside
 the performance-counter interrupt margin when their maximum instruction count
 fits before the next deadline. Backward branches still require that margin.
@@ -183,6 +192,12 @@ Subsequent fresh-boot comparisons have also diverged on both the guarded
 native-PUSHF baseline and the extended counted-loop backend. Individual roots
 and their fork comparisons pass, but fresh-root determinism remains unresolved;
 a passing pair does not establish repeatability across runs.
+After intercepting native IRET, 128 accelerated replays of the one-million
+instruction span from 30 million to 31 million match the stepped reference.
+A fresh 50-million checkpoint pair also matches at 3.11 and 3.12 seconds, and
+a full fresh-boot pair matches at 36.09 seconds per root, compared with
+3.53 seconds and 38.05 seconds before this change. These checks cover the
+observed counting discrepancy, not every previously failing execution path.
 This backend requires SVM and nested paging.
 
 The hardware examples exercise instruction deadlines, fork isolation,
@@ -249,7 +264,10 @@ For repeated tests of a short span, `BEDROCK_CHECKPOINT_FORK_START` with `repeat
 boots once to that snapshot, then compares child registers at the requested
 deadline and checks parent RAM isolation. Fork RAM hashes are unavailable through
 the SDK. `BEDROCK_CHECKPOINT_FORK_REPLAYS` controls the number of children (eight
-by default). This checks replay from a shared snapshot, rather than fresh boots.
+by default). `BEDROCK_CHECKPOINT_FORK_INTERVAL` sets intermediate checkpoints
+only in the children, allowing detailed comparison without repeated parent
+checkpoints. It falls back to `BEDROCK_CHECKPOINT_INTERVAL` when unset.
+This checks replay from a shared snapshot, rather than fresh boots.
 Set `BEDROCK_CHECKPOINT_REFERENCE_STEP` to run the first child with instruction
 stepping, then compare the accelerated replays against that reference.
 

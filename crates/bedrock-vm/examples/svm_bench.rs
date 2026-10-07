@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_guarded_code_and_translation_writes()?;
     test_page_rng_breakpoints()?;
     test_page_fetch_rng()?;
+    test_decoded_branch_exits()?;
     test_data_translation_write()?;
     test_debug_registers()?;
     test_hardware_loop()?;
@@ -1265,6 +1266,90 @@ fn test_page_fetch_rng() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn test_decoded_branch_exits() -> Result<(), Box<dyn std::error::Error>> {
+    for looped in [false, true] {
+        for target in [0x1080usize, 0x2000] {
+            for taken in [false, true] {
+                let mut results = Vec::new();
+                for reference in [true, false] {
+                    let mut vm = Vm::create(2 * 1024 * 1024)?;
+                    vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+                    for (address, entry) in [(0x3000, 0x4027u64), (0x4000, 0x5027), (0x5000, 0xe7)]
+                    {
+                        vm.memory_mut()?[address..address + 8]
+                            .copy_from_slice(&entry.to_le_bytes());
+                    }
+                    let mut code = if looped {
+                        vec![
+                            0xb9, 0x10, 0x27, 0, 0, 0xf3, 0x0f, 0x1e, 0xfa, 0xff, 0xc9, 0x75, 0xf8,
+                            0x85, 0xc0, 0x0f, 0x84,
+                        ]
+                    } else {
+                        vec![0x90, 0x90, 0x85, 0xc0, 0x0f, 0x84]
+                    };
+                    let before_test = if looped { 30_001 } else { 2 };
+                    code.extend(((target - (0x1000 + code.len() + 4)) as i32).to_le_bytes());
+                    code.extend([0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+                    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+                    vm.memory_mut()?[target..target + 9]
+                        .copy_from_slice(&[0x48, 0x0f, 0xc7, 0xf0, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+                    for offset in [0x1800, 0x1820, 0x1840, 0x1860, 0x1880] {
+                        vm.memory_mut()?[offset..offset + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+                    }
+                    let mut regs = Regs::long_mode();
+                    regs.control_regs.cr3 = Cr3::new(0x3000);
+                    regs.rip = 0x1000;
+                    regs.gprs.rsp = 0x8000;
+                    regs.gprs.rax = if taken { 0 } else { 1 };
+                    vm.set_regs(&regs)?;
+                    if reference {
+                        vm.set_single_step_range(0, 40_000)?;
+                    }
+                    let mut random_exits = 0;
+                    loop {
+                        let exit = vm.run()?;
+                        match exit.exit_reason {
+                            256 => continue,
+                            57 => {
+                                assert!(taken);
+                                assert_eq!(exit.emulated_tsc, before_test + 2);
+                                assert_eq!(vm.get_regs()?.rip, target as u64);
+                                random_exits += 1;
+                                vm.set_rdrand_value(0x1234)?;
+                            }
+                            258 => {
+                                assert_eq!(exit.emulated_tsc, before_test + 3);
+                                assert_eq!(random_exits, usize::from(taken));
+                                let regs = vm.get_regs()?;
+                                assert_eq!(regs.gprs.rax, 0);
+                                assert_eq!(regs.gprs.rcx, 0);
+                                results.push((
+                                    exit.emulated_tsc,
+                                    regs.rip,
+                                    regs.rflags,
+                                    regs.gprs.rax,
+                                ));
+                                break;
+                            }
+                            reason => {
+                                return Err(
+                                    format!("Unexpected branch-exit result: {reason}").into()
+                                )
+                            }
+                        }
+                    }
+                    if !reference {
+                        assert!(vm.get_exit_stats()?.total_exit_count() < 100);
+                    }
+                }
+                assert_eq!(results[0], results[1]);
+            }
+        }
+    }
+    println!("SVM_DECODED_BRANCH_EXITS_PASS");
+    Ok(())
+}
+
 fn test_data_translation_write() -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = Vm::create(2 * 1024 * 1024)?;
     for (address, entry) in [
@@ -1394,11 +1479,16 @@ fn linux_checkpoint_run(
     start_tsc: u64,
     target: u64,
 ) -> Result<Vec<LinuxCheckpoint>, Box<dyn std::error::Error>> {
-    let interval = std::env::var("BEDROCK_CHECKPOINT_INTERVAL")
-        .ok()
-        .map(|value| value.parse::<u64>())
-        .transpose()?
-        .unwrap_or(target);
+    let interval = (if start_tsc != 0 {
+        std::env::var("BEDROCK_CHECKPOINT_FORK_INTERVAL")
+            .or_else(|_| std::env::var("BEDROCK_CHECKPOINT_INTERVAL"))
+    } else {
+        std::env::var("BEDROCK_CHECKPOINT_INTERVAL")
+    })
+    .ok()
+    .map(|value| value.parse::<u64>())
+    .transpose()?
+    .unwrap_or(target);
     if interval == 0 || target <= start_tsc {
         return Err("Checkpoint interval must be nonzero and target must exceed start".into());
     }
