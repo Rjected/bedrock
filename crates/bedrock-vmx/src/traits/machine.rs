@@ -46,6 +46,7 @@ pub struct InstructionBatch {
     pub page_count: usize,
     pub accesses_memory: bool,
     pub writes_memory: bool,
+    pub validated_stores: bool,
     pub looping: bool,
     pub loop_start: usize,
     pub instruction_budget: u64,

@@ -192,6 +192,266 @@ fn repeat_len(bytes: &[u8]) -> Option<usize> {
     }
 }
 
+fn opcode_start(bytes: &[u8], long: bool) -> Option<(usize, u8, bool)> {
+    let mut p = 0;
+    let mut rex = 0;
+    let mut word = false;
+    loop {
+        let byte = *bytes.get(p)?;
+        if matches!(byte, 0x26 | 0x2e | 0x36 | 0x3e | 0x64..=0x67)
+            || (long && matches!(byte, 0x40..=0x4f))
+        {
+            word |= byte == 0x66;
+            rex = if long && matches!(byte, 0x40..=0x4f) {
+                byte
+            } else {
+                0
+            };
+            p += 1;
+        } else {
+            return Some((p, rex, word));
+        }
+    }
+}
+
+/// Over-approximate GPR writes; unknown operations invalidate every address
+/// register. Subregister writes invalidate the whole architectural register.
+fn modified_gprs(bytes: &[u8], long: bool) -> u16 {
+    let Some((p, rex, _)) = opcode_start(bytes, long) else {
+        return u16::MAX;
+    };
+    let op = bytes[p];
+    let bit = |register: u8, byte: bool| {
+        let register = if byte && rex == 0 && (4..8).contains(&register) {
+            register - 4
+        } else {
+            register
+        };
+        1u16 << register
+    };
+    let destination = |byte: bool| -> Option<u16> {
+        let m = *bytes.get(p + 1)?;
+        Some(if m >> 6 == 3 {
+            bit((m & 7) | ((rex & 1) << 3), byte)
+        } else {
+            0
+        })
+    };
+    let register = |byte: bool| -> Option<u16> {
+        Some(bit(
+            ((*bytes.get(p + 1)? >> 3) & 7) | ((rex & 4) << 1),
+            byte,
+        ))
+    };
+    match op {
+        0x90 if rex & 1 == 0 => 0,
+        0x38..=0x3d | 0x84 | 0x85 | 0x9e | 0xf5 | 0xf8 | 0xf9 | 0xfc | 0xfd => 0,
+        0x50..=0x57 => 1 << 4,
+        0x58..=0x5f => (1 << 4) | bit((op & 7) | ((rex & 1) << 3), false),
+        0xb0..=0xbf => bit((op & 7) | ((rex & 1) << 3), op < 0xb8),
+        0x88 | 0x89 | 0xc6 | 0xc7 | 0xc0 | 0xc1 | 0xd0..=0xd3 | 0xfe | 0xff => {
+            destination(matches!(op, 0x88 | 0xc6 | 0xc0 | 0xd0 | 0xd2 | 0xfe)).unwrap_or(u16::MAX)
+        }
+        0x8a | 0x8b | 0x8d | 0x69 | 0x6b => register(op == 0x8a).unwrap_or(u16::MAX),
+        0x00..=0x35 if op & 7 <= 3 => if op & 2 == 0 {
+            destination(op & 1 == 0)
+        } else {
+            register(op & 1 == 0)
+        }
+        .unwrap_or(u16::MAX),
+        0x00..=0x35 if matches!(op & 7, 4 | 5) => 1,
+        0x80 | 0x81 | 0x83 => {
+            if bytes.get(p + 1).is_some_and(|m| (m >> 3) & 7 == 7) {
+                0
+            } else {
+                destination(op == 0x80).unwrap_or(u16::MAX)
+            }
+        }
+        0x0f if bytes.get(p + 1) == Some(&0x1f) => 0,
+        _ => u16::MAX,
+    }
+}
+
+/// Address of a MOV store or PUSH whose address registers retain their entry
+/// values. Other stores and address/FS/GS overrides terminate the batch.
+fn store_range(bytes: &[u8], rip: u64, gprs: &[u64; 16], changed: u16) -> Option<(u64, u64)> {
+    let (p, rex, word) = opcode_start(bytes, true)?;
+    if bytes[..p].iter().any(|b| matches!(b, 0x64 | 0x65 | 0x67)) {
+        return None;
+    }
+    let op = bytes[p];
+    if matches!(op, 0x50..=0x57) {
+        if changed & (1 << 4) != 0 {
+            return None;
+        }
+        let width = if word && rex & 8 == 0 { 2 } else { 8 };
+        return Some((gprs[4].checked_sub(width)?, width));
+    }
+    if !matches!(op, 0x88 | 0x89 | 0xc6 | 0xc7) {
+        return None;
+    }
+    let width = if matches!(op, 0x88 | 0xc6) {
+        1
+    } else if rex & 8 != 0 {
+        8
+    } else if word {
+        2
+    } else {
+        4
+    };
+    let m = *bytes.get(p + 1)?;
+    let mode = m >> 6;
+    if mode == 3 {
+        return None;
+    }
+    let mut cursor = p + 2;
+    let mut address = 0u64;
+    let mut registers = 0u16;
+    let mut no_base = false;
+    let mut relative = false;
+    if m & 7 == 4 {
+        let sib = *bytes.get(cursor)?;
+        cursor += 1;
+        let index = ((sib >> 3) & 7) | ((rex & 2) << 2);
+        if index != 4 {
+            registers |= 1 << index;
+            address = gprs[index as usize].wrapping_shl((sib >> 6) as u32);
+        }
+        no_base = mode == 0 && sib & 7 == 5;
+        if !no_base {
+            let base = (sib & 7) | ((rex & 1) << 3);
+            registers |= 1 << base;
+            address = address.wrapping_add(gprs[base as usize]);
+        }
+    } else if mode == 0 && m & 7 == 5 {
+        relative = true;
+        no_base = true;
+    } else {
+        let base = (m & 7) | ((rex & 1) << 3);
+        registers |= 1 << base;
+        address = gprs[base as usize];
+    }
+    if changed & registers != 0 {
+        return None;
+    }
+    let displacement = if mode == 1 {
+        i64::from(*bytes.get(cursor)? as i8)
+    } else if mode == 2 || no_base {
+        i64::from(i32::from_le_bytes(
+            bytes.get(cursor..cursor + 4)?.try_into().ok()?,
+        ))
+    } else {
+        0
+    };
+    if relative {
+        address = rip.checked_add(bytes.len() as u64)?;
+    }
+    Some((address.wrapping_add(displacement as u64), width))
+}
+
+fn collect_code_tables<C: VmContext>(
+    ctx: &C,
+    batch: &mut InstructionBatch,
+    linear: u64,
+) -> Option<()> {
+    if batch.page_count != 1 {
+        return Some(());
+    }
+    let mut table = ctx
+        .state()
+        .vmcs
+        .read_natural(VmcsFieldNatural::GuestCr3)
+        .ok()?
+        & 0x000f_ffff_ffff_f000;
+    for shift in [39, 30, 21, 12] {
+        if table == batch.pages[0] {
+            return None;
+        }
+        batch.pages[batch.page_count] = table;
+        batch.page_count += 1;
+        let mut entry = [0u8; 8];
+        ctx.read_guest_memory(
+            GuestPhysAddr::new(table + ((linear >> shift) & 511) * 8),
+            &mut entry,
+        )
+        .ok()?;
+        let entry = u64::from_le_bytes(entry);
+        if shift == 12 || entry & (1 << 7) != 0 {
+            break;
+        }
+        table = entry & 0x000f_ffff_ffff_f000;
+    }
+    Some(())
+}
+
+#[derive(Default)]
+struct StorePlan {
+    destinations: [u64; 8],
+    count: usize,
+    last_page: Option<u64>,
+}
+
+fn validate_store<C: VmContext>(
+    ctx: &C,
+    batch: &InstructionBatch,
+    plan: &mut StorePlan,
+    start: u64,
+    width: u64,
+) -> Option<()> {
+    let end = start.checked_add(width - 1)? & !4095;
+    let mut page = start & !4095;
+    loop {
+        // Consecutive stores to one virtual page cannot change its proved
+        // translation: that page is disjoint from its own page tables. A
+        // different destination invalidates this cache before it can write.
+        if plan.last_page == Some(page) {
+            if page == end {
+                break;
+            }
+            page = page.checked_add(4096)?;
+            continue;
+        }
+        let destination = super::svm::physical(ctx, page).ok()?.as_u64() & !4095;
+        if batch.pages[..batch.page_count].contains(&destination) {
+            return None;
+        }
+        if !plan.destinations[..plan.count].contains(&destination) {
+            *plan.destinations.get_mut(plan.count)? = destination;
+            plan.count += 1;
+        }
+        let mut table = ctx
+            .state()
+            .vmcs
+            .read_natural(VmcsFieldNatural::GuestCr3)
+            .ok()?
+            & 0x000f_ffff_ffff_f000;
+        for shift in [39, 30, 21, 12] {
+            // Earlier stores cannot rewrite a later store's translation,
+            // including the current destination's own page tables.
+            if plan.destinations[..plan.count].contains(&table) {
+                return None;
+            }
+            let mut entry = [0u8; 8];
+            ctx.read_guest_memory(
+                GuestPhysAddr::new(table + ((page >> shift) & 511) * 8),
+                &mut entry,
+            )
+            .ok()?;
+            let entry = u64::from_le_bytes(entry);
+            if shift == 12 || entry & (1 << 7) != 0 {
+                break;
+            }
+            table = entry & 0x000f_ffff_ffff_f000;
+        }
+        plan.last_page = Some(page);
+        if page == end {
+            break;
+        }
+        page = page.checked_add(4096)?;
+    }
+    Some(())
+}
+
 pub(crate) fn prepare<C: VmContext>(
     ctx: &C,
     can_loop: bool,
@@ -262,11 +522,33 @@ pub(crate) fn prepare<C: VmContext>(
         page_count: 1,
         accesses_memory: false,
         writes_memory: false,
+        validated_stores: false,
         looping: false,
         loop_start: 0,
         instruction_budget: budget,
     };
     batch.pages[0] = physical.as_u64() & !4095;
+    let g = &state.gprs;
+    let gprs = [
+        g.rax,
+        g.rcx,
+        g.rdx,
+        g.rbx,
+        v.read_natural(VmcsFieldNatural::GuestRsp).ok()?,
+        g.rbp,
+        g.rsi,
+        g.rdi,
+        g.r8,
+        g.r9,
+        g.r10,
+        g.r11,
+        g.r12,
+        g.r13,
+        g.r14,
+        g.r15,
+    ];
+    let mut changed = 0u16;
+    let mut stores = StorePlan::default();
     let mut offset = 0;
     if long {
         if let Some(length) = repeat_len(&bytes[..available]) {
@@ -288,7 +570,11 @@ pub(crate) fn prepare<C: VmContext>(
         // One backward conditional branch stays entirely inside the verified
         // region. Its fall-through is the execution breakpoint. PMIs bound
         // execution, then TF handles the margin before a deterministic stop.
-        if can_loop && budget >= InstructionBatch::LOOP_DEADLINE_MARGIN && batch.count != 0 {
+        if can_loop
+            && budget >= InstructionBatch::LOOP_DEADLINE_MARGIN
+            && batch.count != 0
+            && !(paged && batch.writes_memory)
+        {
             let tail = &bytes[offset..available];
             if let [opcode @ 0x70..=0x7f, displacement, ..] = tail {
                 let end = offset + 2;
@@ -312,11 +598,23 @@ pub(crate) fn prepare<C: VmContext>(
         else {
             break;
         };
-        // Protecting translation tables traps hardware A/D updates too.
-        // Step paged stores directly instead of faulting and then stepping.
         if paged && writes {
-            break;
+            if !long {
+                break;
+            }
+            let instruction = &bytes[offset..offset + length];
+            let Some((start, width)) =
+                store_range(instruction, rip + offset as u64, &gprs, changed)
+            else {
+                break;
+            };
+            collect_code_tables(ctx, &mut batch, linear)?;
+            if validate_store(ctx, &batch, &mut stores, start, width).is_none() {
+                break;
+            }
+            batch.validated_stores = true;
         }
+        changed |= modified_gprs(&bytes[offset..offset + length], long);
         offset += length;
         batch.accesses_memory |= memory;
         batch.writes_memory |= writes;
@@ -332,24 +630,7 @@ pub(crate) fn prepare<C: VmContext>(
     // Instruction fetch can set page-table A bits. Do not batch code that
     // aliases its own translation tables and could change while executing.
     if paged {
-        let code_page = physical.as_u64() & !4095;
-        let mut table = v.read_natural(VmcsFieldNatural::GuestCr3).ok()? & 0x000f_ffff_ffff_f000;
-        for shift in [39, 30, 21, 12] {
-            if table == code_page {
-                return None;
-            }
-            batch.pages[batch.page_count] = table;
-            batch.page_count += 1;
-            let address = table + ((linear >> shift) & 511) * 8;
-            let mut entry = [0u8; 8];
-            ctx.read_guest_memory(GuestPhysAddr::new(address), &mut entry)
-                .ok()?;
-            let entry = u64::from_le_bytes(entry);
-            if shift == 12 || entry & (1 << 7) != 0 {
-                break;
-            }
-            table = entry & 0x000f_ffff_ffff_f000;
-        }
+        collect_code_tables(ctx, &mut batch, linear)?;
     }
     if let Some(repeat) = batch.repeat {
         // REP stores can change neither code nor the active translation tree.
@@ -434,7 +715,7 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
     if !batch.accesses_memory {
         return Some(guard);
     }
-    let protected = if batch.writes_memory {
+    let protected = if batch.writes_memory && !batch.validated_stores {
         batch.page_count
     } else {
         1
@@ -497,6 +778,71 @@ impl BatchGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::MockVmContext;
+
+    fn paged_context(code: &[u8]) -> MockVmContext {
+        let mut ctx = MockVmContext::new();
+        ctx.set_guest_rip(0x1000);
+        ctx.set_guest_rflags(2);
+        let v = ctx.vmcs_setup();
+        v.set_field_natural(VmcsFieldNatural::GuestCr0, 1 << 31);
+        v.set_field_natural(VmcsFieldNatural::GuestCr3, 0x3000);
+        v.set_field_natural(VmcsFieldNatural::GuestCsBase, 0);
+        v.set_field_natural(VmcsFieldNatural::GuestRsp, 0x8000);
+        v.set_field_natural(VmcsFieldNatural::GuestDr7, 0x400);
+        v.set_field32(VmcsField32::GuestCsAccessRights, 1 << 13);
+        v.write64(VmcsField64::GuestIa32Efer, 1 << 10).unwrap();
+        for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x6007)] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        for page in 0..16 {
+            ctx.memory[0x6000 + page * 8..0x6008 + page * 8]
+                .copy_from_slice(&(page as u64 * 4096 + 7).to_le_bytes());
+        }
+        ctx.memory[0x1000..0x1000 + code.len()].copy_from_slice(code);
+        ctx.state_mut().gprs.rdi = 0x7000;
+        ctx
+    }
+
+    fn planned(ctx: &MockVmContext) -> Option<InstructionBatch> {
+        let window = super::super::svm::InstructionWindow::read(ctx).unwrap();
+        prepare(ctx, true, &window)
+    }
+
+    #[test]
+    fn paged_stores_require_stable_addresses_and_disjoint_translation_pages() {
+        let code = [0x48, 0x89, 0x07, 0x48, 0x89, 0x47, 8, 0x0f, 0xc7, 0xf0];
+        let mut ctx = paged_context(&code);
+        let b = planned(&ctx).unwrap();
+        assert_eq!(b.count, 2);
+        assert!(b.validated_stores && b.writes_memory);
+        for destination in [0x1000, 0x3000, 0x6000] {
+            ctx.state_mut().gprs.rdi = destination;
+            assert!(planned(&ctx).is_none());
+        }
+        let ctx = paged_context(&[0x48, 0x83, 0xc7, 8, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
+        assert!(planned(&ctx).is_none());
+        let ctx = paged_context(&[0x48, 0x89, 0x07, 0x48, 0x89, 0x47, 8, 0x75, 0xf7]);
+        assert!(!planned(&ctx).unwrap().looping);
+    }
+
+    #[test]
+    fn earlier_store_cannot_redirect_a_later_store() {
+        let mut ctx = paged_context(&[0x48, 0x89, 0x06, 0x90, 0x48, 0x89, 0x1f, 0x0f, 0xc7, 0xf0]);
+        for (address, entry) in [
+            (0x3008, 0x8007u64),
+            (0x8000, 0x9007),
+            (0x9000, 0xa007),
+            (0xa000, 0xb007),
+        ] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        ctx.state_mut().gprs.rsi = 0xa000;
+        ctx.state_mut().gprs.rdi = 1 << 39;
+        let b = planned(&ctx).unwrap();
+        assert_eq!(b.count, 2); // First store and NOP, stopping before the redirected store.
+        assert!(b.validated_stores);
+    }
     #[test]
     fn accepted_encodings_match_independent_decoder() {
         use iced_x86::{Decoder, DecoderOptions, FlowControl, InstructionInfoFactory, OpAccess};
@@ -540,6 +886,71 @@ mod tests {
                     "bytes={bytes:02x?}"
                 );
                 let info = factory.info(&instruction);
+                if bitness == 64 {
+                    use iced_x86::Register;
+                    let gprs = [
+                        Register::RAX,
+                        Register::RCX,
+                        Register::RDX,
+                        Register::RBX,
+                        Register::RSP,
+                        Register::RBP,
+                        Register::RSI,
+                        Register::RDI,
+                        Register::R8,
+                        Register::R9,
+                        Register::R10,
+                        Register::R11,
+                        Register::R12,
+                        Register::R13,
+                        Register::R14,
+                        Register::R15,
+                    ];
+                    let changed = modified_gprs(&bytes[..length], true);
+                    for register in info.used_registers() {
+                        if matches!(
+                            register.access(),
+                            OpAccess::Write
+                                | OpAccess::CondWrite
+                                | OpAccess::ReadWrite
+                                | OpAccess::ReadCondWrite
+                        ) {
+                            if let Some(index) = gprs
+                                .iter()
+                                .position(|&r| r == register.register().full_register())
+                            {
+                                assert_ne!(
+                                    changed & (1 << index),
+                                    0,
+                                    "missing write: bytes={bytes:02x?} register={:?}",
+                                    register.register()
+                                );
+                            }
+                        }
+                    }
+                    let values = core::array::from_fn(|i| 0x10000 + i as u64 * 0x100);
+                    if let Some((address, width)) = store_range(&bytes[..length], 0, &values, 0) {
+                        let memory = info.used_memory();
+                        assert_eq!(memory.len(), 1);
+                        let expected = memory[0].virtual_address(0, |r, _, _| {
+                            if matches!(
+                                r,
+                                Register::ES | Register::CS | Register::SS | Register::DS
+                            ) {
+                                return Some(0);
+                            }
+                            gprs.iter()
+                                .position(|&g| g == r.full_register())
+                                .map(|i| values[i])
+                        });
+                        assert_eq!(Some(address), expected, "address bytes={bytes:02x?}");
+                        assert_eq!(
+                            width,
+                            memory[0].memory_size().size() as u64,
+                            "width bytes={bytes:02x?}"
+                        );
+                    }
+                }
                 let uses_memory = !info.used_memory().is_empty();
                 let stores = info.used_memory().iter().any(|m| {
                     matches!(
@@ -590,6 +1001,7 @@ mod tests {
             page_count: 0,
             accesses_memory: false,
             writes_memory: false,
+            validated_stores: false,
             looping: true,
             loop_start: 1,
             instruction_budget: u64::MAX,
@@ -655,6 +1067,7 @@ mod tests {
             page_count: 0,
             accesses_memory: false,
             writes_memory: false,
+            validated_stores: false,
             looping: false,
             loop_start: 0,
             instruction_budget: u64::MAX,

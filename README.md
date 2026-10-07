@@ -58,9 +58,11 @@ and MSR/I/O intercept bitmaps. The common device, randomness and fork logic is
 shared with the Intel backend. AMD execution batches verified straight-line
 instructions and bounded REP stores, and uses a perf-owned retired-conditional-
 branch counter for verified loops. Code and translation guards prevent a batch
-from modifying the instructions it has decoded. Unsupported instructions and
-paged stores fall back to instruction stepping. Loop acceleration requires
-AMD PerfMonV2; counter allocation failure disables it.
+from modifying the instructions it has decoded. Long-mode MOV stores and PUSH
+can join a batch when their address registers retain their entry values and
+their destinations cannot rewrite the code or subsequent store translations.
+Unsupported instructions and other stores fall back to instruction stepping.
+Loop acceleration requires AMD PerfMonV2; counter allocation failure disables it.
 
 This is partial acceleration, not an equivalent of Intel's PEBS execution path.
 Linux still spends substantial time in the stepping fallback. Near-native

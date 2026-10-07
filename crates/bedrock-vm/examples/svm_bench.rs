@@ -12,13 +12,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "native" {
         return native_loop_comparison();
     }
+    if args.len() == 2 && args[1] == "stores" {
+        return test_paged_stores();
+    }
     if args.len() == 3 {
         return linux_checkpoint(&args[1], &args[2]);
     }
     if args.len() != 1 {
-        return Err("Usage: svm_bench [native | VMLINUX INITRD]".into());
+        return Err("Usage: svm_bench [native | stores | VMLINUX INITRD]".into());
     }
     test_repeat()?;
+    test_paged_stores()?;
     test_self_modifying()?;
     test_debug_registers()?;
     test_hardware_loop()?;
@@ -184,6 +188,80 @@ fn test_repeat() -> Result<(), Box<dyn std::error::Error>> {
     hash.write(vm.memory()?);
     assert_eq!(hash.finish(), parent_hash);
     println!("SVM_REP_DEADLINE_FORK_PASS");
+    Ok(())
+}
+
+fn test_paged_stores() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    let mut code = vec![0x48, 0x89, 0x07];
+    for displacement in (8..64).step_by(8) {
+        code.extend([0x48, 0x89, 0x47, displacement]);
+    }
+    code.extend([0x48, 0x8d, 0x7f, 0x40]);
+    for index in 0..8 {
+        code.extend([0x4c, 0x8b, 0x47 | (index << 3), 0xc0 + index * 8]);
+    }
+    code.extend([0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rdi = 0x7000;
+    regs.gprs.rax = 0x123456789abcdef0;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(3))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259);
+        assert_eq!(exit.emulated_tsc, 3);
+        assert_eq!(vm.get_regs()?.rip, 0x100b);
+        break;
+    }
+    for offset in (0..24).step_by(8) {
+        assert_eq!(
+            &vm.memory()?[0x7000 + offset..0x7008 + offset],
+            &regs.gprs.rax.to_le_bytes()
+        );
+    }
+    assert_eq!(&vm.memory()?[0x7018..0x7040], &[0; 40]);
+    vm.set_stop_at_tsc(None)?;
+    let mut hash = DefaultHasher::new();
+    hash.write(vm.memory()?);
+    let parent_hash = hash.finish();
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let child = vm.fork()?;
+        loop {
+            let exit = child.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, 18);
+            let r = child.get_regs()?;
+            assert_eq!(r.gprs.rdi, 0x7040);
+            for value in [
+                r.gprs.r8, r.gprs.r9, r.gprs.r10, r.gprs.r11, r.gprs.r12, r.gprs.r13, r.gprs.r14,
+                r.gprs.r15,
+            ] {
+                assert_eq!(value, regs.gprs.rax);
+            }
+            results.push((r.rip, r.rflags, r.gprs.rax, r.gprs.rdi));
+            break;
+        }
+    }
+    assert_eq!(results[0], results[1]);
+    let mut hash = DefaultHasher::new();
+    hash.write(vm.memory()?);
+    assert_eq!(hash.finish(), parent_hash);
+    println!("SVM_PAGED_STORE_DEADLINE_FORK_PASS");
     Ok(())
 }
 
