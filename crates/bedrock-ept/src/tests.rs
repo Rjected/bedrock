@@ -11,12 +11,13 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::collections::HashMap;
 
 #[test]
-fn npt_execution_guard_covers_sixteen_pages_and_restores_permissions() {
+fn npt_execution_guard_covers_maximum_pages_and_restores_permissions() {
     use crate::traits::GuestPhysAddr;
     let mut allocator = TestAllocator::new();
     let mut ept =
         EptPageTable::new_with_format(&mut allocator, crate::PageTableFormat::AmdNpt).unwrap();
-    for index in 1..=17 {
+    let limit = crate::NptExecutionGuard::MAX_PAGES as u64;
+    for index in 1..=limit + 1 {
         ept.map_4k(
             &mut allocator,
             GuestPhysAddr::new(index * 4096),
@@ -26,19 +27,21 @@ fn npt_execution_guard_covers_sixteen_pages_and_restores_permissions() {
         )
         .unwrap();
     }
-    let pages = core::array::from_fn::<_, 16, _>(|i| GuestPhysAddr::new((i as u64 + 1) * 4096));
+    let pages = core::array::from_fn::<_, { crate::NptExecutionGuard::MAX_PAGES }, _>(|i| {
+        GuestPhysAddr::new((i as u64 + 1) * 4096)
+    });
     let guard = ept.restrict_execution_to_pages(&allocator, &pages).unwrap();
-    for index in 1..=17 {
+    for index in 1..=limit + 1 {
         let permissions = ept
             .lookup(&allocator, GuestPhysAddr::new(index * 4096))
             .unwrap()
             .1
             .bits();
-        assert_eq!(permissions & 4 != 0, index <= 16);
-        assert_eq!(permissions & 2 != 0, index == 17);
+        assert_eq!(permissions & 4 != 0, index <= limit);
+        assert_eq!(permissions & 2 != 0, index == limit + 1);
     }
     guard.restore(&mut ept, &allocator);
-    for index in 1..=17 {
+    for index in 1..=limit + 1 {
         assert_eq!(
             ept.lookup(&allocator, GuestPhysAddr::new(index * 4096))
                 .unwrap()

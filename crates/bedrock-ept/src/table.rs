@@ -71,7 +71,7 @@ struct NptExecutionScratch {
 }
 
 impl NptExecutionGuard {
-    pub const MAX_PAGES: usize = 16;
+    pub const MAX_PAGES: usize = 64;
     const MAX_TABLES: usize = 3 * Self::MAX_PAGES + 1;
     pub fn restore<Frame, A: FrameAllocator>(self, ept: &mut EptPageTable<Frame>, allocator: &A) {
         assert_eq!(ept.format, PageTableFormat::AmdNpt);

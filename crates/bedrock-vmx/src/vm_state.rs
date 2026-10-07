@@ -15,7 +15,7 @@ use bedrock_ept::NptWriteGuard;
 type DeviceStatesBox = HeapBox<DeviceStates>;
 type ExitStatsBox = HeapBox<AllExitStats>;
 
-pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 16;
+pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
 
 /// Preallocated AMD guard workspace. Planning and permission restoration run
 /// with IRQs disabled and must neither allocate nor grow the kernel stack.
@@ -33,7 +33,8 @@ pub(crate) struct SvmGuardScratch {
     pub translations: [(u64, u64); SVM_CODE_PAGE_CAPACITY],
     pub translation_count: usize,
     pub translation_cursor: usize,
-    pub saved: [SvmGuardSaved; 128 + SVM_CODE_PAGE_CAPACITY],
+    // Code pages, up to four entry-walk tables, and the guarded tree.
+    pub saved: [SvmGuardSaved; 128 + SVM_CODE_PAGE_CAPACITY + 4],
     pub aliases: [SvmAliasWalk; 512],
     pub alias_proof: SvmAliasProof,
     pub alias_proofs: [SvmAliasProof; 32],

@@ -115,7 +115,7 @@ Forward-only regions stop at their endpoint and can run inside
 the performance-counter interrupt margin when their maximum instruction count
 fits before the next deadline. Backward branches still require that margin.
 Long-mode execution can also run across calls, returns, and store loops within
-up to sixteen recently visited code pages. Hardware execution breakpoints stop
+up to 64 recently visited code pages. Hardware execution breakpoints stop
 before possible RDRAND/RDSEED/RDPID, repeated-string encodings, and SYSRET;
 their prefix entry points and executable virtual aliases must fit in four
 breakpoint slots. Alias enumeration uses a preallocated workspace of 512
@@ -164,7 +164,7 @@ Optional code-page translations are cached while the guarded guest table proof
 remains valid; revoking that proof or changing CR3 rebuilds the cache.
 Code-page hazard scans can survive proof invalidation through an exact-byte
 cache. All 4KB are compared before reusing a scan; changed bytes are rescanned.
-The sixteen-page cache adds approximately 64KB to each VM's heap workspace.
+The 64-page byte cache adds approximately 256KB to each VM's heap workspace.
 Page execution requires more than 512 instructions before the next deadline.
 The largest observed PMC overflow lag was 135 retired instructions in a
 200-million-TSC checkpoint and a complete boot on the validation host. The
@@ -292,6 +292,10 @@ pages. A full Linux boot and fork replay pass at 19.44 seconds and about
 about 1.82 million exits before these changes. The lower exit count has not
 yet produced a large wall-time improvement; alias-cache-only boot time was
 19.18 seconds in one A/B run.
+Expanding the guarded executable working set from 16 to 64 pages reduces a
+full Linux boot/fork run to 17.91 seconds and about 0.86 million exits on the
+validation host. The planner's largest measured stack frame stays below the
+8KB kernel limit, and 1,024 checkpoint replays from 8 to 8.1 million match.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.

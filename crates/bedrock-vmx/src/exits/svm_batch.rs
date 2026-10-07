@@ -1865,7 +1865,7 @@ fn prepare_verified<C: VmContext>(
         count: 0,
         repeat: None,
         counted_loop: None,
-        pages: [0; 20],
+        pages: [0; 68],
         code_page_count: 1,
         page_breakpoints: [0; 4],
         page_breakpoint_count: 0,
@@ -2883,8 +2883,8 @@ mod tests {
     fn wide_page_sets_keep_the_four_breakpoint_limit() {
         extern crate std;
         let mut ctx = paged_context(&[0x90]);
-        ctx.memory.resize(0x40000, 0);
-        ctx.memory[0x10000..0x20000].fill(0x90);
+        ctx.memory.resize(0x60000, 0);
+        ctx.memory[0x10000..0x50000].fill(0x90);
         for index in 0..SVM_CODE_PAGE_CAPACITY {
             let virtual_page = (index + 1) * 4096;
             let physical_page = 0x10000 + index * 4096;
@@ -3917,7 +3917,7 @@ mod tests {
             count: 4,
             repeat: None,
             counted_loop: None,
-            pages: [0; 20],
+            pages: [0; 68],
             code_page_count: 1,
             page_breakpoints: [0; 4],
             page_breakpoint_count: 0,
@@ -3986,7 +3986,7 @@ mod tests {
             count: 2,
             repeat: None,
             counted_loop: None,
-            pages: [0; 20],
+            pages: [0; 68],
             code_page_count: 1,
             page_breakpoints: [0; 4],
             page_breakpoint_count: 0,
