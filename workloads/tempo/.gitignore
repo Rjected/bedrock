@@ -18,5 +18,10 @@ traces-patched/
 **/fair-bench
 **/cli-path.txt
 
-# Full benchmark reports are regenerated; compact measurements are tracked
+# Generated benchmark reports, measurements, and run metadata
 **/report.json
+**/measurement.json
+**/inputs.json
+**/configuration.json
+**/comparison*.json
+**/native-results.json
