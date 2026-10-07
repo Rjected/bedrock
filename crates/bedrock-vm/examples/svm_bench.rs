@@ -26,6 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "page-loops" {
         return test_page_loops(false, false);
     }
+    if args.len() == 2 && args[1] == "control-flow" {
+        for _ in 0..64 {
+            test_hardware_control_flow()?;
+        }
+        return Ok(());
+    }
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
     }
@@ -60,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
+            "Usage: svm_bench [native | native-branches | control-flow | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
                 .into(),
         );
     }

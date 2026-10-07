@@ -169,9 +169,12 @@ Linux still spends substantial time in the stepping fallback. Near-native
 execution of general Linux workloads, with roughly 5% overhead as the target,
 has not been demonstrated.
 PMI skid can exceed the deadline margin; such a run fails instead of returning
-an incorrect instruction count. A real-mode branch deadline test has also
-intermittently stopped one instruction away from its expected boundary;
-instruction-count correctness is not established across all execution paths.
+an incorrect instruction count. A real-mode forward-branch deadline test
+intermittently stopped one instruction away from its expected boundary.
+Bounded non-paged forward branches now stop at either successor and use exact
+prefix counts instead of IRPERF. The isolated deadline/fork test passes 1,024
+consecutive repetitions; instruction-count correctness is not established
+across all execution paths.
 
 Native validation on an AMD EPYC 4585PX with Ubuntu Linux 7.0.0-38-generic
 includes Linux 6.18 booting to userspace and matching executions of two Linux
@@ -212,6 +215,7 @@ sudo timeout 15 target/release/examples/svm_bench
 sudo timeout 15 target/release/examples/svm_bench page-loops
 sudo timeout 15 target/release/examples/svm_bench guarded-loops
 sudo timeout 15 target/release/examples/svm_bench loop-deadlines
+sudo timeout 15 target/release/examples/svm_bench control-flow
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native-branches
 ```

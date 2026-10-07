@@ -1702,7 +1702,7 @@ fn prepare_verified<C: VmContext>(
     let mut stores = StorePlan::default();
     let mut offset = 0;
     let mut branch_targets = [0i64; 64];
-    let allow_branch_exits =
+    let mut allow_branch_exits =
         long && allow_guarded_stores && budget > InstructionBatch::COUNTER_DEADLINE_MARGIN;
     let mut branch_sources = [0u16; 64];
     let mut branch_count = 0;
@@ -1794,6 +1794,28 @@ fn prepare_verified<C: VmContext>(
         batch.offsets[batch.count] = offset as u16;
         if offset == available {
             break;
+        }
+    }
+    // A bounded non-paged forward branch has two exact stop boundaries.
+    // Stop before either successor instead of counting a converging path with
+    // IRPERF, which undercounted this case intermittently on the test host.
+    if !long && !paged && batch.counter_bounded && branch_count != 0 {
+        let source = usize::from(branch_sources[0]);
+        let end = i64::from(batch.offsets[source]);
+        let target = branch_targets[0];
+        let max_ip = if default32 {
+            u32::MAX as u64
+        } else {
+            u16::MAX as u64
+        };
+        if target > end
+            && rip
+                .checked_add(target as u64)
+                .is_some_and(|ip| ip <= max_ip)
+        {
+            batch.count = source;
+            branch_count = 1;
+            allow_branch_exits = true;
         }
     }
     if batch.guarded_stores && branch_count == 0 {
@@ -2185,6 +2207,29 @@ mod tests {
         let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
+    }
+
+    #[test]
+    fn bounded_real_mode_branches_stop_at_exact_successor_counts() {
+        let mut ctx = paged_context(&[0xf6, 0xc1, 1, 0x74, 1, 0x90, 0x90, 0x49, 0x75, 0xf6]);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr0, 0);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestCsAccessRights, 0x9b);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::GuestCsLimit, 0xffff);
+        ctx.vmcs_setup()
+            .write64(VmcsField64::GuestIa32Efer, 0)
+            .unwrap();
+        ctx.state_mut().stop_at_tsc = Some(100);
+        let batch = planned(&ctx).unwrap();
+        assert!(!batch.uses_counter);
+        assert_eq!(batch.count, 2);
+        assert_eq!(batch.endpoint(), 0x1005);
+        assert_eq!(&batch.branch_exits[..batch.branch_exit_count], &[0x1006]);
+        assert_eq!(batch.completed_at(0x1005), Some(2));
+        assert_eq!(batch.completed_at(0x1006), Some(2));
+        assert!(!batch.is_boundary(0x1007));
     }
 
     #[test]
