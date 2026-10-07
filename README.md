@@ -242,6 +242,12 @@ on this host, and from 8.61 million to 6.34 million exits. Reducing the margin
 to 512 instructions then reduced it to 22.16 seconds and 2.73 million exits.
 Thirty-two accelerated replays from 8 to 9 million instructions and sixteen
 from 100 to 110 million match the stepping reference at the smaller margin.
+These samples do not establish repeatability: a later run with 10,000-instruction
+intermediate checkpoints from 8 to 8.1 million diverged within 256 replays.
+It also diverged with the former 4,096-instruction margin and with whole-page
+execution disabled. Disabling every counter-backed batch, while retaining
+exact-breakpoint batches, matched 256 replays; all-scalar execution did too.
+Counter-backed short-batch accounting remains an unresolved correctness issue.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
@@ -320,6 +326,11 @@ checkpoints. It falls back to `BEDROCK_CHECKPOINT_INTERVAL` when unset.
 This checks replay from a shared snapshot, rather than fresh boots.
 Set `BEDROCK_CHECKPOINT_REFERENCE_STEP` to run the first child with instruction
 stepping, then compare the accelerated replays against that reference.
+A fast regression check for the unresolved counter discrepancy uses
+`BEDROCK_CHECKPOINT_FORK_START=8000000`,
+`BEDROCK_CHECKPOINT_FORK_INTERVAL=10000`,
+`BEDROCK_CHECKPOINT_FORK_REPLAYS=256`,
+`BEDROCK_CHECKPOINT_REFERENCE_STEP=1`, and a target of `8100000` with `repeat`.
 
 This reference kernel disables ftrace and ORC metadata to reduce boot-time
 stepping. The integration test uses a 100 MHz virtual TSC: a very low frequency
