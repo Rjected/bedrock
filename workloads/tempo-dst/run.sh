@@ -7,7 +7,10 @@
 #
 # --node-image runs another Tempo image (e.g. a regression's buggy build; see
 # regressions/) in place of bedrock/tempo-localnet:pinned; it must be in the
-# images tar (IMAGES).
+# images tar (IMAGES); the E7 reference node runs it too.
+#
+# --reference (a bedrock-dst flag, passed through) keeps the E7 reference node
+# (compose.yaml's `# >>> reference` blocks) in compose-run.yaml.
 #
 # e.g. ./workloads/tempo-dst/run.sh --seeds 20 --run-secs 180 --out /tmp/dst-out
 #
@@ -31,8 +34,12 @@ done
 root=workloads/tempo-dst
 mkdir -p "${RUN_DIR:-$root}"
 run_dir=$(cd "${RUN_DIR:-$root}" && pwd)
-python3 - "$variant" "$node_image" "$run_dir" <<'PY'
-import sys
+reference=0
+for arg in "$@"; do
+  if [ "$arg" = --reference ]; then reference=1; fi
+done
+python3 - "$variant" "$node_image" "$run_dir" "$reference" <<'PY'
+import re, sys
 from pathlib import Path
 flags = {
     "default": [],
@@ -48,6 +55,8 @@ flags = {
 }[sys.argv[1]]
 root = Path("workloads/tempo-dst")
 s = (root / "compose.yaml").read_text()
+if sys.argv[4] != "1":
+    s = re.sub(r"(?m)^ *# >>> reference\n(.*\n)*? *# <<< reference\n", "", s)
 anchor = "      - --engine.state-root-task-compare-updates\n"
 s = s.replace(anchor, anchor + "".join(f"      - {f}\n" for f in flags))
 s = s.replace("image: bedrock/tempo-localnet:pinned", f"image: {sys.argv[2]}")

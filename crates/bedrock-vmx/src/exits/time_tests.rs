@@ -89,6 +89,22 @@ fn test_rdpmc_handler() {
 }
 
 #[test]
+fn idle_shifts_preempt_deadline_by_skipped_time() {
+    // Preemption counts retired instructions: an idle skip moves its deadline
+    // by the same amount, so waking from HLT does not trip it.
+    let mut ctx = MockVmContext::new();
+    ctx.set_emulated_tsc(1_000);
+    ctx.state_mut().devices.apic.timer_deadline = 1_000 + 500;
+    ctx.state_mut().devices.apic.preempt_period = 100;
+    ctx.state_mut().devices.apic.preempt_deadline = 1_000 + 200;
+
+    step_idle(&mut ctx);
+
+    assert_eq!(ctx.state().emulated_tsc, 1_500);
+    assert_eq!(ctx.state().devices.apic.preempt_deadline, 1_700);
+}
+
+#[test]
 fn idle_jumps_to_armed_timer() {
     let mut ctx = MockVmContext::new();
     ctx.set_emulated_tsc(1_000);

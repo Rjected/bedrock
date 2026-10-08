@@ -11,6 +11,8 @@ use super::super::exit_record::{StateHash, Xxh64Hasher};
 #[cfg(feature = "cargo")]
 use crate::exit_record::{StateHash, Xxh64Hasher};
 
+use super::random::{nonzero_seed, xorshift64};
+
 /// Default IA32_APIC_BASE value: APIC enabled, BSP, base at 0xFEE00000.
 pub const APIC_BASE_DEFAULT: u64 = 0xFEE0_0900;
 
@@ -67,6 +69,22 @@ pub struct ApicState {
     /// TSC value when timer should fire (0 = timer not running).
     /// This is internal state, not a real APIC register.
     pub timer_deadline: u64,
+    /// Instructions between deterministic forced preemptions (0 = disabled).
+    ///
+    /// Not an APIC register. Drives instruction-granular preemption: the LVT
+    /// timer vector is raised once roughly `preempt_period` guest instructions
+    /// have retired since the last forced preemption, handing the guest
+    /// scheduler a preemption point it would not otherwise have (only its
+    /// natural tick/syscall/yield entries). See `check_preempt`.
+    pub preempt_period: u64,
+    /// xorshift64 state for per-interval preemption jitter. A dedicated stream,
+    /// separate from the RDRAND PRNG, so forced preemptions never perturb the
+    /// randomness the guest observes. Never 0 while enabled.
+    pub preempt_rng: u64,
+    /// Emulated TSC of the next forced preemption (0 = not yet armed). Shifted
+    /// along with `tsc_offset` when HLT/MWAIT skips idle time, so it counts
+    /// retired guest instructions only.
+    pub preempt_deadline: u64,
 }
 
 impl Default for ApicState {
@@ -97,7 +115,37 @@ impl Default for ApicState {
             timer_initial: 0,
             timer_divide: 0,
             timer_deadline: 0,
+            preempt_period: 0,
+            preempt_rng: 0,
+            preempt_deadline: 0,
         }
+    }
+}
+
+impl ApicState {
+    /// Configure deterministic preemption: raise the LVT timer vector after a
+    /// number of retired instructions drawn from `[period, 2*period)`, the gap
+    /// re-drawn after each one from the VM's xorshift64 PRNG
+    /// ([`xorshift64`]) on its own stream seeded by `seed`, separate from the
+    /// RDRAND stream so preemptions never shift guest-visible randomness.
+    /// `period == 0` disables it. The first deadline is
+    /// armed lazily on the next injection pass (`check_preempt`), so this
+    /// needs no knowledge of the current emulated TSC.
+    pub fn configure_preempt(&mut self, period: u64, seed: u64) {
+        self.preempt_period = period;
+        self.preempt_rng = if period == 0 { 0 } else { nonzero_seed(seed) };
+        self.preempt_deadline = 0;
+    }
+
+    /// Advance the jitter stream and return the gap, in retired instructions,
+    /// to the next forced preemption: `[period, 2*period)`. Returns 0 when
+    /// preemption is disabled.
+    pub fn next_preempt_interval(&mut self) -> u64 {
+        if self.preempt_period == 0 {
+            return 0;
+        }
+        let x = xorshift64(&mut self.preempt_rng);
+        self.preempt_period.saturating_add(x % self.preempt_period)
     }
 }
 
@@ -132,6 +180,9 @@ impl StateHash for ApicState {
         h.write_u32(self.timer_initial);
         h.write_u32(self.timer_divide);
         h.write_u64(self.timer_deadline);
+        h.write_u64(self.preempt_period);
+        h.write_u64(self.preempt_rng);
+        h.write_u64(self.preempt_deadline);
         h.finish()
     }
 }

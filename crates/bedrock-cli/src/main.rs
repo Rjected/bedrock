@@ -18,7 +18,7 @@ use bedrock_vm::file_xfer::FileServer;
 use bedrock_vm::io_channel;
 use bedrock_vm::{
     load_kernel, ConsoleLine, EventCategories, EventConfig, EventStream, ExitKind, ExitStatsReport,
-    ExitTrigger, LinuxBootConfig, RdrandConfig, Vm, VmBuilder, BEDROCK_DEVICE_PATH,
+    ExitTrigger, LinuxBootConfig, PreemptConfig, RdrandConfig, Vm, VmBuilder, BEDROCK_DEVICE_PATH,
     DEFAULT_TSC_FREQUENCY,
 };
 
@@ -199,6 +199,27 @@ fn build_event_config(args: &Args) -> EventConfig {
     config
 }
 
+/// Parse a `BEDROCK_*` env var as a u64 (decimal, or hex with a `0x` prefix).
+/// `None` when unset or empty; logs and returns `None` on a parse error.
+fn env_u64(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let v = raw.trim();
+    if v.is_empty() {
+        return None;
+    }
+    let parsed = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => v.parse::<u64>(),
+    };
+    match parsed {
+        Ok(n) => Some(n),
+        Err(_) => {
+            warn!("ignoring {}: not a valid u64 ('{}')", name, v);
+            None
+        }
+    }
+}
+
 /// Parse a comma-separated list of event categories into a mask.
 fn parse_event_categories(s: &str) -> EventCategories {
     let all = EventCategories::EXIT
@@ -335,6 +356,16 @@ fn run() -> io::Result<()> {
         "Event stream enabled (categories={:#x})",
         event_config.categories
     );
+    // Instruction-granular preemption (determinism-preserving): unset or 0
+    // leaves it off. The seed defaults to the RDRAND seed so a per-fork seed
+    // sweep also sweeps preemption placement; BEDROCK_PREEMPT_SEED decouples
+    // them. Applied to this VM only, so a forked child sets its own.
+    if let Some(period) = env_u64("BEDROCK_PREEMPT_PERIOD").filter(|&p| p != 0) {
+        let seed = env_u64("BEDROCK_PREEMPT_SEED").unwrap_or(args.rdrand_seed);
+        vm.set_preempt_config(&PreemptConfig::new(period, seed))
+            .map_err(|e| io::Error::other(format!("failed to configure preemption: {}", e)))?;
+        info!("Preemption enabled (period={}, seed={:#x})", period, seed);
+    }
     if args.should_capture_exits() && args.events_jsonl.is_none() {
         warn!("--exit-capture/--single-step capture exit records but --events-jsonl is not set; they will not be saved");
     }

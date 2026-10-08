@@ -4,7 +4,7 @@
 
 use std::mem::size_of;
 
-use super::config::{EventConfig, SingleStepConfig};
+use super::config::{EventConfig, PreemptConfig, SingleStepConfig};
 use super::exit::VmExit;
 use super::stats::ExitStats;
 use crate::rdrand::RdrandConfig;
@@ -111,6 +111,10 @@ pub(crate) const BEDROCK_VM_GET_RANDOM_REQUEST: u64 =
 // _IOW('B', 15, RandomBytes) - stage the reply bytes for the pending request.
 pub(crate) const BEDROCK_VM_SET_RANDOM_BYTES: u64 =
     ioctl_iow(BEDROCK_IOC_MAGIC, 15, size_of::<RandomBytes>());
+
+// _IOW('B', 16, PreemptConfig) - configure deterministic preemption.
+pub(crate) const BEDROCK_VM_SET_PREEMPT_CONFIG: u64 =
+    ioctl_iow(BEDROCK_IOC_MAGIC, 16, size_of::<PreemptConfig>());
 
 // Device ioctls (on /dev/bedrock)
 // _IOW('B', 1, u64) - takes parent VM ID as argument

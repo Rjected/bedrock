@@ -7,10 +7,12 @@
 //! guest's emulated clock, and randomness (`rand`, seeded via getrandom) from
 //! Bedrock's controlled getrandom stream.
 
+use std::cell::Cell;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Duration;
 
+use alloy_primitives::{Address, Bytes, B256};
 use bedrock_assertions::{Assertion, Condition, Location};
 use nix::time::{clock_gettime, ClockId};
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,11 @@ use serde_json::{json, Value};
 
 pub const NODE_CONTAINER: &str = "tempo";
 const RPC_URL: &str = "http://127.0.0.1:8545";
+/// Overrides [`RPC_URL`], for running checks against a node outside Bedrock.
+const RPC_URL_ENV: &str = "TEMPO_DST_RPC";
+/// E7 reference node (compose service `tempo-ref`, `--reference`).
+pub const REFERENCE_CONTAINER: &str = "tempo-ref";
+pub const REFERENCE_RPC_URL: &str = "http://127.0.0.1:8547";
 pub const CONFIG_PATH: &str = "/bedrock/in/config.json";
 pub const EVENTS_PATH: &str = "/bedrock/events.jsonl";
 pub const ASSERTIONS_PATH: &str = "/bedrock/assertions.jsonl";
@@ -71,6 +78,13 @@ impl TrieConfig {
     }
 }
 
+/// A ChainOfBlocks contract whose hash chain E9 checks (see `cob`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct CobConfig {
+    pub address: String,
+}
+
 impl Config {
     /// The trie config with generated slots filled in.
     pub fn trie(&self) -> Option<TrieConfig> {
@@ -94,6 +108,12 @@ pub struct Config {
     pub liveness_secs: u64,
     pub load: LoadConfig,
     pub trie: Option<TrieConfig>,
+    /// TIP-20 load (`tip20::spec`) and its E8 oracle.
+    pub tip20: bool,
+    /// Chain-of-blocks load and E9.
+    pub cob: Option<CobConfig>,
+    /// The E7 reference node runs (compose service `tempo-ref`).
+    pub reference: bool,
 }
 
 impl Default for Config {
@@ -105,6 +125,9 @@ impl Default for Config {
             liveness_secs: 60,
             load: LoadConfig::default(),
             trie: None,
+            tip20: false,
+            cob: None,
+            reference: false,
         }
     }
 }
@@ -197,8 +220,34 @@ fn write_assertion(a: Assertion) {
     append_line(ASSERTIONS_PATH, &serde_json::to_string(&a).unwrap());
 }
 
+thread_local! {
+    /// `None`: the primary node ([`RPC_URL`], or `TEMPO_DST_RPC`).
+    static RPC_TARGET: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Runs `f` with this thread's node queries sent to `url` instead of the
+/// primary node (E7 asks the reference node the same questions).
+pub fn with_rpc_url<T>(url: &'static str, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<&'static str>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            RPC_TARGET.set(self.0);
+        }
+    }
+    let _restore = Restore(RPC_TARGET.replace(Some(url)));
+    f()
+}
+
+/// This thread's node RPC endpoint (see [`with_rpc_url`]).
+fn rpc_url() -> String {
+    match RPC_TARGET.get() {
+        Some(url) => url.into(),
+        None => std::env::var(RPC_URL_ENV).unwrap_or_else(|_| RPC_URL.into()),
+    }
+}
+
 fn rpc(method: &str, params: Value) -> Result<Value, String> {
-    let resp: Value = ureq::post(RPC_URL)
+    let resp: Value = ureq::post(&rpc_url())
         .timeout(Duration::from_secs(10))
         .send_json(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
         .map_err(|e| e.to_string())?
@@ -315,6 +364,145 @@ pub fn state_root(block: u64) -> Result<alloy_primitives::B256, String> {
         .map_err(|e| format!("bad stateRoot: {e}: {header}"))
 }
 
+/// `(hash, parent hash)` of canonical block `number`; `None` past the head.
+pub fn block_ref(number: u64) -> Result<Option<(B256, B256)>, String> {
+    let block = rpc(
+        "eth_getBlockByNumber",
+        json!([format!("0x{number:x}"), false]),
+    )?;
+    if block.is_null() {
+        return Ok(None);
+    }
+    let field = |name: &str| {
+        serde_json::from_value::<B256>(block[name].clone())
+            .map_err(|e| format!("bad block {name}: {e}: {block}"))
+    };
+    Ok(Some((field("hash")?, field("parentHash")?)))
+}
+
+/// `eth_call`s of `(to, data)` against the state of block `hash`, which must
+/// still be canonical (EIP-1898), in one JSON-RPC batch.
+pub fn calls_at(calls: &[(Address, Vec<u8>)], hash: B256) -> Result<Vec<Bytes>, String> {
+    let batch: Vec<Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(id, (to, data))| {
+            json!({"jsonrpc": "2.0", "id": id, "method": "eth_call", "params": [
+                {"to": to, "data": Bytes::copy_from_slice(data)},
+                {"blockHash": hash, "requireCanonical": true}
+            ]})
+        })
+        .collect();
+    let resp: Vec<Value> = ureq::post(&rpc_url())
+        .timeout(Duration::from_secs(10))
+        .send_json(Value::Array(batch))
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    let mut out = vec![None; calls.len()];
+    for r in resp {
+        if let Some(err) = r.get("error") {
+            return Err(err.to_string());
+        }
+        let id = r["id"]
+            .as_u64()
+            .map(|i| i as usize)
+            .filter(|i| *i < out.len());
+        let id = id.ok_or_else(|| format!("bad batch response: {r}"))?;
+        out[id] = Some(
+            serde_json::from_value(r["result"].clone())
+                .map_err(|e| format!("bad eth_call result: {e}: {r}"))?,
+        );
+    }
+    out.into_iter()
+        .map(|r| r.ok_or_else(|| "missing batch response".to_string()))
+        .collect()
+}
+
+/// One receipt log.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReceiptLog {
+    pub address: Address,
+    pub topics: Vec<B256>,
+    pub data: Bytes,
+}
+
+/// Logs in block `hash`'s receipts, in order (`eth_getBlockReceipts`). A
+/// reverted Tempo transaction keeps its fee-payment logs, so receipts are not
+/// filtered by status: logs a revert should have discarded are kept too.
+pub fn block_logs(hash: B256) -> Result<Vec<ReceiptLog>, String> {
+    #[derive(Deserialize)]
+    struct Receipt {
+        logs: Vec<ReceiptLog>,
+    }
+    let receipts = rpc("eth_getBlockReceipts", json!([hash]))?;
+    if receipts.is_null() {
+        return Err(format!("no receipts for block {hash}"));
+    }
+    let receipts: Vec<Receipt> = serde_json::from_value(receipts.clone())
+        .map_err(|e| format!("bad eth_getBlockReceipts: {e}: {receipts}"))?;
+    Ok(receipts.into_iter().flat_map(|r| r.logs).collect())
+}
+
+/// The 32-byte storage word at `slot` of `address` at `block`.
+pub fn storage_word(
+    address: &str,
+    slot: alloy_primitives::B256,
+    block: u64,
+) -> Result<alloy_primitives::B256, String> {
+    let value = rpc(
+        "eth_getStorageAt",
+        json!([address, slot, format!("0x{block:x}")]),
+    )?;
+    serde_json::from_value::<alloy_primitives::U256>(value.clone())
+        .map(alloy_primitives::B256::from)
+        .map_err(|e| format!("bad eth_getStorageAt: {e}: {value}"))
+}
+
+/// One `eth_getLogs` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Log {
+    pub block: u64,
+    pub block_hash: String,
+    pub data: Vec<u8>,
+}
+
+/// Logs of `address` with first topic `topic` in blocks `from..=to`, in
+/// chain order.
+pub fn logs(
+    address: &str,
+    topic: alloy_primitives::B256,
+    from: u64,
+    to: u64,
+) -> Result<Vec<Log>, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Raw {
+        block_number: alloy_primitives::U64,
+        block_hash: String,
+        data: alloy_primitives::Bytes,
+    }
+    let logs = rpc(
+        "eth_getLogs",
+        json!([{
+            "address": address,
+            "topics": [topic],
+            "fromBlock": format!("0x{from:x}"),
+            "toBlock": format!("0x{to:x}"),
+        }]),
+    )?;
+    let raw: Vec<Raw> = serde_json::from_value(logs.clone())
+        .map_err(|e| format!("bad eth_getLogs: {e}: {logs}"))?;
+    Ok(raw
+        .into_iter()
+        .map(|r| Log {
+            block: r.block_number.to(),
+            block_hash: r.block_hash.to_lowercase(),
+            data: r.data.to_vec(),
+        })
+        .collect())
+}
+
 pub fn block_hash(number: u64) -> Result<Option<String>, String> {
     let block = rpc(
         "eth_getBlockByNumber",
@@ -338,5 +526,6 @@ mod tests {
         assert_eq!(c.run_secs, 120);
         assert_eq!(c.nemesis, NemesisConfig::default());
         assert_eq!(c.trie, None);
+        assert!(!c.tip20);
     }
 }

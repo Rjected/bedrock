@@ -16,6 +16,10 @@
 # built. BASE_RETH_PATCHES="<file in the entry dir> ..." does the same with
 # patches.
 #
+# DEBUG_ASSERTIONS=1 builds with `-C debug-assertions=on`, enabling reth's and
+# Tempo's internal debug_assert! invariants (trie, sparse trie, persistence);
+# a violation panics and E1/panic reports it. It uses its own chef image.
+#
 # An entry with only base fixes (no RETH_REVERT/RETH_PATCH/RETH_FIX_PR) builds
 # one image, bedrock/tempo-localnet:<name>: e.g. known-fixes, the pinned node
 # with every known bug fixed, for campaigns hunting new ones.
@@ -27,6 +31,10 @@
 # reth crates and their dependents. CHEF_IMAGE overrides it with any cooked
 # Tempo chef image at the same revisions.
 set -euo pipefail
+# Concurrent builds of the same images (parallel hunt.sh / run.sh) collide;
+# serialize them host-wide.
+exec 9>"${BUILD_LOCK:-/tmp/bedrock-dst-build.lock}"
+flock 9
 here=$(cd "$(dirname "$0")" && pwd)
 name=${1:?usage: build.sh <regression>}
 # shellcheck source=/dev/null
@@ -35,7 +43,13 @@ read -r -a docker <<<"${DOCKER:-docker}"
 # Tempo and reth as in the pinned image (bedrock/tempo-localnet:pinned).
 tempo_rev=d3f3b28f102946dcdca1a5beb12f328f2f1bbdbd
 reth_rev=42fa3c569ad182914d26db410919d6a10c7b4859
-chef=${CHEF_IMAGE:-bedrock/tempo-chef:${tempo_rev:0:8}-${reth_rev:0:8}}
+rustflags=""
+chef_suffix=""
+if [ "${DEBUG_ASSERTIONS:-0}" = 1 ]; then
+  rustflags="-C debug-assertions=on"
+  chef_suffix="-debug-assertions"
+fi
+chef=${CHEF_IMAGE:-bedrock/tempo-chef:${tempo_rev:0:8}-${reth_rev:0:8}$chef_suffix}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tempo-regression.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -67,7 +81,8 @@ sed -i '/COPY --from=planner \/app\/recipe.json recipe.json/a COPY reth reth' "$
 sed -i '/COPY --from=planner \/app\/recipe.json recipe.json/i ENV VERGEN_IDEMPOTENT=1' "$work/tempo/Dockerfile.chef"
 
 if ! "${docker[@]}" image inspect "$chef" >/dev/null 2>&1; then
-  DOCKER_BUILDKIT=1 "${docker[@]}" build --target builder -f "$work/tempo/Dockerfile.chef" -t "$chef" "$work/tempo"
+  DOCKER_BUILDKIT=1 "${docker[@]}" build --target builder -f "$work/tempo/Dockerfile.chef" \
+    --build-arg EXTRA_RUSTFLAGS="$rustflags" -t "$chef" "$work/tempo"
 fi
 
 reth=(git -C "$work/tempo/reth" -c user.name=regression -c user.email=regression@localhost)
@@ -96,7 +111,8 @@ done
 build() {
   local tag=$name${1:+-$1}
   DOCKER_BUILDKIT=1 "${docker[@]}" build --target tempo-localnet -f "$work/tempo/Dockerfile" \
-    --build-arg CHEF_IMAGE="$chef" -t "bedrock/tempo-localnet:$tag" "$work/tempo"
+    --build-arg CHEF_IMAGE="$chef" --build-arg EXTRA_RUSTFLAGS="$rustflags" \
+    -t "bedrock/tempo-localnet:$tag" "$work/tempo"
   echo "Built bedrock/tempo-localnet:$tag (reth $("${reth[@]}" log --oneline -1 | cut -c1-80))"
 }
 # The regression's other side: built from the same base when there is one,

@@ -8,7 +8,7 @@ use bedrock_vm::events::EventKind;
 use bedrock_vm::file_store::FileWriter;
 use bedrock_vm::{
     EventCategories, EventConfig as VmEventConfig, EventStream, ExitKind, ExitTrigger,
-    RdrandConfig, Vm, VmError,
+    PreemptConfig, RdrandConfig, Vm, VmError,
 };
 
 use crate::bash::{self, BashOutput, BashTarget};
@@ -247,6 +247,30 @@ impl Branch {
             .map_err(|source| {
                 LabError::Vm(VmError::Ioctl {
                     operation: "SET_RDRAND_CONFIG",
+                    source,
+                })
+            })
+    }
+
+    /// Enable deterministic instruction-granular preemption on this branch:
+    /// the guest's timer vector is raised at the first deterministic exit
+    /// after a gap of retired guest instructions drawn from `[period,
+    /// 2*period)`, each gap re-drawn from a xorshift stream seeded by `seed`.
+    /// `period == 0` disables it. The guest scheduler then gets preemption
+    /// points inside code that never enters it on its own (spin loops,
+    /// lock-free paths), so sibling branches with different seeds reach
+    /// different interleavings while equal `(period, seed)` replay
+    /// identically.
+    ///
+    /// State lives in the branch VM's emulated APIC: the parent checkpoint and
+    /// sibling branches are unaffected, and a later fork of this branch
+    /// inherits it. Driven only by guest execution, never host time.
+    pub fn set_preempt(&mut self, period: u64, seed: u64) -> Result<()> {
+        self.vm_mut()
+            .set_preempt_config(&PreemptConfig::new(period, seed))
+            .map_err(|source| {
+                LabError::Vm(VmError::Ioctl {
+                    operation: "SET_PREEMPT_CONFIG",
                     source,
                 })
             })
