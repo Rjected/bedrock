@@ -18,6 +18,7 @@ DOCKER='sudo docker' ./workloads/tempo-dst/regressions/run.sh reth-27267 --seeds
 | `RETH_REVERT` | Merged fix in the pinned reth; buggy = pinned with it reverted, fixed = pinned |
 | `RETH_PATCH` | As `RETH_REVERT`, for fixes that no longer revert cleanly: a patch in the entry's directory |
 | `RETH_FIX_PR`, `RETH_FIX_HEAD` | Unmerged fix; buggy = pinned, fixed = pinned with the PR applied |
+| `BASE_RETH_PRS` | `"<pr>:<head> ..."`: unmerged fixes for other bugs, applied to both images so a known bug with the same signature can't fire on either side |
 | `VARIANT` | `run.sh --variant` (node flags; part of the boot prefix) |
 | `CAMPAIGN_ARGS` | Extra `bedrock-dst campaign` arguments (normally just the load) |
 | `EXPECT` | Signature prefix a buggy-image seed must fail with, and no fixed-image seed may |
@@ -27,8 +28,13 @@ DOCKER='sudo docker' ./workloads/tempo-dst/regressions/run.sh reth-27267 --seeds
 
 | Entry | Bug | Status |
 |---|---|---|
-| `reth-27267` | #27267: proof v2 emits inlined leaves as standalone proof nodes (`eth_getMultiProof`) | Defined; not run yet |
-| `reth-26843` | #26843: proof v2 drops a clean sibling on branch collapse under a prefix set (historical `eth_getMultiProof`) | Defined; not run yet. Patch also reverts #27634 and rolls back four later proof v2 commits |
-| `reth-27615` | #27615: range trie changesets miss nodes created and deleted while the trie frontier lags (historical proofs, disk unwinds) | Defined (`--variant masking`); not run yet |
+| `reth-27267` | #27267: proof v2 emits inlined leaves as standalone proof nodes (`eth_getMultiProof`) | First run (pinned base, 8 seeds) inconclusive: #27615 hit both sides (1/8 each). Now on a #27615 base |
+| `reth-26843` | #26843: proof v2 drops a clean sibling on branch collapse under a prefix set (historical `eth_getMultiProof`) | Defined, on a #27615 base; not run yet. Patch also reverts #27634 and rolls back four later proof v2 commits |
+| `reth-27615` | #27615: range trie changesets miss nodes created and deleted while the trie frontier lags (historical proofs, disk unwinds) | **Found organically**: the generic generated load failed E5/E6 untargeted-*/multiproof-* on the pinned node in its first smoke campaign (seed 1). Root-caused to #27615 (reth unit test: fails at 42fa3c5, passes with the PR); plain-Docker repro on branch `dst/repro-historical-proof` |
 | #27270 | Sparse-trie reuse across forks with identical state roots; publishing abandoned jobs' tries | Not defined: needs forks. Tempo disables the engine API, so this needs a fork driver |
-| #27614 | Missing prefix invalidation for in-memory fork keys | Not defined: unreachable at the pin since #27634; needs that reverted plus a fork driver |
+| #27614 | Missing prefix invalidation for in-memory fork keys | Not defined: unreachable at the pin since #27634 (every overlay uses trie changesets); needs that reverted plus a fork driver. Not what the generated load hits: the reth unit test still fails with only #27614 applied and passes with only #27615's own changes |
+
+#27615's branch is stacked on #27614's, so applying it (as `RETH_FIX_PR` or
+in `BASE_RETH_PRS`) also brings #27614's `storage-overlay/src/builder.rs`
+change. That change only affects the overlay path without trie changesets,
+which is unused at the pin.
