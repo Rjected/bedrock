@@ -18,9 +18,12 @@ mkdir -p "$out"
 DOCKER="${DOCKER:-docker}" "$here/../build.sh" >/dev/null
 "${docker[@]}" save "$image" bedrock/tempo-txgen:latest bedrock/tempo-dst-ready:latest \
   bedrock/tempo-dst-trie:latest > "$out/images.tar"
+# Build the Nix inputs once; the shards then only hit the store cache.
+nix=${NIX:-/nix/var/nix/profiles/default/bin/nix}
+(cd "$here/../../.." && $nix build .#bedrock-dst .#guestKernel .#podmanInitrd --no-link)
 for i in $(seq 0 $((shards - 1))); do
   first=$((start + i * seeds))
-  IMAGES="$out/images.tar" "$here/../run.sh" --variant "$variant" --node-image "$image" \
+  RUN_DIR="$out/shard-$i-inputs" IMAGES="$out/images.tar" "$here/../run.sh" --variant "$variant" --node-image "$image" \
     --seed-start "$first" --seeds "$seeds" --out "$out/shard-$i" "$@" > "$out/shard-$i.log" 2>&1 &
 done
 wait || true
