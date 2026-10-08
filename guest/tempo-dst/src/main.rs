@@ -18,6 +18,7 @@ mod finalize;
 mod nemesis;
 mod oracle;
 mod start;
+mod trie_ref;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {

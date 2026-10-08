@@ -36,11 +36,31 @@ guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 | `E1/trie-diff-*` | `--engine.state-root-task-compare-updates`: sparse-trie task vs. regular state-root updates differ |
 | `E2/head-stalled` | Head did not advance for `liveness_secs` while the node was up |
 | `E3/finalized-block-changed`, `E3/head-below-finalized` | The block the node reported finalized (`eth_getBlockByNumber("finalized")`) before a kill keeps its hash after the restart, and the head gets back to it. Unfinalized blocks may legitimately be rebuilt: reth unwinds to its persisted state-trie frontier, which trails the `Saved range of blocks` frontier (observed: saved 318, unwound to 308, finalized 269) |
+| `E5/storage-root-mismatch` | `--load trie`: at every block, the RawStorage contract's `storageHash` (`eth_getProof`) equals a root rebuilt from its slot values by an independent MPT (`guest/tempo-dst/src/trie_ref.rs`, no reth code) |
 | `E4/graceful-stop`, `E4/re-execute` | At the end of the run, the node stops cleanly, and `tempo re-execute` over `[1, head]` from its datadir agrees |
 | `container <name> exit code is zero` | workload-monitor: no unexplained container death |
 | `D/guest-exited` | The guest VM stopped mid-run (kernel panic, shutdown) |
-| `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed` | Coverage (Sometimes): the fault, crash-recovery unwind, and recovery paths actually ran |
-| `C/missing/S/load-included` | Required coverage: no block produced during the run included a transaction, so the load never landed and the run proves nothing |
+| `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed`, `S/trie-checked`, `S/trie-all-slots-live` | Coverage (Sometimes): the fault, crash-recovery unwind, and recovery paths actually ran |
+
+## Trie load (`--load trie`)
+
+`trie/RawStorage.sol` writes exactly `sstore(slot, value)`, so its storage trie
+is shaped only by the workload. `trie/trie.yaml` (txgen) deploys it from dev
+account 0 (address `0x5FbDB2315678afecb367f032d93F642f64180aa3`) and runs
+insert/update/delete sequences on raw slots whose Keccak paths share prefixes:
+A = 544 (`120…`), B = 646 (`121…`), C = 131 (`13…`), D = 0 (`2…`).
+
+| Sequence | Steps |
+|---|---|
+| `collapse_abcd` | A, B, C, D inserted (leaf → extension splits → root branch), A updated, then D, C, B, A deleted (branch → extension → leaf → empty) |
+| `split_reverse` | D, C, B, A inserted, then deleted in insertion order |
+| `delete_reinsert` | A/B branch collapses to a leaf, then re-splits |
+| `noop_writes` | zero-writes to empty slots, same-value rewrites |
+
+Every sequence starts and ends empty. One sender keeps steps in nonce order,
+and ~5 tx/s puts about one step in each 200 ms block, so each block is one
+trie mutation. Rebuild `raw-storage.json` with
+`solc --combined-json abi,bin --optimize RawStorage.sol` (0.8.33).
 
 ## Running
 
@@ -53,6 +73,7 @@ runtime) never receive timer interrupts.
 DOCKER='sudo docker' ./workloads/tempo-dst/build.sh
 ./workloads/tempo-dst/run.sh --seeds 20 --run-secs 180 --out dst-out
 ./workloads/tempo-dst/run.sh --variant no-prewarm --seeds 20 --out dst-out-noprewarm
+./workloads/tempo-dst/run.sh --load trie --seeds 20 --out dst-out-trie
 bedrock-dst replay dst-out/seed-3
 ```
 
@@ -92,7 +113,7 @@ draft PR that names it.
 - [ ] **D1** Spike: tuner (`tempoxyz/tuner`) `StructureTxGenerator` → serializable tx program
 - [ ] **D2** Genesis/fixture mapping: tuner fixture EOAs to dev accounts (mnemonic `test … junk`)
 - [ ] **D3** Lowering + in-guest submitter: resolve nonces at submit time, sign Tempo AA and EVM envelopes, record accepted/rejected/unknown
-- [ ] **D4** Trie-shaping program: raw-storage insert/update/delete on slots 544, 646, 131, 0 across blocks (design doc §7)
+- [x] **D4** Trie-shaping load (`--load trie`): raw-storage insert/update/delete on slots 544, 646, 131, 0, one step per block, checked by E5
 - [ ] **D5** Coverage-guided mutation with tuner's mutator (needs G3)
 
 ### E: Oracles (`guest/tempo-dst`)

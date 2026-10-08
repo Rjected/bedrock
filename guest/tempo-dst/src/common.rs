@@ -47,6 +47,19 @@ pub struct LoadConfig {
     pub seed: u64,
     pub count: u64,
     pub tps: u64,
+    /// Load image; empty means the plain txgen image.
+    pub image: String,
+    /// txgen spec inside the image; empty means the image's default.
+    pub spec: String,
+}
+
+/// A RawStorage contract whose storage root E5 checks against an
+/// independent reference at every block.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct TrieConfig {
+    pub address: String,
+    pub slots: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -58,6 +71,7 @@ pub struct Config {
     /// Guest seconds the head may stall before liveness fails.
     pub liveness_secs: u64,
     pub load: LoadConfig,
+    pub trie: Option<TrieConfig>,
 }
 
 impl Default for Config {
@@ -67,6 +81,7 @@ impl Default for Config {
             nemesis: NemesisConfig::default(),
             liveness_secs: 60,
             load: LoadConfig::default(),
+            trie: None,
         }
     }
 }
@@ -211,6 +226,46 @@ pub fn finalized_block() -> Result<Option<(u64, String)>, String> {
     Ok(Some((number, hash.to_lowercase())))
 }
 
+fn word(v: &Value) -> Result<[u8; 32], String> {
+    let s = v.as_str().ok_or_else(|| format!("not a hex word: {v}"))?;
+    let s = s.trim_start_matches("0x");
+    let s = format!("{s:0>64}");
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+/// `(slot, value)` words of `address` at `block`.
+pub fn storage_at(
+    address: &str,
+    slots: &[u64],
+    block: u64,
+) -> Result<crate::trie_ref::Storage, String> {
+    slots
+        .iter()
+        .map(|slot| {
+            let tag = format!("0x{block:x}");
+            let value = rpc(
+                "eth_getStorageAt",
+                json!([address, format!("0x{slot:x}"), tag]),
+            )?;
+            Ok((word(&json!(format!("0x{slot:x}")))?, word(&value)?))
+        })
+        .collect()
+}
+
+/// The node's storage root for `address` at `block` (`eth_getProof`).
+pub fn storage_hash(address: &str, block: u64) -> Result<String, String> {
+    let proof = rpc("eth_getProof", json!([address, [], format!("0x{block:x}")]))?;
+    proof
+        .get("storageHash")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase)
+        .ok_or_else(|| format!("no storageHash: {proof}"))
+}
+
 pub fn block_hash(number: u64) -> Result<Option<String>, String> {
     let block = rpc(
         "eth_getBlockByNumber",
@@ -233,5 +288,6 @@ mod tests {
         assert_eq!(c.liveness_secs, 9);
         assert_eq!(c.run_secs, 120);
         assert_eq!(c.nemesis, NemesisConfig::default());
+        assert_eq!(c.trie, None);
     }
 }

@@ -56,13 +56,19 @@ pub fn start_load(load: &LoadConfig, generation: u64) -> io::Result<()> {
     if load.count == 0 {
         return Ok(());
     }
+    let image = if load.image.is_empty() {
+        "bedrock/tempo-txgen:latest"
+    } else {
+        &load.image
+    };
     let status = Command::new("podman")
         .args(["run", "-d", "--name", "txgen", "--network", "host"])
         .args(["-e", "BEDROCK=0"])
         .args(["-e", &format!("TXGEN_SEED={}", load.seed + generation)])
         .args(["-e", &format!("TXGEN_COUNT={}", load.count)])
         .args(["-e", &format!("TXGEN_TPS={}", load.tps)])
-        .args(["--entrypoint", "/bin/bash", "bedrock/tempo-txgen:latest"])
+        .args(["-e", &format!("TXGEN_SPEC={}", load.spec)])
+        .args(["--entrypoint", "/bin/bash", image])
         .args(["-c", "bash /workload/run.sh || true"])
         .stdout(Stdio::null())
         .status()?;

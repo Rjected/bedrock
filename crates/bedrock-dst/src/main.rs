@@ -76,6 +76,19 @@ enum Cmd {
     Replay { run_dir: PathBuf },
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Load {
+    Transfers,
+    Trie,
+}
+
+/// RawStorage deployed by workloads/tempo-dst/trie/trie.yaml: dev account 0's
+/// first transaction on a fresh chain (CREATE address of nonce 0).
+const TRIE_CONTRACT: &str = "0x5fbdb2315678afecb367f032d93f642f64180aa3";
+/// Raw slots whose keccak paths share prefixes: 120.., 121.., 13.., 2...
+const TRIE_SLOTS: [u64; 4] = [544, 646, 131, 0];
+
 #[derive(ClapArgs, Clone, Serialize, Deserialize)]
 struct CampaignArgs {
     #[arg(long)]
@@ -129,6 +142,13 @@ struct CampaignArgs {
     txgen_count: u64,
     #[arg(long, default_value_t = 100)]
     txgen_tps: u64,
+    /// Load: `transfers` (pathUSD transfers) or `trie` (RawStorage
+    /// insert/delete sequences, checked by E5; uses --trie-tps).
+    #[arg(long, value_enum, default_value_t = Load::Transfers)]
+    load: Load,
+    /// Trie load rate; ~5 tx/s puts about one step in each 200 ms block.
+    #[arg(long, default_value_t = 5)]
+    trie_tps: u64,
     #[arg(long, default_value = "dst-out")]
     out: PathBuf,
 }
@@ -249,11 +269,25 @@ fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
             "max_kills": args.max_kills,
             "min_gap_secs": args.min_gap_secs,
         },
-        "load": {
-            "seed": args.workload_seed,
-            "count": args.txgen_count,
-            "tps": args.txgen_tps,
+        "load": match args.load {
+            Load::Transfers => json!({
+                "seed": args.workload_seed,
+                "count": args.txgen_count,
+                "tps": args.txgen_tps,
+            }),
+            Load::Trie => json!({
+                "seed": args.workload_seed,
+                // Enough steps to outlast the run.
+                "count": (args.run_secs + 60) * args.trie_tps,
+                "tps": args.trie_tps,
+                "image": "bedrock/tempo-dst-trie:latest",
+                "spec": "/workload/trie/trie.yaml",
+            }),
         },
+        "trie": (args.load == Load::Trie).then(|| json!({
+            "address": TRIE_CONTRACT,
+            "slots": TRIE_SLOTS,
+        })),
     })
 }
 
@@ -445,6 +479,34 @@ mod tests {
         assert_eq!(c["seed"], 7);
         assert_eq!(c["workload_seed"], 99);
         assert_eq!(c["nemesis"]["enabled"], false);
+        assert!(!c.to_string().contains('\''));
+        assert_eq!(c["trie"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn trie_load_configures_image_and_oracle() {
+        let Cmd::Campaign(args) = Cli::parse_from([
+            "x",
+            "campaign",
+            "--vmlinux",
+            "k",
+            "--initrd",
+            "i",
+            "--compose",
+            "c",
+            "--images",
+            "t",
+            "--load",
+            "trie",
+        ])
+        .cmd
+        else {
+            unreachable!()
+        };
+        let c = guest_config(&args, 3);
+        assert_eq!(c["load"]["image"], "bedrock/tempo-dst-trie:latest");
+        assert_eq!(c["load"]["tps"], 5);
+        assert_eq!(c["trie"]["slots"], serde_json::json!([544, 646, 131, 0]));
         assert!(!c.to_string().contains('\''));
     }
 }

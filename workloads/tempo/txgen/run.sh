@@ -31,7 +31,7 @@ done
 test "${chain:-}" = 0x539
 # Wait for the first produced block so setup is outside the benchmark window.
 sleep 2
-txgen-tempo generate -s /workload/workload.yaml -n "$count" --seed "$seed" --rpc "$rpc" \
+txgen-tempo generate -s "${TXGEN_SPEC:-/workload/workload.yaml}" -n "$count" --seed "$seed" --rpc "$rpc" \
   -o /results/transactions.ndjson
 bench send -i /results/transactions.ndjson --rpc-url "$rpc" --tps "$tps" \
   --max-concurrent 16 --max-pending 200 --retries 0 \

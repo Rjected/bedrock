@@ -35,6 +35,9 @@ services:
       # Differential oracle: compare sparse-trie task updates against the
       # regular state root and log "Difference in ... trie updates".
       - --engine.state-root-task-compare-updates
+      # E5 reads storage proofs a few blocks behind the tip after restarts.
+      - --rpc.eth-proof-window
+      - "64"
       - --color
       - never
     environment:
