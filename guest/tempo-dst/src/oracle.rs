@@ -10,10 +10,17 @@
 //! - E6 proofs: that `eth_getProof` response verifies against the block's
 //!   state root, and proves the values `eth_getStorageAt` returns (see
 //!   `trie_ref`).
+//! - E8 TIP-20 ledger: holders' balances conserve the supply and are explained
+//!   by each block's Transfer logs; pinned snapshots read the same later (see
+//!   `tip20`).
 //! - E3 durability: the block the node reported finalized before a kill keeps
 //!   its hash after the restart, and the head returns to it. Unfinalized blocks
 //!   may be rebuilt: reth's crash recovery unwinds to its persisted state-trie
 //!   frontier, which can trail the "Saved range of blocks" frontier.
+//! - E9 chain of blocks: a ChainOfBlocks contract's hash chain, rebuilt from
+//!   receipts, matches its state at every block and survives restarts (see
+//!   `cob`).
+//! - E7 reference node: see `reference`.
 //!
 //! [`Oracle`] is a pure state machine; [`run`] feeds it from the guest.
 
@@ -24,13 +31,15 @@ use std::time::Duration;
 
 use bedrock_assertions::Condition;
 
-use crate::common::{self, Config, DstEvent, TrieConfig, NODE_CONTAINER};
+use crate::cob::CobOracle;
+use crate::common::{self, CobConfig, Config, DstEvent, TrieConfig, NODE_CONTAINER};
+use crate::tip20::{self, BlockRef, Ledger, Tip20Chain, Tip20Oracle, Transfer};
 use crate::trie_ref::{self, AccountProof, ProofError};
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 
 /// Signatures for log lines that indicate a bug on their own. Message strings
 /// are taken from reth at Tempo's pinned rev (42fa3c5); see the README table.
-const LOG_PATTERNS: &[(&str, &str)] = &[
+pub(crate) const LOG_PATTERNS: &[(&str, &str)] = &[
     ("E1/panic", "panicked at"),
     ("E1/state-root-mismatch", "mismatched block state root"),
     ("E1/receipt-root-mismatch", "receipt root mismatch"),
@@ -79,7 +88,7 @@ pub struct Finding {
 }
 
 /// Strips ANSI escape sequences reth may emit.
-fn strip_ansi(line: &str) -> String {
+pub(crate) fn strip_ansi(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars();
     while let Some(c) = chars.next() {
@@ -143,7 +152,7 @@ pub enum Verdict {
     Sometimes(bool, Finding),
 }
 
-fn finding(signature: &str, detail: String) -> Finding {
+pub(crate) fn finding(signature: &str, detail: String) -> Finding {
     Finding {
         signature: signature.into(),
         detail,
@@ -151,7 +160,7 @@ fn finding(signature: &str, detail: String) -> Finding {
 }
 
 /// Node queries; `Err` while the node is unreachable.
-pub trait Chain {
+pub trait Chain: Tip20Chain {
     fn head(&mut self) -> Result<u64, String>;
     fn hash(&mut self, number: u64) -> Result<Option<String>, String>;
     fn finalized(&mut self) -> Result<Option<(u64, String)>, String>;
@@ -172,22 +181,36 @@ pub trait Chain {
     ) -> Result<AccountProof, String>;
     fn state_root(&mut self, block: u64) -> Result<B256, String>;
     fn tx_count(&mut self, block: u64) -> Result<u64, String>;
+    /// `eth_getStorageAt` for a full 32-byte slot (E9's mapping slots).
+    fn storage_word(&mut self, _address: &str, _slot: B256, _block: u64) -> Result<B256, String> {
+        Err("storage_word unsupported".into())
+    }
+    /// `eth_getLogs` of `address` with first topic `topic` in `from..=to`.
+    fn logs(
+        &mut self,
+        _address: &str,
+        _topic: B256,
+        _from: u64,
+        _to: u64,
+    ) -> Result<Vec<common::Log>, String> {
+        Err("logs unsupported".into())
+    }
 }
 
 /// Blocks E5/E6 check per tick, newest last; older unchecked blocks are skipped.
-const TRIE_BLOCKS_PER_TICK: u64 = 10;
+pub(crate) const TRIE_BLOCKS_PER_TICK: u64 = 10;
 
 /// E5/E6 also re-check two older blocks each tick, at depths that sweep these
 /// ranges: shallow blocks straddle the persisted state-trie frontier (state
 /// masking keeps it behind the persisted block tip); deep ones are served from
 /// the persisted trie with the newer blocks reverted in an overlay. Needs
 /// `--rpc.eth-proof-window` above the deep range.
-const TRIE_SHALLOW_DEPTHS: (u64, u64) = (2, 48);
-const TRIE_DEEP_DEPTHS: (u64, u64) = (49, 250);
+pub(crate) const SHALLOW_DEPTHS: (u64, u64) = (2, 48);
+pub(crate) const DEEP_DEPTHS: (u64, u64) = (49, 250);
 
 /// The `tick`th depth in `lo..=hi`; a stride coprime to the range length
 /// visits every depth once per cycle.
-fn sweep_depth((lo, hi): (u64, u64), tick: u64) -> u64 {
+pub(crate) fn sweep_depth((lo, hi): (u64, u64), tick: u64) -> u64 {
     let len = hi - lo + 1;
     let stride = (1..len)
         .rev()
@@ -205,7 +228,7 @@ fn gcd(a: u64, b: u64) -> u64 {
 }
 
 /// `(signature, detail)`.
-type Failure = (String, String);
+pub(crate) type Failure = (String, String);
 
 /// E5 and E6 for one block: the contract's live slots, and failures as
 /// `(signature, detail)`; `None` while the node is unreachable.
@@ -310,6 +333,10 @@ pub struct Oracle {
     trie_ticks: u64,
     /// A block produced during the run included a transaction.
     load_seen: bool,
+    /// E8, with the TIP-20 load.
+    tip20: Option<Tip20Oracle>,
+    /// E9 over the chain-of-blocks contract.
+    cob: Option<CobOracle>,
 }
 
 impl Oracle {
@@ -332,7 +359,19 @@ impl Oracle {
             trie_seen_check: false,
             trie_ticks: 0,
             load_seen: false,
+            tip20: None,
+            cob: None,
         }
+    }
+
+    pub fn with_tip20(mut self, enabled: bool) -> Oracle {
+        self.tip20 = enabled.then(Tip20Oracle::default);
+        self
+    }
+
+    pub fn with_cob(mut self, cob: Option<CobConfig>) -> Oracle {
+        self.cob = cob.map(|c| CobOracle::new(&c.address));
+        self
     }
 
     pub fn with_trie(mut self, trie: Option<TrieConfig>) -> Oracle {
@@ -341,7 +380,7 @@ impl Oracle {
     }
 
     /// E5 and E6 for blocks after the last checked one, up to `head`, plus a
-    /// shallow and a deep older block (see [`TRIE_SHALLOW_DEPTHS`]). A rewind
+    /// shallow and a deep older block (see [`SHALLOW_DEPTHS`]). A rewind
     /// (head below the last checked block) re-checks the rebuilt blocks.
     fn check_trie(&mut self, chain: &mut impl Chain, head: u64) -> Vec<Verdict> {
         let mut out = Vec::new();
@@ -354,7 +393,7 @@ impl Oracle {
         let first = (self.trie_checked + 1).max(head.saturating_sub(TRIE_BLOCKS_PER_TICK - 1));
         let tick = self.trie_ticks;
         self.trie_ticks += 1;
-        let older: Vec<u64> = [TRIE_SHALLOW_DEPTHS, TRIE_DEEP_DEPTHS]
+        let older: Vec<u64> = [SHALLOW_DEPTHS, DEEP_DEPTHS]
             .into_iter()
             .filter_map(|range| head.checked_sub(sweep_depth(range, tick)))
             .filter(|b| *b > 0 && *b < first)
@@ -395,6 +434,9 @@ impl Oracle {
 
     pub fn on_log(&mut self, line: &str) -> Vec<Verdict> {
         if let Some(saved) = parse_saved(line) {
+            if let Some(t) = &mut self.tip20 {
+                t.on_saved(saved.0);
+            }
             self.saved = Some(saved);
             return Vec::new();
         }
@@ -410,6 +452,9 @@ impl Oracle {
         match ev.kind.as_str() {
             "kill" => {
                 self.down = true;
+                if let Some(cob) = self.cob.as_mut() {
+                    cob.on_kill();
+                }
                 self.pending_finalized = self.finalized.clone();
                 self.pending_saved = self.saved.clone();
                 self.head_at_kill = self.head;
@@ -423,6 +468,12 @@ impl Oracle {
             }
             "restart" => {
                 self.down = false;
+                if let Some(t) = &mut self.tip20 {
+                    t.on_restart();
+                }
+                if let Some(cob) = self.cob.as_mut() {
+                    cob.on_restart();
+                }
                 self.restart_ns = now_ns;
                 self.progress_ns = now_ns;
                 self.stall_reported = false;
@@ -466,6 +517,12 @@ impl Oracle {
             }
             self.head = Some(head);
             out.extend(self.check_trie(chain, head));
+            if let Some(t) = &mut self.tip20 {
+                out.extend(t.tick(chain, head));
+            }
+            if let Some(cob) = self.cob.as_mut() {
+                out.extend(cob.tick(chain, head));
+            }
             if let Ok(Some(f)) = chain.finalized() {
                 self.finalized = Some(f);
             }
@@ -534,7 +591,7 @@ impl Oracle {
     }
 }
 
-struct RpcChain;
+pub(crate) struct RpcChain;
 
 impl Chain for RpcChain {
     fn head(&mut self) -> Result<u64, String> {
@@ -571,9 +628,88 @@ impl Chain for RpcChain {
     fn tx_count(&mut self, block: u64) -> Result<u64, String> {
         common::tx_count(block)
     }
+    fn storage_word(&mut self, address: &str, slot: B256, block: u64) -> Result<B256, String> {
+        common::storage_word(address, slot, block)
+    }
+    fn logs(
+        &mut self,
+        address: &str,
+        topic: B256,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<common::Log>, String> {
+        common::logs(address, topic, from, to)
+    }
 }
 
-fn record(verdicts: Vec<Verdict>) {
+fn word(out: &[u8]) -> Result<U256, String> {
+    (out.len() == 32)
+        .then(|| U256::from_be_slice(out))
+        .ok_or_else(|| format!("expected one word, got {} bytes", out.len()))
+}
+
+fn balance_of(token: Address, holder: &Address) -> (Address, Vec<u8>) {
+    // balanceOf(address)
+    let mut data = vec![0x70, 0xa0, 0x82, 0x31];
+    data.extend_from_slice(holder.into_word().as_slice());
+    (token, data)
+}
+
+fn total_supply(token: Address) -> (Address, Vec<u8>) {
+    (token, vec![0x18, 0x16, 0x0d, 0xdd])
+}
+
+impl Tip20Chain for RpcChain {
+    fn block(&mut self, number: u64) -> Result<Option<BlockRef>, String> {
+        Ok(common::block_ref(number)?.map(|(hash, parent)| BlockRef {
+            number,
+            hash,
+            parent,
+        }))
+    }
+    fn balances(
+        &mut self,
+        token: Address,
+        holders: &[Address],
+        block: B256,
+    ) -> Result<Vec<U256>, String> {
+        let calls: Vec<_> = holders.iter().map(|h| balance_of(token, h)).collect();
+        common::calls_at(&calls, block)?
+            .iter()
+            .map(|r| word(r))
+            .collect()
+    }
+    fn supply(&mut self, token: Address, block: B256) -> Result<U256, String> {
+        word(&common::calls_at(&[total_supply(token)], block)?[0])
+    }
+    fn transfers(&mut self, token: Address, block: B256) -> Result<Vec<Transfer>, String> {
+        Ok(common::block_logs(block)?
+            .iter()
+            .filter(|l| l.address == token)
+            .filter_map(|l| Transfer::from_log(&l.topics, &l.data))
+            .collect())
+    }
+    /// One batch: the supply and every balance at once.
+    fn ledger(&mut self, block: B256) -> Result<Ledger, String> {
+        let calls: Vec<_> = std::iter::once(total_supply(tip20::TOKEN))
+            .chain(tip20::HOLDERS.iter().map(|h| balance_of(tip20::TOKEN, h)))
+            .collect();
+        let words = common::calls_at(&calls, block)?
+            .iter()
+            .map(|r| word(r))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Ledger {
+            supply: words[0],
+            balances: tip20::HOLDERS
+                .iter()
+                .copied()
+                .zip(words[1..].iter().copied())
+                .collect(),
+        })
+    }
+}
+
+pub(crate) fn record(verdicts: Vec<Verdict>) {
     for v in verdicts {
         match v {
             Verdict::Always(ok, f) => {
@@ -586,12 +722,12 @@ fn record(verdicts: Vec<Verdict>) {
     }
 }
 
-/// Follows the node's container output across restarts; journald keeps one
-/// stream per container name.
-fn follow_logs(tx: mpsc::Sender<String>) {
+/// Follows a container's output across restarts; journald keeps one stream
+/// per container name.
+pub(crate) fn follow_logs(container: &str, tx: mpsc::Sender<String>) {
     let child = Command::new("journalctl")
         .args(["-f", "-o", "cat", "--no-tail"])
-        .arg(format!("CONTAINER_NAME={NODE_CONTAINER}"))
+        .arg(format!("CONTAINER_NAME={container}"))
         .stdout(Stdio::piped())
         .spawn();
     let Ok(mut child) = child else {
@@ -609,8 +745,12 @@ fn follow_logs(tx: mpsc::Sender<String>) {
 pub fn run() {
     let cfg = Config::load();
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || follow_logs(tx));
-    let mut oracle = Oracle::new(cfg.liveness_secs, common::guest_time_ns()).with_trie(cfg.trie());
+    std::thread::spawn(move || follow_logs(NODE_CONTAINER, tx));
+    let mut oracle = Oracle::new(cfg.liveness_secs, common::guest_time_ns())
+        .with_trie(cfg.trie())
+        .with_tip20(cfg.tip20)
+        .with_cob(cfg.cob.clone());
+    let mut reference = crate::reference::start(&cfg);
     let mut chain = RpcChain;
     let mut seen_events = 0;
     loop {
@@ -621,11 +761,15 @@ pub fn run() {
             out.extend(oracle.on_log(&line));
         }
         let events = common::read_events();
-        for ev in events.iter().skip(seen_events) {
+        let new_events = events.get(seen_events..).unwrap_or_default();
+        for ev in new_events {
             out.extend(oracle.on_event(ev, now));
         }
         seen_events = events.len();
         out.extend(oracle.tick(&mut chain, now));
+        if let Some(r) = reference.as_mut() {
+            out.extend(r.step(new_events, now));
+        }
         record(out);
     }
 }
@@ -649,6 +793,22 @@ mod tests {
         tx_counts: std::collections::HashMap<u64, u64>,
         /// eth_getMultiProof responses that differ from eth_getProof's.
         multiproofs: std::collections::HashMap<u64, AccountProof>,
+    }
+
+    /// E8 is exercised in `tip20`'s tests; here the token is never readable.
+    impl Tip20Chain for FakeChain {
+        fn block(&mut self, _: u64) -> Result<Option<BlockRef>, String> {
+            Ok(None)
+        }
+        fn balances(&mut self, _: Address, _: &[Address], _: B256) -> Result<Vec<U256>, String> {
+            Err("no token".into())
+        }
+        fn supply(&mut self, _: Address, _: B256) -> Result<U256, String> {
+            Err("no token".into())
+        }
+        fn transfers(&mut self, _: Address, _: B256) -> Result<Vec<Transfer>, String> {
+            Err("no token".into())
+        }
     }
 
     impl Chain for FakeChain {
@@ -827,7 +987,7 @@ mod tests {
 
     #[test]
     fn depth_sweep_visits_every_depth() {
-        for range in [TRIE_SHALLOW_DEPTHS, TRIE_DEEP_DEPTHS] {
+        for range in [SHALLOW_DEPTHS, DEEP_DEPTHS] {
             let len = range.1 - range.0 + 1;
             let seen: std::collections::BTreeSet<u64> =
                 (0..len).map(|t| sweep_depth(range, t)).collect();

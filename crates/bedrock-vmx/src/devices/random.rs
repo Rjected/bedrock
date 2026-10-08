@@ -39,6 +39,28 @@ pub enum RdrandMode {
     ExitToUserspace,
 }
 
+/// One step of the xorshift64 PRNG behind every seeded stream in the VM (the
+/// RDRAND/GET_RANDOM device here, and the APIC's preemption jitter). Each
+/// stream keeps its own state, so drawing from one never perturbs another.
+/// `state` must be non-zero (0 is a fixed point); see [`nonzero_seed`].
+pub fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// A usable xorshift64 state for `seed` (0 would never advance).
+pub fn nonzero_seed(seed: u64) -> u64 {
+    if seed == 0 {
+        1
+    } else {
+        seed
+    }
+}
+
 /// Maximum bytes served by a single `HYPERCALL_GET_RANDOM`. Larger guest reads
 /// are split into chunks of this size by the guest loop, so one request never
 /// needs an unbounded reply buffer. 256 bytes covers the common cases (key
@@ -98,7 +120,7 @@ impl RandomState {
     pub fn seeded_rng(seed: u64) -> Self {
         Self {
             mode: RdrandMode::SeededRng,
-            seed: if seed == 0 { 1 } else { seed },
+            seed: nonzero_seed(seed),
             ..Self::default()
         }
     }
@@ -115,19 +137,14 @@ impl RandomState {
     /// xorshift seed and clears any staged value / in-flight request.
     pub fn configure(&mut self, mode: RdrandMode, seed: u64) {
         self.mode = mode;
-        self.seed = if seed == 0 { 1 } else { seed };
+        self.seed = nonzero_seed(seed);
         self.pending_value = None;
         self.clear_request();
     }
 
     /// Advance the xorshift64 PRNG and return the next value.
     pub fn next_seeded_u64(&mut self) -> u64 {
-        let mut x = self.seed;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.seed = x;
-        x
+        xorshift64(&mut self.seed)
     }
 
     // --- RDRAND / RDSEED ---

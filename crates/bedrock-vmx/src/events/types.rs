@@ -132,7 +132,9 @@ impl EventKind {
 pub enum InjectSource {
     /// Emulated APIC timer.
     Timer = 0,
-    // future: SerialThre = 1, ...
+    /// Deterministic forced preemption (LVT timer vector raised by
+    /// `check_preempt`, not by the APIC timer counting down).
+    Preempt = 1,
 }
 
 /// Payload for an [`EventKind::Inject`] record.

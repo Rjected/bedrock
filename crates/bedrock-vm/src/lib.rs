@@ -126,6 +126,7 @@ pub use rdrand::{RdrandConfig, RdrandExitInfo, RdrandMode, RdrandValue};
 pub use registers::*;
 pub use vm::{
     EventConfig, ExitKind, ExitStatEntry, ExitStats, ExitStatsReport, ExitTrigger,
-    FeedbackBufferInfo, IoctlStats, SingleStepConfig, Vm, VmExit, BEDROCK_DEVICE_PATH,
-    DEFAULT_MEMORY_SIZE, DEFAULT_TSC_FREQUENCY, EVENT_BUFFER_SIZE, EXIT_REASON_CHECKPOINT,
+    FeedbackBufferInfo, IoctlStats, PreemptConfig, SingleStepConfig, Vm, VmExit,
+    BEDROCK_DEVICE_PATH, DEFAULT_MEMORY_SIZE, DEFAULT_TSC_FREQUENCY, EVENT_BUFFER_SIZE,
+    EXIT_REASON_CHECKPOINT,
 };

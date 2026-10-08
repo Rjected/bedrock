@@ -7,6 +7,7 @@
 //! - E4: stops the node gracefully and re-executes `[1, head]` from its datadir
 //!   in a fresh container, which checks receipts, gas, and changesets against
 //!   what the node persisted.
+//! - E7: stops the reference node (if any) gracefully first.
 
 use std::path::Path;
 use std::process::Command;
@@ -15,7 +16,7 @@ use std::time::Duration;
 use bedrock_assertions::Condition;
 use serde_json::json;
 
-use crate::common::{self, NODE_CONTAINER};
+use crate::common::{self, Config, NODE_CONTAINER, REFERENCE_CONTAINER};
 
 fn sh(cmd: &str) -> (bool, String) {
     match Command::new("sh").args(["-c", cmd]).output() {
@@ -52,6 +53,15 @@ pub fn run() {
         "podman inspect {NODE_CONTAINER} --format '{{{{range .Mounts}}}}{{{{if eq .Destination \"/data\"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}'"
     ));
     let (image, volume) = (image.trim().to_string(), volume.trim().to_string());
+    if Config::load().reference {
+        let (stopped, out) = sh(&format!("podman stop -t 120 {REFERENCE_CONTAINER}"));
+        common::assert_always(
+            Condition::Bool(stopped),
+            "finalize",
+            "E7/reference-graceful-stop",
+            &tail(&out, 5),
+        );
+    }
     let (stopped, stop_out) = sh(&format!("podman stop -t 120 {NODE_CONTAINER}"));
     common::assert_always(
         Condition::Bool(stopped),

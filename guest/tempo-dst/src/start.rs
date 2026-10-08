@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use serde_json::json;
 
 use crate::common::{self, Config, ASSERTIONS_PATH, CONFIG_PATH, EVENTS_PATH, OUT_DIR};
-use crate::trie_gen;
+use crate::{cob_gen, tip20, trie_gen};
 
 /// Starts `tempo-dst <sub>` in its own session so it outlives the I/O-channel
 /// command that launched it.
@@ -50,7 +50,9 @@ pub fn run(config_json: &str) -> io::Result<()> {
 /// Starts the txgen load as container `txgen`. Generation `n` (0 at branch
 /// start, then one per node restart) draws its transactions from workload seed
 /// `load.seed + n`; a generated trie load also gets a fresh write stream
-/// (`trie_gen::spec`) over the run's slots.
+/// (`trie_gen::spec`) over the run's slots, the TIP-20 load a fresh transfer
+/// stream (`tip20::spec`), and a chain-of-blocks load fresh payloads
+/// (`cob_gen::spec`).
 ///
 /// Load only: failures (e.g. while the node is down) are not oracles. The
 /// oracle's S/load-included shows the load actually landed.
@@ -59,21 +61,31 @@ pub fn start_load(config: &Config, generation: u64) -> io::Result<()> {
     if load.count == 0 {
         return Ok(());
     }
-    let mut spec = load.spec.clone();
-    let mut mount = Vec::new();
-    if let Some(trie) = config
+    let steps = usize::try_from(load.count).unwrap_or(usize::MAX);
+    let generated = if let Some(trie) = config
         .trie
         .as_ref()
         .filter(|t| t.generated())
         .and(config.trie())
     {
-        let path = Path::new(OUT_DIR).join(format!("trie-load-{generation}.yaml"));
-        let steps = usize::try_from(load.count).unwrap_or(usize::MAX);
-        fs::write(
-            &path,
+        Some((
+            "trie",
             trie_gen::spec(config.seed, generation, &trie.slots, steps),
-        )?;
-        spec = "/workload/trie/generated.yaml".into();
+        ))
+    } else if config.tip20 {
+        Some(("tip20", tip20::spec(config.seed, generation, steps)))
+    } else if config.cob.is_some() {
+        Some(("chain", cob_gen::spec(config.seed, generation, steps)))
+    } else {
+        None
+    };
+    let mut spec = load.spec.clone();
+    let mut mount = Vec::new();
+    if let Some((kind, text)) = generated {
+        // Next to the image's artifacts, which the spec names relatively.
+        let path = Path::new(OUT_DIR).join(format!("{kind}-load-{generation}.yaml"));
+        fs::write(&path, text)?;
+        spec = format!("/workload/{kind}/generated.yaml");
         mount = vec!["-v".to_string(), format!("{}:{spec}:ro", path.display())];
     }
     let image = if load.image.is_empty() {
@@ -128,23 +140,60 @@ pub fn restart_load(config: &Config, generation: u64) -> io::Result<()> {
     start_load(config, generation)
 }
 
-/// Deploys the trie load's RawStorage contract (`deploy.yaml`, from the trie
-/// load image) and waits until `address` has code. Run before the warm
-/// checkpoint, so every branch starts with the contract in place.
-pub fn deploy(image: &str, address: &str) -> io::Result<()> {
-    // run.sh's own pass check expects a pure-load run; the code check is ours.
+/// The trie load's deploy spec inside its image.
+pub const TRIE_DEPLOY_SPEC: &str = "/workload/trie/deploy.yaml";
+
+/// Runs a load image's `spec` (its setup steps) once and waits until `done`
+/// holds. Run before the warm checkpoint, so every branch starts with the
+/// load's contracts in place.
+fn deploy_with(
+    image: &str,
+    spec: &str,
+    what: &str,
+    mut done: impl FnMut() -> Result<bool, String>,
+) -> io::Result<()> {
+    // run.sh's own pass check expects a pure-load run; `done` is ours.
     Command::new("podman")
         .args(["run", "--rm", "--network", "host", "-e", "BEDROCK=0"])
-        .args(["-e", "TXGEN_SPEC=/workload/trie/deploy.yaml"])
+        .args(["-e", &format!("TXGEN_SPEC={spec}")])
         .args(["-e", "TXGEN_COUNT=1", "-e", "TXGEN_TPS=1"])
         .args(["--entrypoint", "/bin/bash", image, "/workload/run.sh"])
         .stdout(Stdio::null())
         .status()?;
     for _ in 0..60 {
-        if common::has_code(address).map_err(io::Error::other)? {
+        if done().map_err(io::Error::other)? {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    Err(io::Error::other(format!("no code at {address}")))
+    Err(io::Error::other(format!("deploy incomplete: {what}")))
+}
+
+/// Deploys a load's contract (deploy spec `spec` inside `image`, e.g. the
+/// trie load's RawStorage) and waits until `address` has code.
+pub fn deploy(image: &str, address: &str, spec: &str) -> io::Result<()> {
+    deploy_with(image, spec, &format!("no code at {address}"), || {
+        common::has_code(address)
+    })
+}
+
+/// Creates the TIP-20 load's token and mints its supply to the holders
+/// (`tip20/deploy.yaml`), and waits until the latest block holds exactly
+/// `tip20::Ledger::initial()`.
+pub fn deploy_tip20(image: &str) -> io::Result<()> {
+    use crate::tip20::{Ledger, Tip20Chain};
+    let mut chain = crate::oracle::RpcChain;
+    deploy_with(
+        image,
+        "/workload/tip20/deploy.yaml",
+        "TIP-20 holders do not hold the minted supply",
+        || {
+            let head = common::head_number()?;
+            let Some(block) = chain.block(head)? else {
+                return Ok(false);
+            };
+            // The token does not exist until its create lands.
+            Ok(chain.ledger(block.hash).ok() == Some(Ledger::initial()))
+        },
+    )
 }

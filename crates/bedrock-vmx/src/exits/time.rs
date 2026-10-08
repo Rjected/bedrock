@@ -82,6 +82,13 @@ pub fn handle_idle<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
             let delta = target - current_tsc;
             ctx.state_mut().tsc_offset += delta;
             ctx.state_mut().emulated_tsc = target;
+            // Forced preemption counts retired instructions, not idle time:
+            // shift its deadline with the skip so waking from idle is not
+            // itself a preemption.
+            let apic = &mut ctx.state_mut().devices.apic;
+            if apic.preempt_deadline != 0 {
+                apic.preempt_deadline = apic.preempt_deadline.saturating_add(delta);
+            }
         }
     }
 

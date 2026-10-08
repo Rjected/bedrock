@@ -25,6 +25,10 @@ pub struct Verdict {
     pub sometimes_unsatisfied: BTreeSet<String>,
     pub records: usize,
     pub unparsed: usize,
+    /// The seed's swarm record (the driver's `Swarm`), so failures can be
+    /// grouped by feature.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub swarm: Value,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
