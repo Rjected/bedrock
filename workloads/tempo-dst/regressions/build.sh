@@ -10,6 +10,9 @@
 # - RETH_FIX_PR=<number> RETH_FIX_HEAD=<commit>: an unmerged fix. buggy =
 #   pinned; fixed = pinned reth with the PR's changes applied.
 #
+# BASE_TEMPO_PRS="<number>:<head commit> ..." applies unmerged Tempo fixes to
+# both images the same way (e.g. tempo#8189 for bedrock#13).
+#
 # BASE_RETH_PRS="<number>:<head commit> ..." applies unmerged fixes for other
 # bugs to BOTH images, so a known bug that shares this regression's signature
 # can't fire on either side. Neither image is then the pinned one; both are
@@ -41,20 +44,49 @@ name=${1:?usage: build.sh <regression>}
 . "$here/$name/regression.env"
 read -r -a docker <<<"${DOCKER:-docker}"
 # Tempo and reth as in the pinned image (bedrock/tempo-localnet:pinned).
-tempo_rev=d3f3b28f102946dcdca1a5beb12f328f2f1bbdbd
-reth_rev=42fa3c569ad182914d26db410919d6a10c7b4859
+# Pins; an entry may override them (e.g. to build from fix or DST-profile PR
+# heads based on newer upstream).
+tempo_rev=${TEMPO_REV:-d3f3b28f102946dcdca1a5beb12f328f2f1bbdbd}
+reth_rev=${RETH_REV:-42fa3c569ad182914d26db410919d6a10c7b4859}
+# RUST_PROFILE / RUST_FEATURES: Tempo's Dockerfile build args (defaults
+# profiling / asm-keccak,jemalloc,otlp), e.g. profile `dst` with feature `dst`
+# from tempo#8198 (opt-level 3 + debug assertions + overflow checks).
+profile=${RUST_PROFILE:-profiling}
+features=${RUST_FEATURES:-asm-keccak,jemalloc,otlp}
 rustflags=""
 chef_suffix=""
 if [ "${DEBUG_ASSERTIONS:-0}" = 1 ]; then
   rustflags="-C debug-assertions=on"
   chef_suffix="-debug-assertions"
 fi
-chef=${CHEF_IMAGE:-bedrock/tempo-chef:${tempo_rev:0:8}-${reth_rev:0:8}$chef_suffix}
+profile_suffix=""
+[ "$profile" = profiling ] || profile_suffix="-$profile"
+chef=${CHEF_IMAGE:-bedrock/tempo-chef:${tempo_rev:0:8}-${reth_rev:0:8}$profile_suffix$chef_suffix}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tempo-regression.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+# Applies unmerged PR <number> at <head> of the repo at <dir> and commits it:
+# only the PR's own commits (diffed from its merge-base with upstream main,
+# which may be newer or older than our pin). Fails unless the tree changed.
+apply_pr() {
+  local dir=$1 label=$2 pr=$3 head=$4 before base
+  local g=(git -C "$dir" -c user.name=regression -c user.email=regression@localhost)
+  "${g[@]}" fetch -q origin main "pull/$pr/head"
+  test "$("${g[@]}" rev-parse "$head^{commit}" 2>/dev/null)" = "$head" ||
+    { echo "PR $label#$pr head $head not found" >&2; return 1; }
+  base=$("${g[@]}" merge-base origin/main "$head")
+  before=$("${g[@]}" rev-parse HEAD)
+  "${g[@]}" diff "$base" "$head" | "${g[@]}" apply --index
+  "${g[@]}" commit -q -m "apply $label#$pr at $head"
+  test -n "$("${g[@]}" diff --name-only "$before" HEAD)"
+  echo "applied $label#$pr: $("${g[@]}" diff --shortstat "$before" HEAD)"
+}
+
 git clone -q --filter=blob:none --no-checkout https://github.com/tempoxyz/tempo.git "$work/tempo"
 git -C "$work/tempo" checkout -q --detach "$tempo_rev"
+for base in ${BASE_TEMPO_PRS:-}; do
+  apply_pr "$work/tempo" tempoxyz/tempo "${base%%:*}" "${base#*:}"
+done
 git clone -q --filter=blob:none --no-checkout https://github.com/paradigmxyz/reth.git "$work/tempo/reth"
 git -C "$work/tempo/reth" checkout -q --detach "$reth_rev"
 
@@ -82,25 +114,13 @@ sed -i '/COPY --from=planner \/app\/recipe.json recipe.json/i ENV VERGEN_IDEMPOT
 
 if ! "${docker[@]}" image inspect "$chef" >/dev/null 2>&1; then
   DOCKER_BUILDKIT=1 "${docker[@]}" build --target builder -f "$work/tempo/Dockerfile.chef" \
-    --build-arg EXTRA_RUSTFLAGS="$rustflags" -t "$chef" "$work/tempo"
+    --build-arg EXTRA_RUSTFLAGS="$rustflags" --build-arg RUST_PROFILE="$profile" \
+    --build-arg RUST_FEATURES="$features" -t "$chef" "$work/tempo"
 fi
 
 reth=(git -C "$work/tempo/reth" -c user.name=regression -c user.email=regression@localhost)
-# Applies unmerged PR <number> at <head> to the reth checkout and commits it;
-# fails unless the tree changed.
-apply_pr() {
-  local pr=$1 head=$2 before
-  "${reth[@]}" fetch -q origin "pull/$pr/head"
-  test "$("${reth[@]}" rev-parse FETCH_HEAD)" = "$head" ||
-    echo "note: PR $pr has moved past $head; using the pinned head" >&2
-  before=$("${reth[@]}" rev-parse HEAD)
-  "${reth[@]}" diff "$("${reth[@]}" merge-base "$reth_rev" "$head")" "$head" | "${reth[@]}" apply --index
-  "${reth[@]}" commit -q -m "apply paradigmxyz/reth#$pr at $head"
-  test -n "$("${reth[@]}" diff --name-only "$before" HEAD)"
-  echo "applied reth#$pr: $("${reth[@]}" diff --shortstat "$before" HEAD)"
-}
 for base in ${BASE_RETH_PRS:-}; do
-  apply_pr "${base%%:*}" "${base#*:}"
+  apply_pr "$work/tempo/reth" paradigmxyz/reth "${base%%:*}" "${base#*:}"
 done
 for patch in ${BASE_RETH_PATCHES:-}; do
   "${reth[@]}" apply --index "$here/$name/$patch"
@@ -112,13 +132,14 @@ build() {
   local tag=$name${1:+-$1}
   DOCKER_BUILDKIT=1 "${docker[@]}" build --target tempo-localnet -f "$work/tempo/Dockerfile" \
     --build-arg CHEF_IMAGE="$chef" --build-arg EXTRA_RUSTFLAGS="$rustflags" \
+    --build-arg RUST_PROFILE="$profile" --build-arg RUST_FEATURES="$features" \
     -t "bedrock/tempo-localnet:$tag" "$work/tempo"
   echo "Built bedrock/tempo-localnet:$tag (reth $("${reth[@]}" log --oneline -1 | cut -c1-80))"
 }
 # The regression's other side: built from the same base when there is one,
 # else the pinned image.
 other() {
-  if [ -n "${BASE_RETH_PRS:-}${BASE_RETH_PATCHES:-}" ]; then
+  if [ -n "${BASE_RETH_PRS:-}${BASE_RETH_PATCHES:-}${BASE_TEMPO_PRS:-}" ]; then
     "${reth[@]}" checkout -q "$1"
     build "$2"
   else
@@ -137,7 +158,7 @@ elif [ -n "${RETH_PATCH:-}" ]; then
   build buggy
   other "$base" fixed
 elif [ -n "${RETH_FIX_PR:-}" ]; then
-  apply_pr "$RETH_FIX_PR" "$RETH_FIX_HEAD"
+  apply_pr "$work/tempo/reth" paradigmxyz/reth "$RETH_FIX_PR" "$RETH_FIX_HEAD"
   build fixed
   other "$base" buggy
 else
