@@ -8,6 +8,7 @@
 //! tempo-dst oracle     # online oracles (log scan, liveness, durability)
 //! tempo-dst finalize   # end-of-run oracles (graceful stop, re-execute)
 //! tempo-dst head       # print the node's head block number
+//! tempo-dst deploy <image> <address>  # deploy the trie load's contract
 //! ```
 //!
 //! Assertions go to /bedrock/assertions.jsonl, control events to
@@ -32,6 +33,13 @@ fn main() {
         Some("nemesis") => nemesis::run(),
         Some("oracle") => oracle::run(),
         Some("finalize") => finalize::run(),
+        Some("deploy") => {
+            let arg = |i| std::env::args().nth(i).unwrap_or_default();
+            if let Err(e) = start::deploy(&arg(2), &arg(3)) {
+                eprintln!("deploy: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("head") => match common::head_number() {
             Ok(n) => println!("{n}"),
             Err(e) => {
@@ -40,7 +48,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: tempo-dst <start|nemesis|oracle|finalize|head>");
+            eprintln!("usage: tempo-dst <start|nemesis|oracle|finalize|head|deploy>");
             std::process::exit(2);
         }
     }

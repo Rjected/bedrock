@@ -106,3 +106,24 @@ pub fn restart_load(load: &LoadConfig, generation: u64) -> io::Result<()> {
     }
     start_load(load, generation)
 }
+
+/// Deploys the trie load's RawStorage contract (`deploy.yaml`, from the trie
+/// load image) and waits until `address` has code. Run before the warm
+/// checkpoint, so every branch starts with the contract in place.
+pub fn deploy(image: &str, address: &str) -> io::Result<()> {
+    // run.sh's own pass check expects a pure-load run; the code check is ours.
+    Command::new("podman")
+        .args(["run", "--rm", "--network", "host", "-e", "BEDROCK=0"])
+        .args(["-e", "TXGEN_SPEC=/workload/trie/deploy.yaml"])
+        .args(["-e", "TXGEN_COUNT=1", "-e", "TXGEN_TPS=1"])
+        .args(["--entrypoint", "/bin/bash", image, "/workload/run.sh"])
+        .stdout(Stdio::null())
+        .status()?;
+    for _ in 0..60 {
+        if crate::common::has_code(address).map_err(io::Error::other)? {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    Err(io::Error::other(format!("no code at {address}")))
+}

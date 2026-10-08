@@ -273,6 +273,20 @@ pub mod tests {
         }
     }
 
+    /// The same block from reth's `eth_getMultiProof` (proof v2 path).
+    #[test]
+    fn node_multiproof_verifies() {
+        let (state_root, proof, _) = fixture(24);
+        let path = format!(
+            "{}/testdata/multiproof_block24.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let multi: AccountProof =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(verify(&multi, state_root), Ok(()));
+        assert_eq!(multi.storage_hash, proof.storage_hash);
+    }
+
     #[test]
     fn tampered_node_proofs_fail() {
         let (state_root, proof, _) = fixture(24);

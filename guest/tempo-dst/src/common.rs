@@ -261,6 +261,38 @@ pub fn proof(
     serde_json::from_value(proof.clone()).map_err(|e| format!("bad eth_getProof: {e}: {proof}"))
 }
 
+/// Number of transactions in `block`.
+pub fn tx_count(block: u64) -> Result<u64, String> {
+    let n = rpc(
+        "eth_getBlockTransactionCountByNumber",
+        json!([format!("0x{block:x}")]),
+    )?;
+    serde_json::from_value::<alloy_primitives::U64>(n.clone())
+        .map(|n| n.to())
+        .map_err(|e| format!("bad transaction count: {e}: {n}"))
+}
+
+/// Whether `address` has code at the latest block.
+pub fn has_code(address: &str) -> Result<bool, String> {
+    let code = rpc("eth_getCode", json!([address, "latest"]))?;
+    Ok(code.as_str().is_some_and(|c| c.len() > 2))
+}
+
+/// reth's `eth_getMultiProof` for `slots` of `address` at `block`.
+pub fn multiproof(
+    address: &str,
+    slots: &[u64],
+    block: u64,
+) -> Result<crate::trie_ref::AccountProof, String> {
+    let keys: Vec<String> = slots.iter().map(|s| format!("0x{s:064x}")).collect();
+    let proofs = rpc(
+        "eth_getMultiProof",
+        json!([[[address, keys]], format!("0x{block:x}")]),
+    )?;
+    serde_json::from_value(proofs[0].clone())
+        .map_err(|e| format!("bad eth_getMultiProof: {e}: {proofs}"))
+}
+
 /// Header `stateRoot` of `block`.
 pub fn state_root(block: u64) -> Result<alloy_primitives::B256, String> {
     let header = rpc(

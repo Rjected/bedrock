@@ -83,7 +83,9 @@ enum Load {
     Trie,
 }
 
-/// RawStorage deployed by workloads/tempo-dst/trie/trie.yaml: dev account 0's
+/// Trie load image (workloads/tempo-dst/trie).
+const TRIE_IMAGE: &str = "bedrock/tempo-dst-trie:latest";
+/// RawStorage deployed by trie/deploy.yaml during warmup: dev account 0's
 /// first transaction on a fresh chain (CREATE address of nonce 0).
 const TRIE_CONTRACT: &str = "0x5fbdb2315678afecb367f032d93f642f64180aa3";
 /// Raw slots whose keccak paths share prefixes: 120.., 121.., 13.., 2...
@@ -253,6 +255,20 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>) -> Result<Checkpoint> {
             break;
         }
     }
+    if args.load == Load::Trie {
+        // Deploy before the checkpoint so branches start writing at once.
+        let (code, out) = host_bash(
+            &mut warm,
+            &format!("tempo-dst deploy {TRIE_IMAGE} {TRIE_CONTRACT}"),
+        )?;
+        if code != 0 {
+            return Err(format!("trie contract deploy failed ({code}): {out}").into());
+        }
+        println!(
+            "trie contract deployed at vt {:.1}s",
+            warm.current_time().as_secs_f64()
+        );
+    }
     let cp = warm.checkpoint()?;
     println!("warm checkpoint at vt {:.1}s", cp.time().as_secs_f64());
     Ok(cp)
@@ -280,7 +296,7 @@ fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
                 // Enough steps to outlast the run.
                 "count": (args.run_secs + 60) * args.trie_tps,
                 "tps": args.trie_tps,
-                "image": "bedrock/tempo-dst-trie:latest",
+                "image": TRIE_IMAGE,
                 "spec": "/workload/trie/trie.yaml",
             }),
         },
@@ -291,12 +307,13 @@ fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
     })
 }
 
-/// Coverage every seed must reach (see `verdict`): the load landed.
+/// Coverage every seed must reach (see `verdict`): the load landed, and with
+/// the trie load, its checks ran over every slot shape.
 fn required(args: &CampaignArgs) -> Vec<&'static str> {
-    if args.txgen_count == 0 {
-        vec![]
-    } else {
-        vec!["S/load-included"]
+    match args.load {
+        Load::Transfers if args.txgen_count == 0 => vec![],
+        Load::Transfers => vec!["S/load-included"],
+        Load::Trie => vec!["S/load-included", "S/trie-checked", "S/trie-all-slots-live"],
     }
 }
 
