@@ -146,14 +146,23 @@ build() {
 strip_debug() {
   local image=$1 dir
   dir=$(mktemp -d)
+  # Flat image: a layer on top of $image would keep the unstripped binaries
+  # in the lower layer, and the guest loads every layer. Mirrors Tempo's
+  # tempo-localnet stage (same base digest, ca-certificates, metadata).
   cat > "$dir/Dockerfile" <<DF
 FROM $image AS src
-FROM debian:bookworm-slim AS strip
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS strip
 RUN apt-get update && apt-get install -y --no-install-recommends binutils && rm -rf /var/lib/apt/lists/*
 COPY --from=src /usr/local/bin/tempo /usr/local/bin/tempo-localnet /out/
 RUN strip --strip-debug /out/tempo /out/tempo-localnet
-FROM $image
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /data
 COPY --from=strip /out/tempo /out/tempo-localnet /usr/local/bin/
+EXPOSE 8545
+VOLUME ["/data"]
+HEALTHCHECK --interval=2s --timeout=2s --start-period=120s --retries=5 CMD ["/usr/local/bin/tempo-localnet", "--health"]
+ENTRYPOINT ["/usr/local/bin/tempo-localnet"]
 DF
   DOCKER_BUILDKIT=1 "${docker[@]}" build -q -t "$image" "$dir" >/dev/null
   rm -rf "$dir"
