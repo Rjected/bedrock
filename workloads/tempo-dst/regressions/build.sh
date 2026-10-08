@@ -13,7 +13,12 @@
 # BASE_RETH_PRS="<number>:<head commit> ..." applies unmerged fixes for other
 # bugs to BOTH images, so a known bug that shares this regression's signature
 # can't fire on either side. Neither image is then the pinned one; both are
-# built.
+# built. BASE_RETH_PATCHES="<file in the entry dir> ..." does the same with
+# patches.
+#
+# An entry with only base fixes (no RETH_REVERT/RETH_PATCH/RETH_FIX_PR) builds
+# one image, bedrock/tempo-localnet:<name>: e.g. known-fixes, the pinned node
+# with every known bug fixed, for campaigns hunting new ones.
 #
 #   DOCKER='sudo docker' ./workloads/tempo-dst/regressions/build.sh reth-27267
 #
@@ -82,16 +87,22 @@ apply_pr() {
 for base in ${BASE_RETH_PRS:-}; do
   apply_pr "${base%%:*}" "${base#*:}"
 done
+for patch in ${BASE_RETH_PATCHES:-}; do
+  "${reth[@]}" apply --index "$here/$name/$patch"
+  "${reth[@]}" commit -q -m "apply $patch"
+  echo "applied $patch"
+done
 
 build() {
+  local tag=$name${1:+-$1}
   DOCKER_BUILDKIT=1 "${docker[@]}" build --target tempo-localnet -f "$work/tempo/Dockerfile" \
-    --build-arg CHEF_IMAGE="$chef" -t "bedrock/tempo-localnet:$name-$1" "$work/tempo"
-  echo "Built bedrock/tempo-localnet:$name-$1 (reth $("${reth[@]}" log --oneline -1 | cut -c1-80))"
+    --build-arg CHEF_IMAGE="$chef" -t "bedrock/tempo-localnet:$tag" "$work/tempo"
+  echo "Built bedrock/tempo-localnet:$tag (reth $("${reth[@]}" log --oneline -1 | cut -c1-80))"
 }
 # The regression's other side: built from the same base when there is one,
 # else the pinned image.
 other() {
-  if [ -n "${BASE_RETH_PRS:-}" ]; then
+  if [ -n "${BASE_RETH_PRS:-}${BASE_RETH_PATCHES:-}" ]; then
     "${reth[@]}" checkout -q "$1"
     build "$2"
   else
@@ -109,8 +120,10 @@ elif [ -n "${RETH_PATCH:-}" ]; then
   "${reth[@]}" commit -q -m "regression $name"
   build buggy
   other "$base" fixed
-else
+elif [ -n "${RETH_FIX_PR:-}" ]; then
   apply_pr "$RETH_FIX_PR" "$RETH_FIX_HEAD"
   build fixed
   other "$base" buggy
+else
+  build ""
 fi
