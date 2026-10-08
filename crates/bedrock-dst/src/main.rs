@@ -257,6 +257,15 @@ fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
     })
 }
 
+/// Coverage every seed must reach (see `verdict`): the load landed.
+fn required(args: &CampaignArgs) -> Vec<&'static str> {
+    if args.txgen_count == 0 {
+        vec![]
+    } else {
+        vec!["S/load-included"]
+    }
+}
+
 fn run_seed(
     args: &CampaignArgs,
     warm: &Checkpoint,
@@ -321,7 +330,7 @@ fn run_seed(
         assertions.extend_from_slice(format!("{rec}\n").as_bytes());
     }
     fs::write(dir.join("assertions.jsonl"), &assertions)?;
-    let v = verdict::aggregate(&String::from_utf8_lossy(&assertions));
+    let v = verdict::aggregate(&String::from_utf8_lossy(&assertions), &required(args));
     fs::write(dir.join("verdict.json"), serde_json::to_vec_pretty(&v)?)?;
     Ok(v)
 }

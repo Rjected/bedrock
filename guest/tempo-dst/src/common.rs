@@ -182,6 +182,17 @@ pub fn head_number() -> Result<u64, String> {
         .ok_or_else(|| format!("bad eth_blockNumber: {head}"))
 }
 
+/// Number of transactions in `block`.
+pub fn tx_count(block: u64) -> Result<u64, String> {
+    let n = rpc(
+        "eth_getBlockTransactionCountByNumber",
+        json!([format!("0x{block:x}")]),
+    )?;
+    n.as_str()
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| format!("bad transaction count: {n}"))
+}
+
 /// The node's finalized block as `(number, hash)`; `None` before any.
 pub fn finalized_block() -> Result<Option<(u64, String)>, String> {
     let block = rpc("eth_getBlockByNumber", json!(["finalized", false]))?;

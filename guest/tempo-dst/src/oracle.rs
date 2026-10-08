@@ -148,6 +148,7 @@ pub trait Chain {
     fn head(&mut self) -> Result<u64, String>;
     fn hash(&mut self, number: u64) -> Result<Option<String>, String>;
     fn finalized(&mut self) -> Result<Option<(u64, String)>, String>;
+    fn tx_count(&mut self, block: u64) -> Result<u64, String>;
 }
 
 #[derive(Debug)]
@@ -170,6 +171,8 @@ pub struct Oracle {
     /// Head when the last kill happened, for the recovery coverage signal.
     head_at_kill: Option<u64>,
     restart_ns: u64,
+    /// A block produced during the run included a transaction.
+    load_seen: bool,
 }
 
 impl Oracle {
@@ -186,6 +189,7 @@ impl Oracle {
             pending_saved: None,
             head_at_kill: None,
             restart_ns: now_ns,
+            load_seen: false,
         }
     }
 
@@ -234,6 +238,16 @@ impl Oracle {
             return out;
         }
         if let Ok(head) = chain.head() {
+            if self.head.is_some_and(|h| head > h)
+                && !self.load_seen
+                && chain.tx_count(head).is_ok_and(|n| n > 0)
+            {
+                self.load_seen = true;
+                out.push(Verdict::Sometimes(
+                    true,
+                    finding("S/load-included", format!("block {head}")),
+                ));
+            }
             if self.head.is_none_or(|h| head > h) {
                 self.progress_ns = now_ns;
                 self.stall_reported = false;
@@ -331,6 +345,9 @@ impl Chain for RpcChain {
     fn finalized(&mut self) -> Result<Option<(u64, String)>, String> {
         common::finalized_block()
     }
+    fn tx_count(&mut self, block: u64) -> Result<u64, String> {
+        common::tx_count(block)
+    }
 }
 
 fn record(verdicts: Vec<Verdict>) {
@@ -402,6 +419,7 @@ mod tests {
         head: Option<u64>,
         finalized: Option<u64>,
         hashes: std::collections::HashMap<u64, String>,
+        tx_counts: std::collections::HashMap<u64, u64>,
     }
 
     impl Chain for FakeChain {
@@ -416,6 +434,29 @@ mod tests {
                 .finalized
                 .map(|n| (n, self.hashes.get(&n).cloned().unwrap_or_default())))
         }
+        fn tx_count(&mut self, block: u64) -> Result<u64, String> {
+            Ok(self.tx_counts.get(&block).copied().unwrap_or(0))
+        }
+    }
+
+    #[test]
+    fn included_load_is_covered_once() {
+        let mut o = Oracle::new(60, 0);
+        let mut c = FakeChain {
+            head: Some(10),
+            ..Default::default()
+        };
+        // The head at the first tick predates the run.
+        c.tx_counts.insert(10, 1);
+        assert!(sigs(&o.tick(&mut c, S)).is_empty());
+        c.head = Some(11);
+        assert!(sigs(&o.tick(&mut c, 2 * S)).is_empty());
+        c.head = Some(12);
+        c.tx_counts.insert(12, 3);
+        assert_eq!(sigs(&o.tick(&mut c, 3 * S)), [(true, "S/load-included")]);
+        c.head = Some(13);
+        c.tx_counts.insert(13, 3);
+        assert!(sigs(&o.tick(&mut c, 4 * S)).is_empty());
     }
 
     /// The shape of the native run's second crash: block data saved through

@@ -40,6 +40,7 @@ guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 | `container <name> exit code is zero` | workload-monitor: no unexplained container death |
 | `D/guest-exited` | The guest VM stopped mid-run (kernel panic, shutdown) |
 | `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed` | Coverage (Sometimes): the fault, crash-recovery unwind, and recovery paths actually ran |
+| `C/missing/S/load-included` | Required coverage: no block produced during the run included a transaction, so the load never landed and the run proves nothing |
 
 ## Running
 

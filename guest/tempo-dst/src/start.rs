@@ -42,6 +42,7 @@ pub fn run(config_json: &str) -> io::Result<()> {
     let load = &config.load;
     if load.count > 0 {
         // Load only: failures (e.g. while the node is down) are not oracles.
+        // The oracle's S/load-included shows the load actually landed.
         let status = Command::new("podman")
             .args([
                 "run",
@@ -57,7 +58,7 @@ pub fn run(config_json: &str) -> io::Result<()> {
             .args(["-e", &format!("TXGEN_COUNT={}", load.count)])
             .args(["-e", &format!("TXGEN_TPS={}", load.tps)])
             .args(["--entrypoint", "/bin/bash", "bedrock/tempo-txgen:latest"])
-            .args(["-c", "/workload/run.sh || true"])
+            .args(["-c", "bash /workload/run.sh || true"])
             .stdout(Stdio::null())
             .status()?;
         if !status.success() {

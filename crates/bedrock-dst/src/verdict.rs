@@ -6,6 +6,10 @@
 //! records are coverage: a signature is satisfied if any of its records holds.
 //! Signatures are the message up to the first `": "`, so records that differ
 //! only in detail dedup together.
+//!
+//! Some coverage is required: a run whose load or checks never took effect
+//! proves nothing, so a required signature that is never satisfied fails the
+//! run as `C/missing/<signature>`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,7 +38,7 @@ pub fn signature(message: &str) -> &str {
     message.split_once(": ").map_or(message, |(s, _)| s)
 }
 
-pub fn aggregate(assertions_jsonl: &str) -> Verdict {
+pub fn aggregate(assertions_jsonl: &str, required: &[&str]) -> Verdict {
     let mut v = Verdict::default();
     let mut sometimes: BTreeMap<String, bool> = BTreeMap::new();
     for line in assertions_jsonl.lines().filter(|l| !l.trim().is_empty()) {
@@ -72,6 +76,18 @@ pub fn aggregate(assertions_jsonl: &str) -> Verdict {
                 });
         }
     }
+    for sig in required {
+        if !sometimes.get(*sig).copied().unwrap_or(false) {
+            v.failures.insert(
+                format!("C/missing/{sig}"),
+                Failure {
+                    count: 1,
+                    first: format!("required coverage {sig} never satisfied"),
+                    location: "bedrock-dst".into(),
+                },
+            );
+        }
+    }
     for (sig, ok) in sometimes {
         if ok {
             v.sometimes_satisfied.insert(sig);
@@ -95,7 +111,26 @@ mod tests {
 
     #[test]
     fn empty_run_passes() {
-        assert!(aggregate("").pass);
+        assert!(aggregate("", &[]).pass);
+    }
+
+    #[test]
+    fn missing_required_coverage_fails() {
+        let v = aggregate("", &["S/load-included"]);
+        assert!(!v.pass);
+        assert!(v.failures.contains_key("C/missing/S/load-included"));
+        let log = [
+            rec("Sometimes", false, "S/load-included"),
+            rec("Sometimes", true, "S/kill"),
+        ]
+        .join("\n");
+        let v = aggregate(&log, &["S/load-included", "S/kill"]);
+        assert_eq!(
+            v.failures.keys().collect::<Vec<_>>(),
+            ["C/missing/S/load-included"]
+        );
+        let log = rec("Sometimes", true, "S/load-included");
+        assert!(aggregate(&log, &["S/load-included"]).pass);
     }
 
     #[test]
@@ -107,7 +142,7 @@ mod tests {
             "garbage".to_string(),
         ]
         .join("\n");
-        let v = aggregate(&log);
+        let v = aggregate(&log, &[]);
         assert!(!v.pass);
         assert_eq!(v.records, 3);
         assert_eq!(v.unparsed, 1);
@@ -125,7 +160,7 @@ mod tests {
             rec("Sometimes", false, "S/kill"),
         ]
         .join("\n");
-        let v = aggregate(&log);
+        let v = aggregate(&log, &[]);
         assert!(v.pass);
         assert!(v.sometimes_satisfied.contains("S/kill"));
         assert!(v.sometimes_unsatisfied.contains("S/recovered"));
@@ -135,7 +170,7 @@ mod tests {
     fn workload_monitor_records_parse() {
         // Shape written by workload-monitor's always_eq!.
         let line = r#"{"Always":{"condition":{"Eq":{"x":101,"y":0}},"result":false,"message":"container tempo exit code is zero","location":{"file":"guest/workload-monitor/src/main.rs","line":1,"column":1}}}"#;
-        let v = aggregate(line);
+        let v = aggregate(line, &[]);
         assert!(v.failures.contains_key("container tempo exit code is zero"));
     }
 }
