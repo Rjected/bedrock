@@ -23,6 +23,8 @@
 # Tempo's internal debug_assert! invariants (trie, sparse trie, persistence);
 # a violation panics and E1/panic reports it. It uses its own chef image.
 #
+# STRIP_DEBUG=1 strips debuginfo from the built node binaries (see strip_debug).
+#
 # An entry with only base fixes (no RETH_REVERT/RETH_PATCH/RETH_FIX_PR) builds
 # one image, bedrock/tempo-localnet:<name>: e.g. known-fixes, the pinned node
 # with every known bug fixed, for campaigns hunting new ones.
@@ -134,7 +136,28 @@ build() {
     --build-arg CHEF_IMAGE="$chef" --build-arg EXTRA_RUSTFLAGS="$rustflags" \
     --build-arg RUST_PROFILE="$profile" --build-arg RUST_FEATURES="$features" \
     -t "bedrock/tempo-localnet:$tag" "$work/tempo"
+  [ "${STRIP_DEBUG:-0}" = 1 ] && strip_debug "bedrock/tempo-localnet:$tag"
   echo "Built bedrock/tempo-localnet:$tag (reth $("${reth[@]}" log --oneline -1 | cut -c1-80))"
+}
+# STRIP_DEBUG=1 drops DWARF debuginfo (~1.1 GB) from the node binaries. The
+# guest holds the image in RAM, so this sets the guest's memory floor. The
+# symbol table stays (backtraces still name functions) and panic messages
+# carry their own file:line.
+strip_debug() {
+  local image=$1 dir
+  dir=$(mktemp -d)
+  cat > "$dir/Dockerfile" <<DF
+FROM $image AS src
+FROM debian:bookworm-slim AS strip
+RUN apt-get update && apt-get install -y --no-install-recommends binutils && rm -rf /var/lib/apt/lists/*
+COPY --from=src /usr/local/bin/tempo /usr/local/bin/tempo-localnet /out/
+RUN strip --strip-debug /out/tempo /out/tempo-localnet
+FROM $image
+COPY --from=strip /out/tempo /out/tempo-localnet /usr/local/bin/
+DF
+  DOCKER_BUILDKIT=1 "${docker[@]}" build -q -t "$image" "$dir" >/dev/null
+  rm -rf "$dir"
+  echo "stripped debuginfo: $image ($("${docker[@]}" image inspect -f '{{.Size}}' "$image" | numfmt --to=iec))"
 }
 # The regression's other side: built from the same base when there is one,
 # else the pinned image.
