@@ -37,6 +37,15 @@ pub struct NemesisConfig {
     pub min_gap_secs: u32,
 }
 
+/// One kill of an explicit [`Config::nemesis_plan`], as the nemesis logs it
+/// in its `plan` event.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PlannedKill {
+    /// Seconds after nemesis start.
+    pub at_secs: u64,
+    pub down_secs: u64,
+}
+
 impl Default for NemesisConfig {
     fn default() -> Self {
         NemesisConfig {
@@ -58,6 +67,27 @@ pub struct LoadConfig {
     pub image: String,
     /// txgen spec inside the image; empty means the image's default.
     pub spec: String,
+    /// Explicit per-generation inputs, indexed by load generation (0 at
+    /// branch start, one more per node restart). A generation past the end
+    /// is derived ([`Config::load_generation`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub generations: Vec<LoadGeneration>,
+    /// A derived generation draws its spec seed from getrandom (Bedrock's
+    /// controlled stream, so it is on the input tape) instead of using the
+    /// run seed. See [`Config::draw_load_generation`].
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub draw_spec_seeds: bool,
+}
+
+/// The inputs of one load generation: everything its txgen run and generated
+/// spec (`trie_gen`, `tip20`, `cob_gen`) are a function of, besides the
+/// load's count and the trie slots.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LoadGeneration {
+    /// `TXGEN_SEED` (txgen's own transaction randomness).
+    pub txgen_seed: u64,
+    /// Seed of the generated spec (the run seed when derived).
+    pub spec_seed: u64,
 }
 
 /// A RawStorage contract whose storage root E5 checks against an
@@ -69,12 +99,17 @@ pub struct TrieConfig {
     /// Slots the oracles read and prove. Empty: generated from the run seed
     /// (`trie_gen::slots`), along with the load spec.
     pub slots: Vec<u64>,
+    /// The load spec comes from `trie_gen` over explicit `slots` (a
+    /// scenario's recorded slots), instead of `load.spec`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub generated: bool,
 }
 
 impl TrieConfig {
-    /// Whether the load spec and slots come from `trie_gen`.
+    /// Whether the load spec (and, without explicit slots, the slots) come
+    /// from `trie_gen`.
     pub fn generated(&self) -> bool {
-        self.slots.is_empty()
+        self.generated || self.slots.is_empty()
     }
 }
 
@@ -89,10 +124,42 @@ impl Config {
     /// The trie config with generated slots filled in.
     pub fn trie(&self) -> Option<TrieConfig> {
         let mut trie = self.trie.clone()?;
-        if trie.generated() {
+        if trie.slots.is_empty() {
             trie.slots = crate::trie_gen::slots(self.seed);
         }
         Some(trie)
+    }
+
+    /// Load generation `generation`'s inputs: explicit in
+    /// `load.generations`, else derived from the run (txgen seed
+    /// `load.seed + generation`, spec seed the run seed).
+    pub fn load_generation(&self, generation: u64) -> LoadGeneration {
+        usize::try_from(generation)
+            .ok()
+            .and_then(|g| self.load.generations.get(g).copied())
+            .unwrap_or(LoadGeneration {
+                txgen_seed: self.load.seed + generation,
+                spec_seed: self.seed,
+            })
+    }
+
+    /// [`load_generation`](Self::load_generation) for the generation being
+    /// started: with `load.draw_spec_seeds`, a derived generation's spec seed
+    /// is drawn now from getrandom (served by Bedrock and recorded on the
+    /// input tape under this process's pid). Call once per generation.
+    pub fn draw_load_generation(&self, generation: u64) -> LoadGeneration {
+        let mut inputs = self.load_generation(generation);
+        let explicit = usize::try_from(generation).is_ok_and(|g| g < self.load.generations.len());
+        if self.load.draw_spec_seeds && !explicit {
+            let mut buf = [0u8; 8];
+            let read = std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf));
+            match read {
+                Ok(()) => inputs.spec_seed = u64::from_le_bytes(buf),
+                Err(e) => eprintln!("draw spec seed: {e}; using the run seed"),
+            }
+        }
+        inputs
     }
 }
 
@@ -114,6 +181,11 @@ pub struct Config {
     pub cob: Option<CobConfig>,
     /// The E7 reference node runs (compose service `tempo-ref`).
     pub reference: bool,
+    /// Explicit kill schedule (driver-made decisions, `bedrock-dst replay
+    /// --scenario`). Absent: drawn from Bedrock-controlled randomness
+    /// (`nemesis::plan`) per `nemesis`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nemesis_plan: Option<Vec<PlannedKill>>,
 }
 
 impl Default for Config {
@@ -128,6 +200,7 @@ impl Default for Config {
             tip20: false,
             cob: None,
             reference: false,
+            nemesis_plan: None,
         }
     }
 }
@@ -138,6 +211,22 @@ impl Config {
             Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| panic!("bad {CONFIG_PATH}: {e}")),
             Err(_) => Config::default(),
         }
+    }
+
+    /// Rejects an explicit nemesis plan whose kills overlap or go backwards
+    /// (the nemesis sleeps from one restart to the next kill).
+    pub fn validate(&self) -> Result<(), String> {
+        let mut free = 0;
+        for (i, k) in self.nemesis_plan.iter().flatten().enumerate() {
+            if k.at_secs < free {
+                return Err(format!(
+                    "nemesis_plan[{i}] at {}s is before the previous restart at {free}s",
+                    k.at_secs
+                ));
+            }
+            free = k.at_secs + k.down_secs;
+        }
+        Ok(())
     }
 }
 

@@ -16,6 +16,7 @@
 use std::time::Duration;
 
 /// An absolute moment in emulated virtual time.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VirtTime {
     instructions: u64,
