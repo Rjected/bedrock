@@ -120,7 +120,7 @@ pub fn deploy(image: &str, address: &str) -> io::Result<()> {
         .stdout(Stdio::null())
         .status()?;
     for _ in 0..60 {
-        if crate::common::has_code(address).map_err(io::Error::other)? {
+        if common::has_code(address).map_err(io::Error::other)? {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
