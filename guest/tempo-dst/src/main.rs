@@ -124,6 +124,15 @@ fn main() {
                 .unwrap_or(60);
             cob::watch(&mut oracle::RpcChain, cob_gen::CONTRACT, secs);
         }
+        Some("reference-head") => {
+            match common::with_rpc_url(common::REFERENCE_RPC_URL, common::head_number) {
+                Ok(n) => println!("{n}"),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("head") => match common::head_number() {
             Ok(n) => println!("{n}"),
             Err(e) => {
@@ -132,7 +141,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: tempo-dst <start|nemesis|oracle|finalize|head|deploy|deploy-tip20|trie-spec|tip20-spec|chain-spec|chain-check|chain-watch>");
+            eprintln!("usage: tempo-dst <start|nemesis|oracle|finalize|head|reference-head|deploy|deploy-tip20|trie-spec|tip20-spec|chain-spec|chain-check|chain-watch>");
             std::process::exit(2);
         }
     }

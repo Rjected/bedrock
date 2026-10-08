@@ -353,6 +353,9 @@ fn fetch(branch: &mut Branch, path: &str, offset: usize) -> Result<Vec<u8>> {
     }
 }
 
+/// Blocks the reference may trail the primary at the warm checkpoint.
+const REFERENCE_SYNC_SLACK: u64 = 2;
+
 fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>) -> Result<Checkpoint> {
     let mut vm = VmBuilder::new().memory_mb(args.memory_mb).build()?;
     if any_preempt(args) {
@@ -434,6 +437,32 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>) -> Result<Checkpoint> {
             "TIP-20 token minted at vt {:.1}s",
             warm.current_time().as_secs_f64()
         );
+    }
+    if args.reference {
+        // The reference backfills the primary's chain over p2p. Wait for it
+        // before the checkpoint so every branch starts with it synced (seen:
+        // a reference that never backfilled stalled at head 0 all run).
+        loop {
+            if warm.current_time() >= deadline {
+                return Err("reference node did not sync before warm timeout".into());
+            }
+            let head = |b: &mut Branch, cmd| {
+                host_bash(b, cmd)
+                    .map(|(code, out)| out.trim().parse::<u64>().ok().filter(|_| code == 0))
+            };
+            let primary = head(&mut warm, "tempo-dst head")?;
+            let reference = head(&mut warm, "tempo-dst reference-head")?;
+            println!(
+                "reference sync vt {:.1}s: primary {primary:?} reference {reference:?}",
+                warm.current_time().as_secs_f64()
+            );
+            if let (Some(p), Some(r)) = (primary, reference) {
+                if r + REFERENCE_SYNC_SLACK >= p {
+                    break;
+                }
+            }
+            warm.run_for(secs(5))?;
+        }
     }
     let (_, mem) = host_bash(&mut warm, MEM_REPORT)?;
     fs::write(args.out.join("guest-mem.txt"), mem)?;
