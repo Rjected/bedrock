@@ -36,7 +36,8 @@ guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 | `E1/trie-diff-*` | `--engine.state-root-task-compare-updates`: sparse-trie task vs. regular state-root updates differ |
 | `E2/head-stalled` | Head did not advance for `liveness_secs` while the node was up |
 | `E3/finalized-block-changed`, `E3/head-below-finalized` | The block the node reported finalized (`eth_getBlockByNumber("finalized")`) before a kill keeps its hash after the restart, and the head gets back to it. Unfinalized blocks may legitimately be rebuilt: reth unwinds to its persisted state-trie frontier, which trails the `Saved range of blocks` frontier (observed: saved 318, unwound to 308, finalized 269) |
-| `E5/storage-root-mismatch` | `--load trie`: at every block, the RawStorage contract's `storageHash` (`eth_getProof`) equals a root rebuilt from its slot values by an independent MPT (`guest/tempo-dst/src/trie_ref.rs`, no reth code) |
+| `E5/storage-root-mismatch` | `--load trie`: at every block, the RawStorage contract's `storageHash` (`eth_getProof`) equals a root rebuilt from scratch from its slot values (`eth_getStorageAt`) with alloy-trie's `HashBuilder`, not the node's incremental trie |
+| `E6/account-proof-invalid`, `E6/storage-proof-invalid`, `E6/proof-value-mismatch` | `--load trie`: that `eth_getProof` response verifies (`alloy_trie::proof::verify_proof`): the account proof against the header `stateRoot`, each slot's proof against `storageHash`, and the proven values equal `eth_getStorageAt` |
 | `E4/graceful-stop`, `E4/re-execute` | At the end of the run, the node stops cleanly, and `tempo re-execute` over `[1, head]` from its datadir agrees |
 | `container <name> exit code is zero` | workload-monitor: no unexplained container death |
 | `D/guest-exited` | The guest VM stopped mid-run (kernel panic, shutdown) |
@@ -113,7 +114,7 @@ draft PR that names it.
 - [ ] **D1** Spike: tuner (`tempoxyz/tuner`) `StructureTxGenerator` → serializable tx program
 - [ ] **D2** Genesis/fixture mapping: tuner fixture EOAs to dev accounts (mnemonic `test … junk`)
 - [ ] **D3** Lowering + in-guest submitter: resolve nonces at submit time, sign Tempo AA and EVM envelopes, record accepted/rejected/unknown
-- [x] **D4** Trie-shaping load (`--load trie`): raw-storage insert/update/delete on slots 544, 646, 131, 0, one step per block, checked by E5
+- [x] **D4** Trie-shaping load (`--load trie`): raw-storage insert/update/delete on slots 544, 646, 131, 0, one step per block, checked by E5 and E6
 - [ ] **D5** Coverage-guided mutation with tuner's mutator (needs G3)
 
 ### E: Oracles (`guest/tempo-dst`)

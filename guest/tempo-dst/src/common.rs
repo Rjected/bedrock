@@ -226,18 +226,7 @@ pub fn finalized_block() -> Result<Option<(u64, String)>, String> {
     Ok(Some((number, hash.to_lowercase())))
 }
 
-fn word(v: &Value) -> Result<[u8; 32], String> {
-    let s = v.as_str().ok_or_else(|| format!("not a hex word: {v}"))?;
-    let s = s.trim_start_matches("0x");
-    let s = format!("{s:0>64}");
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
-    }
-    Ok(out)
-}
-
-/// `(slot, value)` words of `address` at `block`.
+/// Values of `slots` of `address` at `block`.
 pub fn storage_at(
     address: &str,
     slots: &[u64],
@@ -246,24 +235,40 @@ pub fn storage_at(
     slots
         .iter()
         .map(|slot| {
-            let tag = format!("0x{block:x}");
             let value = rpc(
                 "eth_getStorageAt",
-                json!([address, format!("0x{slot:x}"), tag]),
+                json!([address, format!("0x{slot:x}"), format!("0x{block:x}")]),
             )?;
-            Ok((word(&json!(format!("0x{slot:x}")))?, word(&value)?))
+            Ok((
+                *slot,
+                serde_json::from_value(value).map_err(|e| e.to_string())?,
+            ))
         })
         .collect()
 }
 
-/// The node's storage root for `address` at `block` (`eth_getProof`).
-pub fn storage_hash(address: &str, block: u64) -> Result<String, String> {
-    let proof = rpc("eth_getProof", json!([address, [], format!("0x{block:x}")]))?;
-    proof
-        .get("storageHash")
-        .and_then(Value::as_str)
-        .map(str::to_lowercase)
-        .ok_or_else(|| format!("no storageHash: {proof}"))
+/// `eth_getProof` for `slots` of `address` at `block`.
+pub fn proof(
+    address: &str,
+    slots: &[u64],
+    block: u64,
+) -> Result<crate::trie_ref::AccountProof, String> {
+    let keys: Vec<String> = slots.iter().map(|s| format!("0x{s:x}")).collect();
+    let proof = rpc(
+        "eth_getProof",
+        json!([address, keys, format!("0x{block:x}")]),
+    )?;
+    serde_json::from_value(proof.clone()).map_err(|e| format!("bad eth_getProof: {e}: {proof}"))
+}
+
+/// Header `stateRoot` of `block`.
+pub fn state_root(block: u64) -> Result<alloy_primitives::B256, String> {
+    let header = rpc(
+        "eth_getBlockByNumber",
+        json!([format!("0x{block:x}"), false]),
+    )?;
+    serde_json::from_value(header["stateRoot"].clone())
+        .map_err(|e| format!("bad stateRoot: {e}: {header}"))
 }
 
 pub fn block_hash(number: u64) -> Result<Option<String>, String> {

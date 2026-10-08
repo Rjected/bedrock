@@ -1,173 +1,197 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Independent reference for a contract's storage root, used by the E5 oracle.
+//! Storage-trie references for the E5 and E6 oracles, on alloy-trie.
 //!
-//! Rebuilds the secure Merkle-Patricia trie from scratch: key
-//! `keccak256(bytes32(slot))`, value `rlp(minimal big-endian value)`, zero
-//! values absent. Deliberately shares no code with reth's trie crates so a bug
-//! there cannot hide in the reference.
+//! - [`storage_root`]: a contract's storage root rebuilt from scratch from its
+//!   slot values (`HashBuilder` over the sorted hashed slots). The node computes
+//!   roots incrementally (sparse trie, persisted trie updates), so a from-scratch
+//!   build is an independent path even though reth also links alloy-trie.
+//! - [`verify`]: an `eth_getProof` response checked against the block's state
+//!   root: the account proof, then each storage proof against `storageHash`.
 
-use tiny_keccak::{Hasher, Keccak};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256, U64};
+use alloy_trie::{proof::verify_proof, root::storage_root_unhashed, Nibbles, TrieAccount};
+use serde::Deserialize;
 
-/// `(slot, value)` pairs as 32-byte big-endian words.
-pub type Storage = Vec<([u8; 32], [u8; 32])>;
+/// `(slot, value)` pairs.
+pub type Storage = Vec<(u64, U256)>;
 
-pub fn keccak(data: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let mut k = Keccak::v256();
-    k.update(data);
-    k.finalize(&mut out);
-    out
-}
-
-enum Rlp {
-    Bytes(Vec<u8>),
-    List(Vec<Rlp>),
-}
-
-fn rlp_len(len: usize, offset: u8) -> Vec<u8> {
-    if len < 56 {
-        return vec![offset + len as u8];
-    }
-    let be = len.to_be_bytes();
-    let be: Vec<u8> = be.iter().copied().skip_while(|b| *b == 0).collect();
-    let mut out = vec![offset + 55 + be.len() as u8];
-    out.extend(be);
-    out
-}
-
-fn encode(item: &Rlp) -> Vec<u8> {
-    match item {
-        Rlp::Bytes(b) if b.len() == 1 && b[0] < 0x80 => b.clone(),
-        Rlp::Bytes(b) => {
-            let mut out = rlp_len(b.len(), 0x80);
-            out.extend(b);
-            out
-        }
-        Rlp::List(items) => {
-            let payload: Vec<u8> = items.iter().flat_map(encode).collect();
-            let mut out = rlp_len(payload.len(), 0xc0);
-            out.extend(payload);
-            out
-        }
-    }
-}
-
-/// Compact (hex-prefix) encoding of a nibble path.
-fn hex_prefix(nibbles: &[u8], leaf: bool) -> Vec<u8> {
-    let flag = if leaf { 2 } else { 0 };
-    let mut n = if nibbles.len() % 2 == 1 {
-        vec![flag + 1]
-    } else {
-        vec![flag, 0]
-    };
-    n.extend_from_slice(nibbles);
-    n.chunks(2).map(|c| (c[0] << 4) | c[1]).collect()
-}
-
-/// A child reference: the node inline if its encoding is < 32 bytes,
-/// otherwise its hash.
-fn child_ref(node: Rlp) -> Rlp {
-    let enc = encode(&node);
-    if enc.len() < 32 {
-        node
-    } else {
-        Rlp::Bytes(keccak(&enc).to_vec())
-    }
-}
-
-fn build(items: &[(Vec<u8>, Vec<u8>)]) -> Rlp {
-    if items.len() == 1 {
-        let (path, value) = &items[0];
-        return Rlp::List(vec![
-            Rlp::Bytes(hex_prefix(path, true)),
-            Rlp::Bytes(value.clone()),
-        ]);
-    }
-    let first = &items[0].0;
-    let common = (0..first.len())
-        .take_while(|&i| items.iter().all(|(p, _)| p[i] == first[i]))
-        .count();
-    if common > 0 {
-        let rest: Vec<_> = items
+/// Storage root of `storage`; zero values are absent from the trie.
+pub fn storage_root(storage: &[(u64, U256)]) -> B256 {
+    storage_root_unhashed(
+        storage
             .iter()
-            .map(|(p, v)| (p[common..].to_vec(), v.clone()))
-            .collect();
-        return Rlp::List(vec![
-            Rlp::Bytes(hex_prefix(&first[..common], false)),
-            child_ref(build(&rest)),
-        ]);
-    }
-    let mut children: Vec<Rlp> = (0..16u8)
-        .map(|nibble| {
-            let sub: Vec<_> = items
-                .iter()
-                .filter(|(p, _)| p[0] == nibble)
-                .map(|(p, v)| (p[1..].to_vec(), v.clone()))
-                .collect();
-            if sub.is_empty() {
-                Rlp::Bytes(Vec::new())
-            } else {
-                child_ref(build(&sub))
-            }
-        })
-        .collect();
-    // Branch value slot: always empty for fixed-length (32-byte) keys.
-    children.push(Rlp::Bytes(Vec::new()));
-    Rlp::List(children)
+            .filter(|(_, v)| !v.is_zero())
+            .map(|(slot, v)| (B256::from(U256::from(*slot)), *v)),
+    )
 }
 
-/// Storage root of `(slot, value)` pairs, slot and value as 32-byte
-/// big-endian words. Zero values are absent from the trie.
-pub fn storage_root(storage: &[([u8; 32], [u8; 32])]) -> [u8; 32] {
-    let items: Vec<(Vec<u8>, Vec<u8>)> = storage
-        .iter()
-        .filter(|(_, v)| v.iter().any(|b| *b != 0))
-        .map(|(slot, value)| {
-            let path = keccak(slot)
-                .iter()
-                .flat_map(|b| [b >> 4, b & 0x0f])
-                .collect();
-            let minimal: Vec<u8> = value.iter().copied().skip_while(|b| *b == 0).collect();
-            (path, encode(&Rlp::Bytes(minimal)))
-        })
-        .collect();
-    if items.is_empty() {
-        return keccak(&encode(&Rlp::Bytes(Vec::new())));
+/// `eth_getProof` response (EIP-1186).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountProof {
+    pub address: Address,
+    pub nonce: U64,
+    pub balance: U256,
+    pub code_hash: B256,
+    pub storage_hash: B256,
+    pub account_proof: Vec<Bytes>,
+    pub storage_proof: Vec<StorageProof>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct StorageProof {
+    pub key: U256,
+    pub value: U256,
+    pub proof: Vec<Bytes>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ProofError {
+    /// The account proof does not prove the reported account fields.
+    Account(String),
+    /// A storage proof does not prove the reported value under `storageHash`.
+    Storage { slot: U256, error: String },
+}
+
+/// Checks `proof` against `state_root`. An account with all-default fields
+/// must be proven absent.
+pub fn verify(proof: &AccountProof, state_root: B256) -> Result<(), ProofError> {
+    let account = TrieAccount {
+        nonce: proof.nonce.to(),
+        balance: proof.balance,
+        storage_root: proof.storage_hash,
+        code_hash: proof.code_hash,
+    };
+    let expected = (account != TrieAccount::default()).then(|| alloy_rlp::encode(account));
+    verify_proof(
+        state_root,
+        Nibbles::unpack(keccak256(proof.address)),
+        expected,
+        &proof.account_proof,
+    )
+    .map_err(|e| ProofError::Account(e.to_string()))?;
+    for sp in &proof.storage_proof {
+        let expected = (!sp.value.is_zero()).then(|| alloy_rlp::encode(sp.value));
+        verify_proof(
+            proof.storage_hash,
+            Nibbles::unpack(keccak256(B256::from(sp.key))),
+            expected,
+            &sp.proof,
+        )
+        .map_err(|e| ProofError::Storage {
+            slot: sp.key,
+            error: e.to_string(),
+        })?;
     }
-    keccak(&encode(&build(&items)))
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
-
-    fn word(n: u64) -> [u8; 32] {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&n.to_be_bytes());
-        w
-    }
+    use alloy_trie::{proof::ProofRetainer, HashBuilder};
+    use serde_json::Value;
 
     fn root_hex(pairs: &[(u64, u64)]) -> String {
-        let storage: Vec<_> = pairs.iter().map(|(s, v)| (word(*s), word(*v))).collect();
-        format!("0x{}", hex(&storage_root(&storage)))
+        let storage: Vec<_> = pairs.iter().map(|(s, v)| (*s, U256::from(*v))).collect();
+        storage_root(&storage).to_string()
     }
 
-    fn hex(b: &[u8]) -> String {
-        b.iter().map(|x| format!("{x:02x}")).collect()
+    /// Proof of `nodes`' leaves, retained for `targets`, as `(root, proof per target)`.
+    fn build(leaves: &[(B256, Vec<u8>)], targets: &[B256]) -> (B256, Vec<Vec<Bytes>>) {
+        let mut leaves = leaves.to_vec();
+        leaves.sort();
+        let retainer = ProofRetainer::from_iter(targets.iter().map(|t| Nibbles::unpack(*t)));
+        let mut hb = HashBuilder::default().with_proof_retainer(retainer);
+        for (key, value) in &leaves {
+            hb.add_leaf(Nibbles::unpack(*key), value);
+        }
+        let root = hb.root();
+        let nodes = hb.take_proof_nodes();
+        let proofs = targets
+            .iter()
+            .map(|t| {
+                nodes
+                    .matching_nodes_sorted(&Nibbles::unpack(*t))
+                    .into_iter()
+                    .map(|(_, n)| n)
+                    .collect()
+            })
+            .collect();
+        (root, proofs)
     }
 
-    #[test]
-    fn keccak_empty_vector() {
-        assert_eq!(
-            hex(&keccak(b"")),
-            "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+    /// An honest node's `(state_root, eth_getProof)` for a contract at
+    /// `address` holding `storage`, proving `slots`.
+    pub fn honest_proof(
+        address: &str,
+        storage: &[(u64, u64)],
+        slots: &[u64],
+    ) -> (B256, AccountProof) {
+        let address: Address = address.parse().unwrap();
+        let value = |s: u64| storage.iter().find(|(k, _)| *k == s).map_or(0, |(_, v)| *v);
+        let leaves: Vec<_> = storage
+            .iter()
+            .filter(|(_, v)| *v != 0)
+            .map(|(s, v)| {
+                (
+                    keccak256(B256::from(U256::from(*s))),
+                    alloy_rlp::encode(U256::from(*v)),
+                )
+            })
+            .collect();
+        let targets: Vec<_> = slots
+            .iter()
+            .map(|s| keccak256(B256::from(U256::from(*s))))
+            .collect();
+        let (storage_hash, storage_proofs) = build(&leaves, &targets);
+        let account = TrieAccount {
+            nonce: 1,
+            balance: U256::ZERO,
+            storage_root: storage_hash,
+            code_hash: keccak256(b"code"),
+        };
+        let key = keccak256(address);
+        let (state_root, mut account_proofs) = build(&[(key, alloy_rlp::encode(account))], &[key]);
+        let proof = AccountProof {
+            address,
+            nonce: U64::from(1),
+            balance: U256::ZERO,
+            code_hash: account.code_hash,
+            storage_hash,
+            account_proof: account_proofs.remove(0),
+            storage_proof: slots
+                .iter()
+                .zip(storage_proofs)
+                .map(|(s, proof)| StorageProof {
+                    key: U256::from(*s),
+                    value: U256::from(value(*s)),
+                    proof,
+                })
+                .collect(),
+        };
+        (state_root, proof)
+    }
+
+    /// Real `eth_getProof` responses from a Tempo dev node (reth 42fa3c5)
+    /// for the RawStorage contract, with the block's header `stateRoot`.
+    fn fixture(block: u64) -> (B256, AccountProof, Vec<U256>) {
+        let path = format!(
+            "{}/testdata/proof_block{block}.json",
+            env!("CARGO_MANIFEST_DIR")
         );
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        (
+            v["state_root"].as_str().unwrap().parse().unwrap(),
+            serde_json::from_value(v["proof"].clone()).unwrap(),
+            serde_json::from_value(v["storage_at"].clone()).unwrap(),
+        )
     }
 
     #[test]
     fn slot_paths_share_the_intended_prefixes() {
-        let prefix = |s| hex(&keccak(&word(s)))[..3].to_string();
+        let prefix = |s: u64| keccak256(B256::from(U256::from(s))).to_string()[2..5].to_string();
         assert_eq!(prefix(544), "120");
         assert_eq!(prefix(646), "121");
         assert_eq!(&prefix(131)[..2], "13");
@@ -230,12 +254,82 @@ mod tests {
     #[test]
     fn order_independent() {
         assert_eq!(
-            root_hex(&[(0, 7), (131, 7), (646, 7)]),
+            root_hex(&[(646, 7), (0, 7), (131, 7)]),
             "0x5dc82150a47e75b4c75a9636ce883582e517b4451ec6f17520c433a6cd4648fe"
         );
-        assert_eq!(
-            root_hex(&[(646, 7), (0, 7), (131, 7)]),
-            root_hex(&[(0, 7), (131, 7), (646, 7)])
-        );
+    }
+
+    /// Blocks 20 (empty storage), 21 (A only: three absence proofs) and 24
+    /// (A, B, C, D live).
+    #[test]
+    fn node_proofs_verify() {
+        for block in [20, 21, 24] {
+            let (state_root, proof, storage_at) = fixture(block);
+            assert_eq!(verify(&proof, state_root), Ok(()), "block {block}");
+            let values: Vec<_> = proof.storage_proof.iter().map(|p| p.value).collect();
+            assert_eq!(values, storage_at, "block {block}");
+            let storage: Vec<_> = [544, 646, 131, 0].into_iter().zip(storage_at).collect();
+            assert_eq!(storage_root(&storage), proof.storage_hash, "block {block}");
+        }
+    }
+
+    #[test]
+    fn tampered_node_proofs_fail() {
+        let (state_root, proof, _) = fixture(24);
+        assert!(matches!(
+            verify(&proof, B256::ZERO),
+            Err(ProofError::Account(_))
+        ));
+
+        let mut p = proof.clone();
+        p.storage_hash = fixture(21).1.storage_hash;
+        assert!(matches!(
+            verify(&p, state_root),
+            Err(ProofError::Account(_))
+        ));
+
+        let mut p = proof.clone();
+        p.storage_proof[0].value = U256::from(2);
+        assert!(matches!(
+            verify(&p, state_root),
+            Err(ProofError::Storage { .. })
+        ));
+
+        // Claiming a live slot is absent.
+        let mut p = proof.clone();
+        p.storage_proof[3].value = U256::ZERO;
+        assert!(matches!(
+            verify(&p, state_root),
+            Err(ProofError::Storage { .. })
+        ));
+
+        // A storage proof with its leaf dropped.
+        let mut p = proof.clone();
+        p.storage_proof[1].proof.pop();
+        assert!(matches!(
+            verify(&p, state_root),
+            Err(ProofError::Storage { .. })
+        ));
+
+        // Claiming an absent slot is live (block 21: only A is live).
+        let (state_root, mut p, _) = fixture(21);
+        p.storage_proof[1].value = U256::from(1);
+        assert!(matches!(
+            verify(&p, state_root),
+            Err(ProofError::Storage { .. })
+        ));
+    }
+
+    #[test]
+    fn honest_proofs_verify() {
+        let addr = "0x5fbdb2315678afecb367f032d93f642f64180aa3";
+        for storage in [
+            &[][..],
+            &[(544, 1)],
+            &[(544, 1), (646, 3), (131, 1), (0, 9)],
+        ] {
+            let (root, p) = honest_proof(addr, storage, &[544, 646, 131, 0]);
+            assert_eq!(verify(&p, root), Ok(()), "storage {storage:?}");
+        }
     }
 }

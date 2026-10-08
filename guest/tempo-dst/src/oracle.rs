@@ -6,8 +6,10 @@
 //!   engine/persistence failures, and ERROR-level lines.
 //! - E2 liveness: the head advances within `liveness_secs` while the node is up.
 //! - E5 storage trie: a RawStorage contract's storage root (`eth_getProof`)
-//!   equals an independent reference rebuilt from its slot values, at every
-//!   block (see `trie_ref`).
+//!   equals a root rebuilt from scratch from its slot values, at every block.
+//! - E6 proofs: that `eth_getProof` response verifies against the block's
+//!   state root, and proves the values `eth_getStorageAt` returns (see
+//!   `trie_ref`).
 //! - E3 durability: the block the node reported finalized before a kill keeps
 //!   its hash after the restart, and the head returns to it. Unfinalized blocks
 //!   may be rebuilt: reth's crash recovery unwinds to its persisted state-trie
@@ -23,7 +25,8 @@ use std::time::Duration;
 use bedrock_assertions::Condition;
 
 use crate::common::{self, Config, DstEvent, TrieConfig, NODE_CONTAINER};
-use crate::trie_ref;
+use crate::trie_ref::{self, AccountProof, ProofError};
+use alloy_primitives::{B256, U256};
 
 /// Signatures for log lines that indicate a bug on their own. Message strings
 /// are taken from reth at Tempo's pinned rev (42fa3c5); see the README table.
@@ -140,10 +143,6 @@ pub enum Verdict {
     Sometimes(bool, Finding),
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn finding(signature: &str, detail: String) -> Finding {
     Finding {
         signature: signature.into(),
@@ -162,10 +161,11 @@ pub trait Chain {
         slots: &[u64],
         block: u64,
     ) -> Result<trie_ref::Storage, String>;
-    fn storage_hash(&mut self, address: &str, block: u64) -> Result<String, String>;
+    fn proof(&mut self, address: &str, slots: &[u64], block: u64) -> Result<AccountProof, String>;
+    fn state_root(&mut self, block: u64) -> Result<B256, String>;
 }
 
-/// Blocks E5 checks per tick, newest last; older unchecked blocks are skipped.
+/// Blocks E5/E6 check per tick, newest last; older unchecked blocks are skipped.
 const TRIE_BLOCKS_PER_TICK: u64 = 10;
 
 #[derive(Debug)]
@@ -188,7 +188,7 @@ pub struct Oracle {
     /// Head when the last kill happened, for the recovery coverage signal.
     head_at_kill: Option<u64>,
     restart_ns: u64,
-    /// Contract checked by E5, and the last block checked.
+    /// Contract checked by E5/E6, and the last block checked.
     trie: Option<TrieConfig>,
     trie_checked: u64,
     trie_seen_full: bool,
@@ -221,8 +221,8 @@ impl Oracle {
         self
     }
 
-    /// E5 for blocks after the last checked one, up to `head`. A rewind
-    /// (head below the last checked block) re-checks the rebuilt blocks.
+    /// E5 and E6 for blocks after the last checked one, up to `head`. A
+    /// rewind (head below the last checked block) re-checks the rebuilt blocks.
     fn check_trie(&mut self, chain: &mut impl Chain, head: u64) -> Vec<Verdict> {
         let mut out = Vec::new();
         let Some(trie) = self.trie.clone() else {
@@ -233,33 +233,67 @@ impl Oracle {
         }
         let first = (self.trie_checked + 1).max(head.saturating_sub(TRIE_BLOCKS_PER_TICK - 1));
         for block in first..=head {
-            let (Ok(storage), Ok(got)) = (
+            let (Ok(storage), Ok(proof), Ok(state_root)) = (
                 chain.storage(&trie.address, &trie.slots, block),
-                chain.storage_hash(&trie.address, block),
+                chain.proof(&trie.address, &trie.slots, block),
+                chain.state_root(block),
             ) else {
                 return out;
             };
-            let want = format!("0x{}", hex(&trie_ref::storage_root(&storage)));
-            let live: Vec<u64> = trie
-                .slots
+            let live: Vec<u64> = storage
                 .iter()
-                .zip(&storage)
-                .filter(|(_, (_, v))| v.iter().any(|b| *b != 0))
+                .filter(|(_, v)| !v.is_zero())
                 .map(|(s, _)| *s)
                 .collect();
-            if want != got {
-                out.push(Verdict::Always(
-                    false,
-                    finding(
-                        "E5/storage-root-mismatch",
-                        format!("block {block}: live slots {live:?}, reference {want}, node {got}"),
-                    ),
+            let mut failures = Vec::new();
+            let reference = trie_ref::storage_root(&storage);
+            if reference != proof.storage_hash {
+                failures.push((
+                    "E5/storage-root-mismatch",
+                    format!("reference {reference}, node {}", proof.storage_hash),
                 ));
-            } else if !self.trie_seen_check {
+            }
+            match trie_ref::verify(&proof, state_root) {
+                Ok(()) => {}
+                Err(ProofError::Account(e)) => failures.push((
+                    "E6/account-proof-invalid",
+                    format!(
+                        "state root {state_root}, storage hash {}: {e}",
+                        proof.storage_hash
+                    ),
+                )),
+                Err(ProofError::Storage { slot, error }) => failures.push((
+                    "E6/storage-proof-invalid",
+                    format!("slot {slot}, storage hash {}: {error}", proof.storage_hash),
+                )),
+            }
+            let proven: Vec<(U256, U256)> = proof
+                .storage_proof
+                .iter()
+                .map(|p| (p.key, p.value))
+                .collect();
+            let read: Vec<(U256, U256)> =
+                storage.iter().map(|(s, v)| (U256::from(*s), *v)).collect();
+            if proven != read {
+                failures.push((
+                    "E6/proof-value-mismatch",
+                    format!("eth_getProof {proven:?}, eth_getStorageAt {read:?}"),
+                ));
+            }
+            if failures.is_empty() && !self.trie_seen_check {
                 self.trie_seen_check = true;
                 out.push(Verdict::Sometimes(
                     true,
                     finding("S/trie-checked", String::new()),
+                ));
+            }
+            for (signature, detail) in failures {
+                out.push(Verdict::Always(
+                    false,
+                    finding(
+                        signature,
+                        format!("block {block}: live slots {live:?}, {detail}"),
+                    ),
                 ));
             }
             if live.len() == trie.slots.len() && !self.trie_seen_full {
@@ -425,8 +459,11 @@ impl Chain for RpcChain {
     ) -> Result<trie_ref::Storage, String> {
         common::storage_at(address, slots, block)
     }
-    fn storage_hash(&mut self, address: &str, block: u64) -> Result<String, String> {
-        common::storage_hash(address, block)
+    fn proof(&mut self, address: &str, slots: &[u64], block: u64) -> Result<AccountProof, String> {
+        common::proof(address, slots, block)
+    }
+    fn state_root(&mut self, block: u64) -> Result<B256, String> {
+        common::state_root(block)
     }
 }
 
@@ -499,15 +536,10 @@ mod tests {
         head: Option<u64>,
         finalized: Option<u64>,
         hashes: std::collections::HashMap<u64, String>,
-        /// Per-block RawStorage values (slot -> value) and reported roots.
+        /// Per-block RawStorage values (slot -> value) that eth_getStorageAt
+        /// returns, and the (state root, eth_getProof) the node serves.
         trie_storage: std::collections::HashMap<u64, Vec<(u64, u64)>>,
-        trie_roots: std::collections::HashMap<u64, String>,
-    }
-
-    fn word(n: u64) -> [u8; 32] {
-        let mut w = [0u8; 32];
-        w[24..].copy_from_slice(&n.to_be_bytes());
-        w
+        trie_proofs: std::collections::HashMap<u64, (B256, AccountProof)>,
     }
 
     impl Chain for FakeChain {
@@ -533,49 +565,56 @@ mod tests {
                 .iter()
                 .map(|s| {
                     let v = set.iter().find(|(k, _)| k == s).map_or(0, |(_, v)| *v);
-                    (word(*s), word(v))
+                    (*s, U256::from(v))
                 })
                 .collect())
         }
-        fn storage_hash(&mut self, _address: &str, block: u64) -> Result<String, String> {
-            self.trie_roots
+        fn proof(&mut self, _: &str, _: &[u64], block: u64) -> Result<AccountProof, String> {
+            self.trie_proofs
                 .get(&block)
-                .cloned()
-                .ok_or_else(|| "no root".into())
+                .map(|(_, p)| p.clone())
+                .ok_or_else(|| "no proof".into())
+        }
+        fn state_root(&mut self, block: u64) -> Result<B256, String> {
+            self.trie_proofs
+                .get(&block)
+                .map(|(r, _)| *r)
+                .ok_or_else(|| "no block".into())
         }
     }
 
-    const ROOT_A1: &str = "0x9c1bc8c6765b46c895c98d38aa670890e839c5d554c818d13cd0a61f2199193f";
-    const ROOT_AB1: &str = "0xdad20cc093ebc92d483c79fc4d80d6d10a91197dab5ab6314d9c52815f8d8ce7";
-    const ROOT_EMPTY: &str = "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421";
+    const TRIE_ADDRESS: &str = "0x5fbdb2315678afecb367f032d93f642f64180aa3";
+    const TRIE_SLOTS: [u64; 2] = [544, 646];
 
     fn trie_oracle() -> Oracle {
         Oracle::new(60, 0).with_trie(Some(TrieConfig {
-            address: "0x5fbdb2315678afecb367f032d93f642f64180aa3".into(),
-            slots: vec![544, 646],
+            address: TRIE_ADDRESS.into(),
+            slots: TRIE_SLOTS.to_vec(),
         }))
     }
 
-    /// (block, live (slot, value) pairs, root the node reports).
-    type TrieBlock<'a> = (u64, &'a [(u64, u64)], &'a str);
+    /// Serve `storage` at `block` from both eth_getStorageAt and an honest
+    /// node's eth_getProof.
+    fn set_block(c: &mut FakeChain, block: u64, storage: &[(u64, u64)]) {
+        c.trie_storage.insert(block, storage.to_vec());
+        c.trie_proofs.insert(
+            block,
+            trie_ref::tests::honest_proof(TRIE_ADDRESS, storage, &TRIE_SLOTS),
+        );
+    }
 
-    fn trie_chain(roots: &[TrieBlock]) -> FakeChain {
+    fn trie_chain(blocks: &[(u64, &[(u64, u64)])]) -> FakeChain {
         let mut c = FakeChain::default();
-        for (b, storage, root) in roots {
-            c.trie_storage.insert(*b, storage.to_vec());
-            c.trie_roots.insert(*b, root.to_string());
+        for (b, storage) in blocks {
+            set_block(&mut c, *b, storage);
         }
         c
     }
 
     #[test]
-    fn storage_root_matching_reference_passes() {
+    fn honest_trie_blocks_pass() {
         let mut o = trie_oracle();
-        let mut c = trie_chain(&[
-            (1, &[], ROOT_EMPTY),
-            (2, &[(544, 1)], ROOT_A1),
-            (3, &[(544, 1), (646, 1)], ROOT_AB1),
-        ]);
+        let mut c = trie_chain(&[(1, &[]), (2, &[(544, 1)]), (3, &[(544, 1), (646, 1)])]);
         c.head = Some(3);
         assert_eq!(
             sigs(&o.tick(&mut c, S)),
@@ -586,22 +625,43 @@ mod tests {
     #[test]
     fn storage_root_mismatch_is_reported() {
         let mut o = trie_oracle();
-        // The node claims the A-only root for the A/B storage.
-        let mut c = trie_chain(&[(1, &[(544, 1), (646, 1)], ROOT_A1)]);
+        // The node's trie (and proofs) hold A only, but slot B reads 1.
+        let mut c = trie_chain(&[(1, &[(544, 1)])]);
+        c.trie_storage.insert(1, vec![(544, 1), (646, 1)]);
         c.head = Some(1);
         let v = o.tick(&mut c, S);
-        assert!(sigs(&v).contains(&(false, "E5/storage-root-mismatch")));
+        let v = sigs(&v);
+        assert!(v.contains(&(false, "E5/storage-root-mismatch")), "{v:?}");
+        assert!(v.contains(&(false, "E6/proof-value-mismatch")), "{v:?}");
+    }
+
+    #[test]
+    fn invalid_proofs_are_reported() {
+        let mut o = trie_oracle();
+        let mut c = trie_chain(&[(1, &[(544, 1)]), (2, &[(544, 1), (646, 1)])]);
+        // Block 1: the header's state root does not commit to the account.
+        c.trie_proofs.get_mut(&1).unwrap().0 = B256::repeat_byte(1);
+        // Block 2: a storage proof is missing its leaf.
+        c.trie_proofs.get_mut(&2).unwrap().1.storage_proof[0]
+            .proof
+            .pop();
+        c.head = Some(2);
+        let v = o.tick(&mut c, S);
+        let v = sigs(&v);
+        assert!(v.contains(&(false, "E6/account-proof-invalid")), "{v:?}");
+        assert!(v.contains(&(false, "E6/storage-proof-invalid")), "{v:?}");
+        assert!(!v.contains(&(false, "E5/storage-root-mismatch")), "{v:?}");
     }
 
     #[test]
     fn rewound_blocks_are_rechecked() {
         let mut o = trie_oracle();
-        let mut c = trie_chain(&[(1, &[], ROOT_EMPTY), (2, &[(544, 1)], ROOT_A1)]);
+        let mut c = trie_chain(&[(1, &[]), (2, &[(544, 1)])]);
         c.head = Some(2);
         o.tick(&mut c, S);
-        // Crash recovery rewinds to block 1 and rebuilds block 2 differently.
+        // Crash recovery rewinds to block 1 and rebuilds block 2 with B
+        // written, but the node's trie misses the write.
         c.trie_storage.insert(2, vec![(544, 1), (646, 1)]);
-        c.trie_roots.insert(2, ROOT_A1.into());
         c.head = Some(1);
         o.tick(&mut c, 2 * S);
         c.head = Some(2);
