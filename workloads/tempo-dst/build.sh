@@ -3,6 +3,10 @@
 # workload's build) plus this workload's ready signaller, trie, TIP-20 and
 # chain loads.
 set -euo pipefail
+# Concurrent builds of the same images (parallel hunt.sh / run.sh) collide;
+# serialize them host-wide.
+exec 9>"${BUILD_LOCK:-/tmp/bedrock-dst-build.lock}"
+flock 9
 cd "$(dirname "$0")"
 DOCKER=${DOCKER:-docker}
 ../tempo/build.sh

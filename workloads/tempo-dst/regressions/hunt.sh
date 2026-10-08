@@ -18,8 +18,11 @@ variant=default
 if [ "${1:-}" = --variant ]; then variant=$2; shift 2; fi
 image=bedrock/tempo-localnet:known-fixes
 mkdir -p "$out"
-"${docker[@]}" image inspect "$image" >/dev/null 2>&1 || "$here/build.sh" known-fixes
-DOCKER="${DOCKER:-docker}" "$here/../build.sh" >/dev/null
+# Builds log to $out/build.log; a failure stops the hunt with a pointer to it.
+build_failed() { echo "hunt: image build failed; see $out/build.log" >&2; exit 1; }
+"${docker[@]}" image inspect "$image" >/dev/null 2>&1 ||
+  "$here/build.sh" known-fixes >>"$out/build.log" 2>&1 || build_failed
+DOCKER="${DOCKER:-docker}" "$here/../build.sh" >>"$out/build.log" 2>&1 || build_failed
 "${docker[@]}" save "$image" bedrock/tempo-txgen:latest bedrock/tempo-dst-ready:latest \
   bedrock/tempo-dst-trie:latest bedrock/tempo-dst-tip20:latest \
   bedrock/tempo-dst-chain:latest > "$out/images.tar"

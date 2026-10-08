@@ -27,6 +27,10 @@
 # reth crates and their dependents. CHEF_IMAGE overrides it with any cooked
 # Tempo chef image at the same revisions.
 set -euo pipefail
+# Concurrent builds of the same images (parallel hunt.sh / run.sh) collide;
+# serialize them host-wide.
+exec 9>"${BUILD_LOCK:-/tmp/bedrock-dst-build.lock}"
+flock 9
 here=$(cd "$(dirname "$0")" && pwd)
 name=${1:?usage: build.sh <regression>}
 # shellcheck source=/dev/null
