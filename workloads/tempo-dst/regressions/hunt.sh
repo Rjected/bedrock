@@ -16,12 +16,14 @@ out=${OUT:-$PWD/hunt-$(date +%Y%m%d-%H%M%S)}
 shards=${SHARDS:-8} seeds=${SEEDS:-25} start=${SEED_START:-0}
 variant=default
 if [ "${1:-}" = --variant ]; then variant=$2; shift 2; fi
-image=bedrock/tempo-localnet:known-fixes
+# NODE: the regressions/ entry whose image to hunt on (e.g. known-fixes-debug).
+node=${NODE:-known-fixes}
+image=bedrock/tempo-localnet:$node
 mkdir -p "$out"
 # Builds log to $out/build.log; a failure stops the hunt with a pointer to it.
 build_failed() { echo "hunt: image build failed; see $out/build.log" >&2; exit 1; }
 "${docker[@]}" image inspect "$image" >/dev/null 2>&1 ||
-  "$here/build.sh" known-fixes >>"$out/build.log" 2>&1 || build_failed
+  "$here/build.sh" "$node" >>"$out/build.log" 2>&1 || build_failed
 DOCKER="${DOCKER:-docker}" "$here/../build.sh" >>"$out/build.log" 2>&1 || build_failed
 "${docker[@]}" save "$image" bedrock/tempo-txgen:latest bedrock/tempo-dst-ready:latest \
   bedrock/tempo-dst-trie:latest bedrock/tempo-dst-tip20:latest \
