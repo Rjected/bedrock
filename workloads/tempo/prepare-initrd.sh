@@ -2,9 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 source_initrd=${1:?Pass the Nix-built podman initrd}
+output=${2:-$PWD/initrd.gz}
 task_stage=$(mktemp -d)
 trap 'chmod -R u+w "$task_stage"; find "$task_stage" -depth -delete' EXIT
-output=$PWD/initrd.gz
 cd "$task_stage"
 gzip -dc "$source_initrd" | cpio -id --quiet
 chmod u+w init
@@ -20,4 +20,7 @@ s = s.replace(line + '\n', '')
 s = s.replace('bedrock-pebs-register |', line + '\necho "Tempo guest: reported CPUs=$(nproc)"\nbedrock-pebs-register |', 1)
 p.write_text(s)
 PY
-find . -print0 | cpio --null --owner=0:0 --quiet -o -H newc | gzip -1 > "$output"
+# Write then rename, so a campaign reading the previous file never sees a
+# partial one.
+find . -print0 | cpio --null --owner=0:0 --quiet -o -H newc | gzip -1 > "$output.tmp.$$"
+mv "$output.tmp.$$" "$output"

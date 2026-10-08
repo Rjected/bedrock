@@ -10,6 +10,16 @@
 # - RETH_FIX_PR=<number> RETH_FIX_HEAD=<commit>: an unmerged fix. buggy =
 #   pinned; fixed = pinned reth with the PR's changes applied.
 #
+# BASE_RETH_PRS="<number>:<head commit> ..." applies unmerged fixes for other
+# bugs to BOTH images, so a known bug that shares this regression's signature
+# can't fire on either side. Neither image is then the pinned one; both are
+# built. BASE_RETH_PATCHES="<file in the entry dir> ..." does the same with
+# patches.
+#
+# An entry with only base fixes (no RETH_REVERT/RETH_PATCH/RETH_FIX_PR) builds
+# one image, bedrock/tempo-localnet:<name>: e.g. known-fixes, the pinned node
+# with every known bug fixed, for campaigns hunting new ones.
+#
 #   DOCKER='sudo docker' ./workloads/tempo-dst/regressions/build.sh reth-27267
 #
 # The chef stage (all dependencies, ~17 GB) is built from unpatched reth once
@@ -61,21 +71,59 @@ if ! "${docker[@]}" image inspect "$chef" >/dev/null 2>&1; then
 fi
 
 reth=(git -C "$work/tempo/reth" -c user.name=regression -c user.email=regression@localhost)
+# Applies unmerged PR <number> at <head> to the reth checkout and commits it;
+# fails unless the tree changed.
+apply_pr() {
+  local pr=$1 head=$2 before
+  "${reth[@]}" fetch -q origin "pull/$pr/head"
+  test "$("${reth[@]}" rev-parse FETCH_HEAD)" = "$head" ||
+    echo "note: PR $pr has moved past $head; using the pinned head" >&2
+  before=$("${reth[@]}" rev-parse HEAD)
+  "${reth[@]}" diff "$("${reth[@]}" merge-base "$reth_rev" "$head")" "$head" | "${reth[@]}" apply --index
+  "${reth[@]}" commit -q -m "apply paradigmxyz/reth#$pr at $head"
+  test -n "$("${reth[@]}" diff --name-only "$before" HEAD)"
+  echo "applied reth#$pr: $("${reth[@]}" diff --shortstat "$before" HEAD)"
+}
+for base in ${BASE_RETH_PRS:-}; do
+  apply_pr "${base%%:*}" "${base#*:}"
+done
+for patch in ${BASE_RETH_PATCHES:-}; do
+  "${reth[@]}" apply --index "$here/$name/$patch"
+  "${reth[@]}" commit -q -m "apply $patch"
+  echo "applied $patch"
+done
+
+build() {
+  local tag=$name${1:+-$1}
+  DOCKER_BUILDKIT=1 "${docker[@]}" build --target tempo-localnet -f "$work/tempo/Dockerfile" \
+    --build-arg CHEF_IMAGE="$chef" -t "bedrock/tempo-localnet:$tag" "$work/tempo"
+  echo "Built bedrock/tempo-localnet:$tag (reth $("${reth[@]}" log --oneline -1 | cut -c1-80))"
+}
+# The regression's other side: built from the same base when there is one,
+# else the pinned image.
+other() {
+  if [ -n "${BASE_RETH_PRS:-}${BASE_RETH_PATCHES:-}" ]; then
+    "${reth[@]}" checkout -q "$1"
+    build "$2"
+  else
+    "${docker[@]}" tag bedrock/tempo-localnet:pinned "bedrock/tempo-localnet:$name-$2"
+    echo "bedrock/tempo-localnet:$name-$2 is the pinned image"
+  fi
+}
+base=$("${reth[@]}" rev-parse HEAD)
 if [ -n "${RETH_REVERT:-}" ]; then
   "${reth[@]}" revert --no-edit "$RETH_REVERT"
-  built=buggy pinned=fixed
+  build buggy
+  other "$base" fixed
 elif [ -n "${RETH_PATCH:-}" ]; then
   "${reth[@]}" apply --index "$here/$name/$RETH_PATCH"
-  built=buggy pinned=fixed
+  "${reth[@]}" commit -q -m "regression $name"
+  build buggy
+  other "$base" fixed
+elif [ -n "${RETH_FIX_PR:-}" ]; then
+  apply_pr "$RETH_FIX_PR" "$RETH_FIX_HEAD"
+  build fixed
+  other "$base" buggy
 else
-  "${reth[@]}" fetch -q origin "pull/$RETH_FIX_PR/head"
-  test "$("${reth[@]}" rev-parse FETCH_HEAD)" = "$RETH_FIX_HEAD" ||
-    echo "note: PR $RETH_FIX_PR has moved past $RETH_FIX_HEAD; using the pinned head" >&2
-  "${reth[@]}" diff "$("${reth[@]}" merge-base "$reth_rev" "$RETH_FIX_HEAD")" "$RETH_FIX_HEAD" |
-    "${reth[@]}" apply --3way
-  built=fixed pinned=buggy
+  build ""
 fi
-DOCKER_BUILDKIT=1 "${docker[@]}" build --target tempo-localnet -f "$work/tempo/Dockerfile" \
-  --build-arg CHEF_IMAGE="$chef" -t "bedrock/tempo-localnet:$name-$built" "$work/tempo"
-"${docker[@]}" tag bedrock/tempo-localnet:pinned "bedrock/tempo-localnet:$name-$pinned"
-echo "Built bedrock/tempo-localnet:$name-$built; $name-$pinned is the pinned image"

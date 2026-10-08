@@ -13,6 +13,10 @@
 #
 # Variants that change node flags change the compose file, hence the boot
 # prefix: compare variants by campaign, not by seed within one campaign.
+#
+# RUN_DIR (default workloads/tempo-dst) holds this campaign's generated inputs:
+# compose-run.yaml, initrd.gz and inputs.sha256. Concurrent campaigns need
+# distinct RUN_DIRs; replay reads them from there.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 variant=default
@@ -25,7 +29,9 @@ while true; do
   esac
 done
 root=workloads/tempo-dst
-python3 - "$variant" "$node_image" <<'PY'
+mkdir -p "${RUN_DIR:-$root}"
+run_dir=$(cd "${RUN_DIR:-$root}" && pwd)
+python3 - "$variant" "$node_image" "$run_dir" <<'PY'
 import sys
 from pathlib import Path
 flags = {
@@ -45,19 +51,19 @@ s = (root / "compose.yaml").read_text()
 anchor = "      - --engine.state-root-task-compare-updates\n"
 s = s.replace(anchor, anchor + "".join(f"      - {f}\n" for f in flags))
 s = s.replace("image: bedrock/tempo-localnet:pinned", f"image: {sys.argv[2]}")
-(root / "compose-run.yaml").write_text(s)
+(Path(sys.argv[3]) / "compose-run.yaml").write_text(s)
 PY
 NIX=${NIX:-/nix/var/nix/profiles/default/bin/nix}
 dst=$($NIX build .#bedrock-dst --no-link --print-out-paths)
 kernel=$($NIX build .#guestKernel --no-link --print-out-paths)
 initrd=$($NIX build .#podmanInitrd --no-link --print-out-paths)
-./workloads/tempo/prepare-initrd.sh "$initrd"
+./workloads/tempo/prepare-initrd.sh "$initrd" "$run_dir/initrd.gz"
 images=${IMAGES:-$root/images.tar}
-sha256sum "$kernel/vmlinux" workloads/tempo/initrd.gz "$images" "$root/compose-run.yaml" \
-  > "$root/inputs.sha256"
+sha256sum "$kernel/vmlinux" "$run_dir/initrd.gz" "$images" "$run_dir/compose-run.yaml" \
+  > "$run_dir/inputs.sha256"
 if [ ! -c /dev/bedrock ]; then
   echo "no /dev/bedrock: load bedrock.ko on a bare-metal host with EPT-friendly PEBS" >&2
   exit 1
 fi
 exec "$dst/bin/bedrock-dst" campaign --vmlinux "$kernel/vmlinux" \
-  --initrd workloads/tempo/initrd.gz --compose "$root/compose-run.yaml" --images "$images" "$@"
+  --initrd "$run_dir/initrd.gz" --compose "$run_dir/compose-run.yaml" --images "$images" "$@"
