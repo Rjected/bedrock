@@ -611,6 +611,16 @@ impl Branch {
                         })
                     }
                 },
+                // As in run_until: guest getrandom() exits while the action runs.
+                ExitKind::VmcallGetRandom => match self.feed_random()? {
+                    FeedRng::Fed => continue,
+                    FeedRng::Exhausted | FeedRng::NoSource => {
+                        return Err(LabError::UnexpectedExit {
+                            at,
+                            kind: exit.kind(),
+                        })
+                    }
+                },
                 ExitKind::Continue | ExitKind::EventBufferFull | ExitKind::VmcallReady => continue,
                 kind => return Err(LabError::UnexpectedExit { at, kind }),
             }
