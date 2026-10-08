@@ -1,0 +1,55 @@
+# Regression trigger for paradigmxyz/reth#27267 (see ../regressions/reth-27267).
+#
+# Slots 40364 and 105566 share 8 keccak nibbles (f291631c..), so with values
+# below 0x80 their leaves encode in under 32 bytes and are inlined in their
+# parent branch. Before the fix, eth_getMultiProof also emitted the inlined
+# leaf as a standalone proof node, which fails verification (E6/multiproof-*).
+# Run with --trie-spec inline.yaml --trie-slots 40364,105566.
+
+chain_id: 1337
+
+accounts:
+  trie:
+    mnemonic: "test test test test test test test test test test test junk"
+    range: [0, 1]
+
+artifacts:
+  RawStorage:
+    abi: raw-storage.json
+    bytecode: raw-storage.json
+
+
+templates:
+  set_slot:
+    type: tempo
+    from: { pool: trie, select: { index: 0 } }
+    gas_limit: 1000000
+    max_fee_per_gas: 100000000000
+    max_priority_fee_per_gas: 1000000000
+    fee_token: "0x20c0000000000000000000000000000000000000"
+    call:
+      abi: RawStorage
+      function: set
+      args: []
+
+sequences:
+  # Both leaves live: the shared-prefix branch with two inline children.
+  pair:
+    steps:
+      - { name: i1_set, template: set_slot, with: { call: { to: "0x5FbDB2315678afecb367f032d93F642f64180aa3", args: [40364, 1] } } }
+      - { name: i2_set, template: set_slot, with: { call: { to: "0x5FbDB2315678afecb367f032d93F642f64180aa3", args: [105566, 1] } } }
+  # Rewrite an inline leaf.
+  bump:
+    steps:
+      - { name: i1_two, template: set_slot, with: { call: { to: "0x5FbDB2315678afecb367f032d93F642f64180aa3", args: [40364, 2] } } }
+      - { name: i1_one, template: set_slot, with: { call: { to: "0x5FbDB2315678afecb367f032d93F642f64180aa3", args: [40364, 1] } } }
+  # Collapse the branch to one leaf and re-split it.
+  split:
+    steps:
+      - { name: i2_delete, template: set_slot, with: { call: { to: "0x5FbDB2315678afecb367f032d93F642f64180aa3", args: [105566, 0] } } }
+      - { name: i2_reinsert, template: set_slot, with: { call: { to: "0x5FbDB2315678afecb367f032d93F642f64180aa3", args: [105566, 1] } } }
+
+mix:
+  - { sequence: pair, weight: 1 }
+  - { sequence: bump, weight: 3 }
+  - { sequence: split, weight: 3 }

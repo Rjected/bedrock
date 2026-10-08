@@ -88,8 +88,6 @@ const TRIE_IMAGE: &str = "bedrock/tempo-dst-trie:latest";
 /// RawStorage deployed by trie/deploy.yaml during warmup: dev account 0's
 /// first transaction on a fresh chain (CREATE address of nonce 0).
 const TRIE_CONTRACT: &str = "0x5fbdb2315678afecb367f032d93f642f64180aa3";
-/// Raw slots whose keccak paths share prefixes: 120.., 121.., 13.., 2...
-const TRIE_SLOTS: [u64; 4] = [544, 646, 131, 0];
 
 #[derive(ClapArgs, Clone, Serialize, Deserialize)]
 struct CampaignArgs {
@@ -151,6 +149,15 @@ struct CampaignArgs {
     /// Trie load rate; ~5 tx/s puts about one step in each 200 ms block.
     #[arg(long, default_value_t = 5)]
     trie_tps: u64,
+    /// txgen spec in the trie load image's /workload/trie/ (e.g. a
+    /// regression's trigger sequences).
+    #[arg(long, default_value = "trie.yaml")]
+    trie_spec: String,
+    /// RawStorage slots the trie oracles read and prove: every slot the spec
+    /// writes. The default set's keccak paths share prefixes: 120.., 121..,
+    /// 13.., 2...
+    #[arg(long, value_delimiter = ',', default_value = "544,646,131,0")]
+    trie_slots: Vec<u64>,
     #[arg(long, default_value = "dst-out")]
     out: PathBuf,
 }
@@ -297,12 +304,12 @@ fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
                 "count": (args.run_secs + 60) * args.trie_tps,
                 "tps": args.trie_tps,
                 "image": TRIE_IMAGE,
-                "spec": "/workload/trie/trie.yaml",
+                "spec": format!("/workload/trie/{}", args.trie_spec),
             }),
         },
         "trie": (args.load == Load::Trie).then(|| json!({
             "address": TRIE_CONTRACT,
-            "slots": TRIE_SLOTS,
+            "slots": args.trie_slots,
         })),
     })
 }
@@ -525,5 +532,34 @@ mod tests {
         assert_eq!(c["load"]["tps"], 5);
         assert_eq!(c["trie"]["slots"], serde_json::json!([544, 646, 131, 0]));
         assert!(!c.to_string().contains('\''));
+    }
+
+    #[test]
+    fn trie_spec_and_slots_are_configurable() {
+        let Cmd::Campaign(args) = Cli::parse_from([
+            "x",
+            "campaign",
+            "--vmlinux",
+            "k",
+            "--initrd",
+            "i",
+            "--compose",
+            "c",
+            "--images",
+            "t",
+            "--load",
+            "trie",
+            "--trie-spec",
+            "inline.yaml",
+            "--trie-slots",
+            "40364,105566",
+        ])
+        .cmd
+        else {
+            unreachable!()
+        };
+        let c = guest_config(&args, 3);
+        assert_eq!(c["load"]["spec"], "/workload/trie/inline.yaml");
+        assert_eq!(c["trie"]["slots"], serde_json::json!([40364, 105566]));
     }
 }
