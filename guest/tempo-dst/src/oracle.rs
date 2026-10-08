@@ -177,11 +177,32 @@ pub trait Chain {
 /// Blocks E5/E6 check per tick, newest last; older unchecked blocks are skipped.
 const TRIE_BLOCKS_PER_TICK: u64 = 10;
 
-/// E5/E6 also re-check the block this far behind the head each tick. Its
-/// proofs come from the persisted trie with the newer blocks' changes reverted
-/// in an overlay, not from the in-memory tip; needs `--rpc.eth-proof-window`
-/// above it.
-const TRIE_HISTORICAL_LAG: u64 = 128;
+/// E5/E6 also re-check two older blocks each tick, at depths that sweep these
+/// ranges: shallow blocks straddle the persisted state-trie frontier (state
+/// masking keeps it behind the persisted block tip); deep ones are served from
+/// the persisted trie with the newer blocks reverted in an overlay. Needs
+/// `--rpc.eth-proof-window` above the deep range.
+const TRIE_SHALLOW_DEPTHS: (u64, u64) = (2, 48);
+const TRIE_DEEP_DEPTHS: (u64, u64) = (49, 250);
+
+/// The `tick`th depth in `lo..=hi`; a stride coprime to the range length
+/// visits every depth once per cycle.
+fn sweep_depth((lo, hi): (u64, u64), tick: u64) -> u64 {
+    let len = hi - lo + 1;
+    let stride = (1..len)
+        .rev()
+        .find(|s| gcd(*s, len) == 1 && *s < len / 2 + 1)
+        .unwrap_or(1);
+    lo + tick.wrapping_mul(stride) % len
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
 
 /// `(signature, detail)`.
 type Failure = (String, String);
@@ -191,7 +212,9 @@ type Failure = (String, String);
 ///
 /// Both proof RPCs are checked, `eth_getProof` and reth's `eth_getMultiProof`
 /// (signatures `E5/multiproof-*`, `E6/multiproof-*`): they build proofs on
-/// different code paths.
+/// different code paths. An `eth_getProof` without storage targets is checked
+/// too (`E5/untargeted-*`, `E6/untargeted-*`): targets make the node recompute
+/// their paths, which can mask a stale node elsewhere in the trie.
 fn check_trie_block(
     chain: &mut impl Chain,
     trie: &TrieConfig,
@@ -205,6 +228,7 @@ fn check_trie_block(
             "multiproof-",
             chain.multiproof(&trie.address, &trie.slots, block).ok()?,
         ),
+        ("untargeted-", chain.proof(&trie.address, &[], block).ok()?),
     ];
     let live = storage
         .iter()
@@ -246,7 +270,7 @@ fn check_trie_block(
             .iter()
             .map(|p| (p.key, p.value))
             .collect();
-        if proven != read {
+        if !(rpc.starts_with("untargeted") && proven.is_empty()) && proven != read {
             fail(
                 "E6",
                 "proof-value-mismatch",
@@ -282,6 +306,8 @@ pub struct Oracle {
     trie_checked: u64,
     trie_seen_full: bool,
     trie_seen_check: bool,
+    /// `check_trie` calls, which advance the depth sweep.
+    trie_ticks: u64,
     /// A block produced during the run included a transaction.
     load_seen: bool,
 }
@@ -304,6 +330,7 @@ impl Oracle {
             trie_checked: 0,
             trie_seen_full: false,
             trie_seen_check: false,
+            trie_ticks: 0,
             load_seen: false,
         }
     }
@@ -313,9 +340,9 @@ impl Oracle {
         self
     }
 
-    /// E5 and E6 for blocks after the last checked one, up to `head`, plus
-    /// the block [`TRIE_HISTORICAL_LAG`] behind `head`. A rewind (head below
-    /// the last checked block) re-checks the rebuilt blocks.
+    /// E5 and E6 for blocks after the last checked one, up to `head`, plus a
+    /// shallow and a deep older block (see [`TRIE_SHALLOW_DEPTHS`]). A rewind
+    /// (head below the last checked block) re-checks the rebuilt blocks.
     fn check_trie(&mut self, chain: &mut impl Chain, head: u64) -> Vec<Verdict> {
         let mut out = Vec::new();
         let Some(trie) = self.trie.clone() else {
@@ -325,8 +352,14 @@ impl Oracle {
             self.trie_checked = head.saturating_sub(1);
         }
         let first = (self.trie_checked + 1).max(head.saturating_sub(TRIE_BLOCKS_PER_TICK - 1));
-        let historical = head.checked_sub(TRIE_HISTORICAL_LAG).filter(|b| *b > 0);
-        for block in historical.into_iter().chain(first..=head) {
+        let tick = self.trie_ticks;
+        self.trie_ticks += 1;
+        let older: Vec<u64> = [TRIE_SHALLOW_DEPTHS, TRIE_DEEP_DEPTHS]
+            .into_iter()
+            .filter_map(|range| head.checked_sub(sweep_depth(range, tick)))
+            .filter(|b| *b > 0 && *b < first)
+            .collect();
+        for block in older.into_iter().chain(first..=head) {
             let Some((live, failures)) = check_trie_block(chain, &trie, block) else {
                 return out;
             };
@@ -577,7 +610,7 @@ pub fn run() {
     let cfg = Config::load();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || follow_logs(tx));
-    let mut oracle = Oracle::new(cfg.liveness_secs, common::guest_time_ns()).with_trie(cfg.trie);
+    let mut oracle = Oracle::new(cfg.liveness_secs, common::guest_time_ns()).with_trie(cfg.trie());
     let mut chain = RpcChain;
     let mut seen_events = 0;
     loop {
@@ -645,11 +678,16 @@ mod tests {
                 })
                 .collect())
         }
-        fn proof(&mut self, _: &str, _: &[u64], block: u64) -> Result<AccountProof, String> {
-            self.trie_proofs
+        fn proof(&mut self, _: &str, slots: &[u64], block: u64) -> Result<AccountProof, String> {
+            let mut p = self
+                .trie_proofs
                 .get(&block)
                 .map(|(_, p)| p.clone())
-                .ok_or_else(|| "no proof".into())
+                .ok_or("no proof")?;
+            if slots.is_empty() {
+                p.storage_proof.clear();
+            }
+            Ok(p)
         }
         fn multiproof(&mut self, a: &str, s: &[u64], block: u64) -> Result<AccountProof, String> {
             match self.multiproofs.get(&block) {
@@ -788,17 +826,47 @@ mod tests {
     }
 
     #[test]
-    fn historical_block_is_rechecked_each_tick() {
+    fn depth_sweep_visits_every_depth() {
+        for range in [TRIE_SHALLOW_DEPTHS, TRIE_DEEP_DEPTHS] {
+            let len = range.1 - range.0 + 1;
+            let seen: std::collections::BTreeSet<u64> =
+                (0..len).map(|t| sweep_depth(range, t)).collect();
+            assert_eq!(seen.len() as u64, len);
+            assert_eq!(seen.first(), Some(&range.0));
+            assert_eq!(seen.last(), Some(&range.1));
+        }
+    }
+
+    #[test]
+    fn older_blocks_are_rechecked_across_depths() {
         let mut o = trie_oracle();
-        let mut c = trie_chain(&[(200, &[(544, 1)])]);
-        c.head = Some(200);
-        o.tick(&mut c, S);
-        // Block 72 (head - 128) is served wrong by the node.
-        set_block(&mut c, 72, &[(544, 1)]);
-        c.trie_storage.insert(72, vec![(544, 1), (646, 1)]);
-        let v = o.tick(&mut c, 2 * S);
-        let v = sigs(&v);
-        assert!(v.contains(&(false, "E5/storage-root-mismatch")), "{v:?}");
+        let mut c = FakeChain::default();
+        for b in 1..=300 {
+            set_block(&mut c, b, &[(544, 1)]);
+        }
+        // The node serves every older block wrong.
+        for b in 1..=290 {
+            c.trie_storage.insert(b, vec![(544, 1), (646, 1)]);
+        }
+        let mut bad = std::collections::BTreeSet::new();
+        for t in 0..300u64 {
+            c.head = Some(300);
+            for v in o.tick(&mut c, (t + 1) * S) {
+                if let Verdict::Always(false, f) = v {
+                    if f.signature.starts_with("E5") {
+                        bad.insert(f.detail.split(':').next().unwrap().to_string());
+                    }
+                }
+            }
+        }
+        // Both sweeps reached their whole depth range: deep 250..=49 is
+        // blocks 50..=251, shallow 48..=10 (the wrong ones) is 252..=290.
+        let blocks = bad.iter().filter(|d| d.starts_with("block ")).count();
+        assert_eq!(blocks, 241, "{bad:?}");
+        assert!(
+            bad.contains("block 50") && bad.contains("block 290"),
+            "{bad:?}"
+        );
     }
 
     #[test]

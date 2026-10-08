@@ -89,7 +89,7 @@ pub fn run() {
             Some(NODE_CONTAINER),
             json!({"index": i, "killed": killed, "started": started}),
         );
-        if let Err(e) = crate::start::restart_load(&cfg.load, i as u64 + 1) {
+        if let Err(e) = crate::start::restart_load(&cfg, i as u64 + 1) {
             eprintln!("nemesis: restarting load: {e}");
         }
         elapsed = k.at_secs + k.down_secs;

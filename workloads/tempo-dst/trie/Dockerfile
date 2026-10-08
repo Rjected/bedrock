@@ -1,5 +1,5 @@
-# Trie-collapse load: the txgen image plus the RawStorage artifact, its deploy
-# spec (deploy.yaml, run before the warm checkpoint) and the load spec
-# (trie.yaml) and regression trigger specs; selected with TXGEN_SPEC.
+# Trie load: the txgen image plus the RawStorage artifact and its deploy spec
+# (deploy.yaml, run before the warm checkpoint). tempo-dst generates each
+# run's write spec and mounts it at /workload/trie/generated.yaml.
 FROM bedrock/tempo-txgen:latest
-COPY *.yaml raw-storage.json /workload/trie/
+COPY deploy.yaml raw-storage.json /workload/trie/

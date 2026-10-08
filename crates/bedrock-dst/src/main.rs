@@ -142,22 +142,13 @@ struct CampaignArgs {
     txgen_count: u64,
     #[arg(long, default_value_t = 100)]
     txgen_tps: u64,
-    /// Load: `transfers` (pathUSD transfers) or `trie` (RawStorage
-    /// insert/delete sequences, checked by E5; uses --trie-tps).
+    /// Load: `transfers` (pathUSD transfers) or `trie` (RawStorage writes over
+    /// slot shapes generated per seed, checked by E5/E6; uses --trie-tps).
     #[arg(long, value_enum, default_value_t = Load::Transfers)]
     load: Load,
     /// Trie load rate; ~5 tx/s puts about one step in each 200 ms block.
     #[arg(long, default_value_t = 5)]
     trie_tps: u64,
-    /// txgen spec in the trie load image's /workload/trie/ (e.g. a
-    /// regression's trigger sequences).
-    #[arg(long, default_value = "trie.yaml")]
-    trie_spec: String,
-    /// RawStorage slots the trie oracles read and prove: every slot the spec
-    /// writes. The default set's keccak paths share prefixes: 120.., 121..,
-    /// 13.., 2...
-    #[arg(long, value_delimiter = ',', default_value = "544,646,131,0")]
-    trie_slots: Vec<u64>,
     #[arg(long, default_value = "dst-out")]
     out: PathBuf,
 }
@@ -304,12 +295,10 @@ fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
                 "count": (args.run_secs + 60) * args.trie_tps,
                 "tps": args.trie_tps,
                 "image": TRIE_IMAGE,
-                "spec": format!("/workload/trie/{}", args.trie_spec),
             }),
         },
         "trie": (args.load == Load::Trie).then(|| json!({
             "address": TRIE_CONTRACT,
-            "slots": args.trie_slots,
         })),
     })
 }
@@ -320,7 +309,7 @@ fn required(args: &CampaignArgs) -> Vec<&'static str> {
     match args.load {
         Load::Transfers if args.txgen_count == 0 => vec![],
         Load::Transfers => vec!["S/load-included"],
-        Load::Trie => vec!["S/load-included", "S/trie-checked", "S/trie-all-slots-live"],
+        Load::Trie => vec!["S/load-included", "S/trie-checked"],
     }
 }
 
@@ -530,36 +519,8 @@ mod tests {
         let c = guest_config(&args, 3);
         assert_eq!(c["load"]["image"], "bedrock/tempo-dst-trie:latest");
         assert_eq!(c["load"]["tps"], 5);
-        assert_eq!(c["trie"]["slots"], serde_json::json!([544, 646, 131, 0]));
+        // Slots and the write stream are generated in the guest from the seed.
+        assert!(c["trie"].get("slots").is_none());
         assert!(!c.to_string().contains('\''));
-    }
-
-    #[test]
-    fn trie_spec_and_slots_are_configurable() {
-        let Cmd::Campaign(args) = Cli::parse_from([
-            "x",
-            "campaign",
-            "--vmlinux",
-            "k",
-            "--initrd",
-            "i",
-            "--compose",
-            "c",
-            "--images",
-            "t",
-            "--load",
-            "trie",
-            "--trie-spec",
-            "inline.yaml",
-            "--trie-slots",
-            "40364,105566",
-        ])
-        .cmd
-        else {
-            unreachable!()
-        };
-        let c = guest_config(&args, 3);
-        assert_eq!(c["load"]["spec"], "/workload/trie/inline.yaml");
-        assert_eq!(c["trie"]["slots"], serde_json::json!([40364, 105566]));
     }
 }

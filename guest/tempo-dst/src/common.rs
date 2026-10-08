@@ -59,12 +59,34 @@ pub struct LoadConfig {
 #[serde(default)]
 pub struct TrieConfig {
     pub address: String,
+    /// Slots the oracles read and prove. Empty: generated from the run seed
+    /// (`trie_gen::slots`), along with the load spec.
     pub slots: Vec<u64>,
+}
+
+impl TrieConfig {
+    /// Whether the load spec and slots come from `trie_gen`.
+    pub fn generated(&self) -> bool {
+        self.slots.is_empty()
+    }
+}
+
+impl Config {
+    /// The trie config with generated slots filled in.
+    pub fn trie(&self) -> Option<TrieConfig> {
+        let mut trie = self.trie.clone()?;
+        if trie.generated() {
+            trie.slots = crate::trie_gen::slots(self.seed);
+        }
+        Some(trie)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
+    /// The branch's seed (the driver's `--seeds` index).
+    pub seed: u64,
     /// Virtual seconds the branch runs before finalize.
     pub run_secs: u64,
     pub nemesis: NemesisConfig,
@@ -77,6 +99,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            seed: 0,
             run_secs: 120,
             nemesis: NemesisConfig::default(),
             liveness_secs: 60,

@@ -12,7 +12,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 
-use crate::common::{self, Config, LoadConfig, ASSERTIONS_PATH, CONFIG_PATH, EVENTS_PATH, OUT_DIR};
+use crate::common::{self, Config, ASSERTIONS_PATH, CONFIG_PATH, EVENTS_PATH, OUT_DIR};
+use crate::trie_gen;
 
 /// Starts `tempo-dst <sub>` in its own session so it outlives the I/O-channel
 /// command that launched it.
@@ -41,20 +42,39 @@ pub fn run(config_json: &str) -> io::Result<()> {
 
     spawn_detached("oracle")?;
     spawn_detached("nemesis")?;
-    start_load(&config.load, 0)?;
+    start_load(&config, 0)?;
     println!("{offset}");
     Ok(())
 }
 
 /// Starts the txgen load as container `txgen`. Generation `n` (0 at branch
 /// start, then one per node restart) draws its transactions from workload seed
-/// `load.seed + n`.
+/// `load.seed + n`; a generated trie load also gets a fresh write stream
+/// (`trie_gen::spec`) over the run's slots.
 ///
 /// Load only: failures (e.g. while the node is down) are not oracles. The
 /// oracle's S/load-included shows the load actually landed.
-pub fn start_load(load: &LoadConfig, generation: u64) -> io::Result<()> {
+pub fn start_load(config: &Config, generation: u64) -> io::Result<()> {
+    let load = &config.load;
     if load.count == 0 {
         return Ok(());
+    }
+    let mut spec = load.spec.clone();
+    let mut mount = Vec::new();
+    if let Some(trie) = config
+        .trie
+        .as_ref()
+        .filter(|t| t.generated())
+        .and(config.trie())
+    {
+        let path = Path::new(OUT_DIR).join(format!("trie-load-{generation}.yaml"));
+        let steps = usize::try_from(load.count).unwrap_or(usize::MAX);
+        fs::write(
+            &path,
+            trie_gen::spec(config.seed, generation, &trie.slots, steps),
+        )?;
+        spec = "/workload/trie/generated.yaml".into();
+        mount = vec!["-v".to_string(), format!("{}:{spec}:ro", path.display())];
     }
     let image = if load.image.is_empty() {
         "bedrock/tempo-txgen:latest"
@@ -67,7 +87,8 @@ pub fn start_load(load: &LoadConfig, generation: u64) -> io::Result<()> {
         .args(["-e", &format!("TXGEN_SEED={}", load.seed + generation)])
         .args(["-e", &format!("TXGEN_COUNT={}", load.count)])
         .args(["-e", &format!("TXGEN_TPS={}", load.tps)])
-        .args(["-e", &format!("TXGEN_SPEC={}", load.spec)])
+        .args(["-e", &format!("TXGEN_SPEC={spec}")])
+        .args(&mount)
         .args(["--entrypoint", "/bin/bash", image])
         .args(["-c", "bash /workload/run.sh || true"])
         .stdout(Stdio::null())
@@ -82,8 +103,8 @@ pub fn start_load(load: &LoadConfig, generation: u64) -> io::Result<()> {
 /// transactions with consecutive nonces, and a SIGKILL drops the node's
 /// transaction pool, so the old load's remaining transactions sit behind a
 /// nonce gap forever. The new generation re-reads nonces from the node.
-pub fn restart_load(load: &LoadConfig, generation: u64) -> io::Result<()> {
-    if load.count == 0 {
+pub fn restart_load(config: &Config, generation: u64) -> io::Result<()> {
+    if config.load.count == 0 {
         return Ok(());
     }
     // Logged as a nemesis kill so workload-monitor excuses the SIGKILL.
@@ -104,7 +125,7 @@ pub fn restart_load(load: &LoadConfig, generation: u64) -> io::Result<()> {
             .stderr(Stdio::null())
             .status()?;
     }
-    start_load(load, generation)
+    start_load(config, generation)
 }
 
 /// Deploys the trie load's RawStorage contract (`deploy.yaml`, from the trie
