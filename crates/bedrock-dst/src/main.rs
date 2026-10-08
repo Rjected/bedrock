@@ -57,6 +57,12 @@ const REPLAY_COMPARE: &[&str] = &[
 ];
 /// Stays under bedrock-io's 256 KiB output buffer.
 const CHUNK: usize = 200_000;
+/// Guest memory snapshot, written to `guest-mem.txt` at the warm checkpoint and
+/// after each seed: Bedrock commits all of `--memory-mb` on the host, so this is
+/// what sizes it. tmpfs (root, container storage, journal) counts as Shmem.
+const MEM_REPORT: &str = "free -m; df -m / /run /tmp /dev/shm; \
+    grep -E '^(MemAvailable|Shmem|Committed_AS):' /proc/meminfo; \
+    ps -eo rss=,comm= --sort=-rss | head -8";
 
 #[derive(Parser)]
 #[command(
@@ -267,6 +273,8 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>) -> Result<Checkpoint> {
             warm.current_time().as_secs_f64()
         );
     }
+    let (_, mem) = host_bash(&mut warm, MEM_REPORT)?;
+    fs::write(args.out.join("guest-mem.txt"), mem)?;
     let cp = warm.checkpoint()?;
     println!("warm checkpoint at vt {:.1}s", cp.time().as_secs_f64());
     Ok(cp)
@@ -367,6 +375,8 @@ fn run_seed(
             let data = fetch(&mut b, &format!("/bedrock/{f}"), 0)?;
             fs::write(dir.join(Path::new(f).file_name().unwrap()), data)?;
         }
+        let (_, mem) = host_bash(&mut b, MEM_REPORT)?;
+        fs::write(dir.join("guest-mem.txt"), mem)?;
     }
     if let Some(kind) = &guest_exit {
         // The guest stopped under us (e.g. kernel panic or shutdown): a failure
