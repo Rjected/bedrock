@@ -1,4 +1,4 @@
-# Userland tools: bedrock-cli and bedrock-determinism
+# Userland tools: bedrock-cli, bedrock-determinism, and bedrock-dst
 { pkgs }:
 
 let
@@ -33,5 +33,15 @@ in
     cargoLock.lockFile = ../Cargo.lock;
     cargoBuildFlags = [ "-p" "bedrock-determinism-tests" ];
     meta.mainProgram = "bedrock-determinism";
+  };
+
+  bedrock-dst = pkgs.rustPlatform.buildRustPackage {
+    pname = "bedrock-dst";
+    version = "0.1.0";
+    inherit src;
+    cargoLock.lockFile = ../Cargo.lock;
+    cargoBuildFlags = [ "-p" "bedrock-dst" ];
+    doCheck = false;
+    meta.mainProgram = "bedrock-dst";
   };
 }

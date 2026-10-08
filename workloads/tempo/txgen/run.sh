@@ -3,6 +3,7 @@ set -euo pipefail
 rpc=${TEMPO_RPC_URL:-http://127.0.0.1:8545}
 count=${TXGEN_COUNT:-1000}
 tps=${TXGEN_TPS:-100}
+seed=${TXGEN_SEED:-99}
 mkdir -p /results
 finish() {
   status=$?
@@ -30,7 +31,7 @@ done
 test "${chain:-}" = 0x539
 # Wait for the first produced block so setup is outside the benchmark window.
 sleep 2
-txgen-tempo generate -s /workload/workload.yaml -n "$count" --seed 99 --rpc "$rpc" \
+txgen-tempo generate -s /workload/workload.yaml -n "$count" --seed "$seed" --rpc "$rpc" \
   -o /results/transactions.ndjson
 bench send -i /results/transactions.ndjson --rpc-url "$rpc" --tps "$tps" \
   --max-concurrent 16 --max-pending 200 --retries 0 \

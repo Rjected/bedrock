@@ -104,6 +104,7 @@
         check-stack = checkStack;
         bedrock-cli = userland.bedrock-cli;
         bedrock-determinism = userland.bedrock-determinism;
+        bedrock-dst = userland.bedrock-dst;
         inherit podmanInitrd;
         default = userland.bedrock-cli;
       };

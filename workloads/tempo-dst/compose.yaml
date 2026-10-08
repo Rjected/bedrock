@@ -1,0 +1,57 @@
+# Tempo dev node for DST campaigns (see README.md). Runs `tempo node` directly
+# (the localnet wrapper's bare mode, without the wrapper) so variant flags and
+# thread-fuzz apply to the node process itself. thread-fuzz is bind-mounted into
+# every container by the initrd's containers.conf and puts the node under the
+# sched_ext concurrency-fuzz scheduler; its schedule comes from Bedrock's
+# controlled getrandom stream. run.sh appends variant flags to `command`.
+services:
+  tempo:
+    image: bedrock/tempo-localnet:pinned
+    pull_policy: never
+    container_name: tempo
+    network_mode: host
+    privileged: true  # thread-fuzz sets SCHED_EXT (CAP_SYS_NICE)
+    entrypoint: ["/usr/local/bin/thread-fuzz", "/usr/local/bin/tempo"]
+    command:
+      - node
+      - --dev
+      - --dev.block-time
+      - 200ms
+      - --datadir
+      - /data
+      - --tempo.bootnodes-endpoint
+      - none
+      - --disable-discovery
+      - --no-persist-peers
+      - --http
+      - --http.addr
+      - 127.0.0.1
+      - --http.port
+      - "8545"
+      - --http.api
+      - all
+      - --builder.gaslimit
+      - "3000000000"
+      # Differential oracle: compare sparse-trie task updates against the
+      # regular state root and log "Difference in ... trie updates".
+      - --engine.state-root-task-compare-updates
+      - --color
+      - never
+    environment:
+      # engine::persistence=debug emits "Saved range of blocks", which the
+      # durability oracle uses as the persisted-block watermark.
+      RUST_LOG: info,engine::persistence=debug,reth::engine::tree=debug
+    volumes:
+      - tempo-data:/data
+
+  # Signals bedrock ready once the node produces blocks (the lab's initial
+  # checkpoint), then idles; same pattern as workloads/integration-tests.
+  ready:
+    image: bedrock/tempo-dst-ready:latest
+    pull_policy: never
+    container_name: ready
+    network_mode: host
+    privileged: true  # Required for VMCALL
+
+volumes:
+  tempo-data:

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use bedrock_vm::events::EventKind;
 use bedrock_vm::file_store::FileWriter;
 use bedrock_vm::{
-    EventCategories, EventConfig as VmEventConfig, EventStream, ExitKind, ExitTrigger, Vm, VmError,
+    EventCategories, EventConfig as VmEventConfig, EventStream, ExitKind, ExitTrigger,
+    RdrandConfig, Vm, VmError,
 };
 
 use crate::bash::{self, BashOutput, BashTarget};
@@ -233,6 +234,22 @@ impl Branch {
     /// The checkpoint this branch was forked from.
     pub fn origin(&self) -> &Checkpoint {
         &self.origin
+    }
+
+    /// Re-seed the hypervisor's in-VM PRNG, which serves RDRAND/RDSEED and
+    /// guest `getrandom()` without exiting to userspace. Sibling branches
+    /// re-seeded differently diverge from the fork point; equal seeds replay
+    /// identically. Replaces exit-to-userspace randomness, so it is meant for
+    /// branches without an [`InputSource`].
+    pub fn reseed_rng(&mut self, seed: u64) -> Result<()> {
+        self.vm_mut()
+            .set_rdrand_config(&RdrandConfig::seeded_rng(seed))
+            .map_err(|source| {
+                LabError::Vm(VmError::Ioctl {
+                    operation: "SET_RDRAND_CONFIG",
+                    source,
+                })
+            })
     }
 
     /// Configure the event stream (see [`EventConfig`]). Records are forwarded
@@ -586,6 +603,16 @@ impl Branch {
                     continue;
                 }
                 ExitKind::Rdrand | ExitKind::Rdseed => match self.feed_rng()? {
+                    FeedRng::Fed => continue,
+                    FeedRng::Exhausted | FeedRng::NoSource => {
+                        return Err(LabError::UnexpectedExit {
+                            at,
+                            kind: exit.kind(),
+                        })
+                    }
+                },
+                // As in run_until: guest getrandom() exits while the action runs.
+                ExitKind::VmcallGetRandom => match self.feed_random()? {
                     FeedRng::Fed => continue,
                     FeedRng::Exhausted | FeedRng::NoSource => {
                         return Err(LabError::UnexpectedExit {
