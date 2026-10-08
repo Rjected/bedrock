@@ -47,26 +47,64 @@ pub struct LoadConfig {
     pub seed: u64,
     pub count: u64,
     pub tps: u64,
+    /// Load image; empty means the plain txgen image.
+    pub image: String,
+    /// txgen spec inside the image; empty means the image's default.
+    pub spec: String,
+}
+
+/// A RawStorage contract whose storage root E5 checks against an
+/// independent reference at every block.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct TrieConfig {
+    pub address: String,
+    /// Slots the oracles read and prove. Empty: generated from the run seed
+    /// (`trie_gen::slots`), along with the load spec.
+    pub slots: Vec<u64>,
+}
+
+impl TrieConfig {
+    /// Whether the load spec and slots come from `trie_gen`.
+    pub fn generated(&self) -> bool {
+        self.slots.is_empty()
+    }
+}
+
+impl Config {
+    /// The trie config with generated slots filled in.
+    pub fn trie(&self) -> Option<TrieConfig> {
+        let mut trie = self.trie.clone()?;
+        if trie.generated() {
+            trie.slots = crate::trie_gen::slots(self.seed);
+        }
+        Some(trie)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
+    /// The branch's seed (the driver's `--seeds` index).
+    pub seed: u64,
     /// Virtual seconds the branch runs before finalize.
     pub run_secs: u64,
     pub nemesis: NemesisConfig,
     /// Guest seconds the head may stall before liveness fails.
     pub liveness_secs: u64,
     pub load: LoadConfig,
+    pub trie: Option<TrieConfig>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
+            seed: 0,
             run_secs: 120,
             nemesis: NemesisConfig::default(),
             liveness_secs: 60,
             load: LoadConfig::default(),
+            trie: None,
         }
     }
 }
@@ -182,17 +220,6 @@ pub fn head_number() -> Result<u64, String> {
         .ok_or_else(|| format!("bad eth_blockNumber: {head}"))
 }
 
-/// Number of transactions in `block`.
-pub fn tx_count(block: u64) -> Result<u64, String> {
-    let n = rpc(
-        "eth_getBlockTransactionCountByNumber",
-        json!([format!("0x{block:x}")]),
-    )?;
-    n.as_str()
-        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        .ok_or_else(|| format!("bad transaction count: {n}"))
-}
-
 /// The node's finalized block as `(number, hash)`; `None` before any.
 pub fn finalized_block() -> Result<Option<(u64, String)>, String> {
     let block = rpc("eth_getBlockByNumber", json!(["finalized", false]))?;
@@ -209,6 +236,83 @@ pub fn finalized_block() -> Result<Option<(u64, String)>, String> {
         .and_then(Value::as_str)
         .ok_or_else(|| format!("bad finalized block: {block}"))?;
     Ok(Some((number, hash.to_lowercase())))
+}
+
+/// Values of `slots` of `address` at `block`.
+pub fn storage_at(
+    address: &str,
+    slots: &[u64],
+    block: u64,
+) -> Result<crate::trie_ref::Storage, String> {
+    slots
+        .iter()
+        .map(|slot| {
+            let value = rpc(
+                "eth_getStorageAt",
+                json!([address, format!("0x{slot:x}"), format!("0x{block:x}")]),
+            )?;
+            Ok((
+                *slot,
+                serde_json::from_value(value).map_err(|e| e.to_string())?,
+            ))
+        })
+        .collect()
+}
+
+/// `eth_getProof` for `slots` of `address` at `block`.
+pub fn proof(
+    address: &str,
+    slots: &[u64],
+    block: u64,
+) -> Result<crate::trie_ref::AccountProof, String> {
+    let keys: Vec<String> = slots.iter().map(|s| format!("0x{s:x}")).collect();
+    let proof = rpc(
+        "eth_getProof",
+        json!([address, keys, format!("0x{block:x}")]),
+    )?;
+    serde_json::from_value(proof.clone()).map_err(|e| format!("bad eth_getProof: {e}: {proof}"))
+}
+
+/// Number of transactions in `block`.
+pub fn tx_count(block: u64) -> Result<u64, String> {
+    let n = rpc(
+        "eth_getBlockTransactionCountByNumber",
+        json!([format!("0x{block:x}")]),
+    )?;
+    serde_json::from_value::<alloy_primitives::U64>(n.clone())
+        .map(|n| n.to())
+        .map_err(|e| format!("bad transaction count: {e}: {n}"))
+}
+
+/// Whether `address` has code at the latest block.
+pub fn has_code(address: &str) -> Result<bool, String> {
+    let code = rpc("eth_getCode", json!([address, "latest"]))?;
+    Ok(code.as_str().is_some_and(|c| c.len() > 2))
+}
+
+/// reth's `eth_getMultiProof` for `slots` of `address` at `block`.
+pub fn multiproof(
+    address: &str,
+    slots: &[u64],
+    block: u64,
+) -> Result<crate::trie_ref::AccountProof, String> {
+    let keys: Vec<String> = slots.iter().map(|s| format!("0x{s:064x}")).collect();
+    let proofs = rpc(
+        "eth_getMultiProof",
+        json!([[[address, keys]], format!("0x{block:x}")]),
+    )?;
+    serde_json::from_value(proofs[0].clone())
+        .map_err(|e| format!("bad eth_getMultiProof: {e}: {proofs}"))
+}
+
+/// Header `stateRoot` of `block`.
+pub fn state_root(block: u64) -> Result<alloy_primitives::B256, String> {
+    let header = rpc(
+        "eth_getBlockByNumber",
+        json!([format!("0x{block:x}"), false]),
+    )?;
+    serde_json::from_value(header["stateRoot"].clone())
+        .map_err(|e| format!("bad stateRoot: {e}: {header}"))
 }
 
 pub fn block_hash(number: u64) -> Result<Option<String>, String> {
@@ -233,5 +337,6 @@ mod tests {
         assert_eq!(c.liveness_secs, 9);
         assert_eq!(c.run_secs, 120);
         assert_eq!(c.nemesis, NemesisConfig::default());
+        assert_eq!(c.trie, None);
     }
 }

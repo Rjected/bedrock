@@ -76,6 +76,19 @@ enum Cmd {
     Replay { run_dir: PathBuf },
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Load {
+    Transfers,
+    Trie,
+}
+
+/// Trie load image (workloads/tempo-dst/trie).
+const TRIE_IMAGE: &str = "bedrock/tempo-dst-trie:latest";
+/// RawStorage deployed by trie/deploy.yaml during warmup: dev account 0's
+/// first transaction on a fresh chain (CREATE address of nonce 0).
+const TRIE_CONTRACT: &str = "0x5fbdb2315678afecb367f032d93f642f64180aa3";
+
 #[derive(ClapArgs, Clone, Serialize, Deserialize)]
 struct CampaignArgs {
     #[arg(long)]
@@ -129,6 +142,13 @@ struct CampaignArgs {
     txgen_count: u64,
     #[arg(long, default_value_t = 100)]
     txgen_tps: u64,
+    /// Load: `transfers` (pathUSD transfers) or `trie` (RawStorage writes over
+    /// slot shapes generated per seed, checked by E5/E6; uses --trie-tps).
+    #[arg(long, value_enum, default_value_t = Load::Transfers)]
+    load: Load,
+    /// Trie load rate; ~5 tx/s puts about one step in each 200 ms block.
+    #[arg(long, default_value_t = 5)]
+    trie_tps: u64,
     #[arg(long, default_value = "dst-out")]
     out: PathBuf,
 }
@@ -233,6 +253,20 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>) -> Result<Checkpoint> {
             break;
         }
     }
+    if args.load == Load::Trie {
+        // Deploy before the checkpoint so branches start writing at once.
+        let (code, out) = host_bash(
+            &mut warm,
+            &format!("tempo-dst deploy {TRIE_IMAGE} {TRIE_CONTRACT}"),
+        )?;
+        if code != 0 {
+            return Err(format!("trie contract deploy failed ({code}): {out}").into());
+        }
+        println!(
+            "trie contract deployed at vt {:.1}s",
+            warm.current_time().as_secs_f64()
+        );
+    }
     let cp = warm.checkpoint()?;
     println!("warm checkpoint at vt {:.1}s", cp.time().as_secs_f64());
     Ok(cp)
@@ -249,20 +283,33 @@ fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
             "max_kills": args.max_kills,
             "min_gap_secs": args.min_gap_secs,
         },
-        "load": {
-            "seed": args.workload_seed,
-            "count": args.txgen_count,
-            "tps": args.txgen_tps,
+        "load": match args.load {
+            Load::Transfers => json!({
+                "seed": args.workload_seed,
+                "count": args.txgen_count,
+                "tps": args.txgen_tps,
+            }),
+            Load::Trie => json!({
+                "seed": args.workload_seed,
+                // Enough steps to outlast the run.
+                "count": (args.run_secs + 60) * args.trie_tps,
+                "tps": args.trie_tps,
+                "image": TRIE_IMAGE,
+            }),
         },
+        "trie": (args.load == Load::Trie).then(|| json!({
+            "address": TRIE_CONTRACT,
+        })),
     })
 }
 
-/// Coverage every seed must reach (see `verdict`): the load landed.
+/// Coverage every seed must reach (see `verdict`): the load landed, and with
+/// the trie load, its checks ran over every slot shape.
 fn required(args: &CampaignArgs) -> Vec<&'static str> {
-    if args.txgen_count == 0 {
-        vec![]
-    } else {
-        vec!["S/load-included"]
+    match args.load {
+        Load::Transfers if args.txgen_count == 0 => vec![],
+        Load::Transfers => vec!["S/load-included"],
+        Load::Trie => vec!["S/load-included", "S/trie-checked"],
     }
 }
 
@@ -445,6 +492,35 @@ mod tests {
         assert_eq!(c["seed"], 7);
         assert_eq!(c["workload_seed"], 99);
         assert_eq!(c["nemesis"]["enabled"], false);
+        assert!(!c.to_string().contains('\''));
+        assert_eq!(c["trie"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn trie_load_configures_image_and_oracle() {
+        let Cmd::Campaign(args) = Cli::parse_from([
+            "x",
+            "campaign",
+            "--vmlinux",
+            "k",
+            "--initrd",
+            "i",
+            "--compose",
+            "c",
+            "--images",
+            "t",
+            "--load",
+            "trie",
+        ])
+        .cmd
+        else {
+            unreachable!()
+        };
+        let c = guest_config(&args, 3);
+        assert_eq!(c["load"]["image"], "bedrock/tempo-dst-trie:latest");
+        assert_eq!(c["load"]["tps"], 5);
+        // Slots and the write stream are generated in the guest from the seed.
+        assert!(c["trie"].get("slots").is_none());
         assert!(!c.to_string().contains('\''));
     }
 }
