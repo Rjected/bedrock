@@ -41,7 +41,8 @@ guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 | `E4/graceful-stop`, `E4/re-execute` | At the end of the run, the node stops cleanly, and `tempo re-execute` over `[1, head]` from its datadir agrees |
 | `container <name> exit code is zero` | workload-monitor: no unexplained container death |
 | `D/guest-exited` | The guest VM stopped mid-run (kernel panic, shutdown) |
-| `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed`, `S/trie-checked`, `S/trie-all-slots-live` | Coverage (Sometimes): the fault, crash-recovery unwind, and recovery paths actually ran |
+| `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed`, `S/load-included`, `S/trie-checked`, `S/trie-all-slots-live` | Coverage (Sometimes): the fault, crash-recovery unwind, recovery, and load paths actually ran |
+| `C/missing/<signature>` | Required coverage never satisfied: `S/load-included` always, plus `S/trie-checked` and `S/trie-all-slots-live` with `--load trie`. A run whose load never landed proves nothing |
 
 ## Trie load (`--load trie`)
 
