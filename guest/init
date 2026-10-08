@@ -8,7 +8,11 @@ if [ ! -f /switched_root ]; then
     mount -t devtmpfs devtmpfs /dev
 
     mkdir -p /newroot
-    mount -t tmpfs -o size=90% tmpfs /newroot
+    # The root holds the rootfs, the downloaded images.tar and all container
+    # storage, which is most of what the guest stores; let it use all of RAM
+    # rather than ENOSPC while RAM is still free (tmpfs pages are only
+    # allocated as written, and overcommit ends in the OOM killer either way).
+    mount -t tmpfs -o size=100% tmpfs /newroot
 
     # Copy filesystem to new root
     cp -a /bin /newroot/ 2>/dev/null || true
@@ -168,13 +172,46 @@ bedrock-file-fetch \
     compose.yaml /workload/compose.yaml \
     images.tar   /images/images.tar 2>&1 | systemd-cat -t init
 
-# Load all workload images from the single docker-archive tarball.
-# `podman load` reads the embedded manifest to recover each image's
-# original name+tag, so a compose file referencing those names works
-# unchanged. The downloaded tarball is left in place at /images/images.tar
-# (it lives in deterministic, CoW-shared tmpfs) so its integrity against the
-# host original stays verifiable.
-podman load -i /images/images.tar 2>&1 | systemd-cat -t init
+# Load all workload images from the single image tarball, then delete it: it
+# would otherwise sit in tmpfs (i.e. guest RAM) for the life of the VM. Its
+# digest is kept in /images/images.tar.sha256 so its integrity against the host
+# original stays verifiable.
+#
+# `docker save` with the containerd image store writes an OCI layout (gzip
+# layers, index.json naming each image). `podman load` of that, read as a
+# docker-archive, hands every layer to containers/storage decompressed, and
+# storage stages it in a temp file before unpacking: for the ~1.1 GB Tempo
+# layer that transient copy alone needs over 1 GB more guest RAM. So such
+# archives are unpacked to a directory and each image is pulled through the
+# `oci:` transport, which stages the compressed blob instead. The index's ref
+# names are rewritten to unique ones (images commonly share `latest`) and each
+# image is named from its `io.containerd.image.name`, as `podman load` would.
+# Classic docker-archive tarballs still go through `podman load`.
+sha256sum /images/images.tar | cut -d' ' -f1 > /images/images.tar.sha256
+load_images() {
+    local tar=/images/images.tar oci=/images/oci n i id name
+    if ! tar -tf "$tar" oci-layout >/dev/null 2>&1; then
+        podman load -i "$tar" && rm -f "$tar"
+        return
+    fi
+    mkdir -p "$oci" && tar -xf "$tar" -C "$oci" && rm -f "$tar" || return 1
+    jq '.manifests |= (to_entries | map(.value.annotations["org.opencontainers.image.ref.name"] = "bedrock-load-\(.key)" | .value))' \
+        "$oci/index.json" > "$oci/index.json.new" && mv "$oci/index.json.new" "$oci/index.json" || return 1
+    n=$(jq '.manifests | length' "$oci/index.json") || return 1
+    for i in $(seq 0 $((n - 1))); do
+        name=$(jq -r ".manifests[$i].annotations[\"io.containerd.image.name\"] // empty" "$oci/index.json")
+        id=$(podman pull -q "oci:$oci:bedrock-load-$i") || return 1
+        podman untag "$id" && { [ -z "$name" ] || podman tag "$id" "$name"; } || return 1
+        echo "Loaded image: ${name:-$id}"
+    done
+    # Root tmpfs (guest RAM) use with the images loaded and the layout present.
+    df -m /
+    rm -rf "$oci"
+}
+load_images 2>&1 | systemd-cat -t init
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "image load failed; leaving /images for diagnosis" | systemd-cat -t init
+fi
 echo "Loaded images:" | systemd-cat -t init
 podman images 2>&1 | systemd-cat -t init
 

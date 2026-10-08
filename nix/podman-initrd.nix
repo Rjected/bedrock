@@ -96,7 +96,7 @@ let
     name = "scx-fuzz";
     src = ../guest/scx-fuzz;
 
-    nativeBuildInputs = [ pkgs.clang pkgs.bpftools pkgs.pkg-config ];
+    nativeBuildInputs = [ pkgs.clang pkgs.bpftools pkgs.pkg-config pkgs.removeReferencesTo ];
     buildInputs = [ pkgs.libbpf pkgs.elfutils pkgs.zlib ];
 
     # The nix cc-wrapper injects x86_64 hardening flags (-fstack-protector,
@@ -135,6 +135,10 @@ let
     installPhase = ''
       mkdir -p $out/bin
       cp scx-init $out/bin/
+      # The embedded BPF object's BTF line info names scx header paths, which
+      # would pull the whole 52 MB scx source tree into the guest rootfs (i.e.
+      # guest RAM). Only the strings change; the programs are unaffected.
+      remove-references-to -t ${scxSrc} $out/bin/scx-init
     '';
   };
 
@@ -282,7 +286,6 @@ let
     pkgs.podman
     pkgs.conmon
     pkgs.crun
-    pkgs.skopeo
     pkgs.netavark
     pkgs.aardvark-dns
     pkgs.slirp4netns
@@ -381,13 +384,19 @@ let
     default_network = "bridge"
   '';
 
-  # vfs driver works on any filesystem (including tmpfs/initrd); storage and
-  # run dirs live under the conventional podman paths.
+  # Native overlayfs (CONFIG_OVERLAY_FS) over the tmpfs root: each image layer
+  # is unpacked once and containers get a copy-on-write upper dir. The vfs
+  # driver it replaces stored a full copy of the filesystem per layer and per
+  # container, which for the ~1.2 GB Tempo image alone needed several GB of
+  # guest RAM. Storage and run dirs live under the conventional podman paths.
   storageConf = pkgs.writeText "storage.conf" ''
     [storage]
-    driver = "vfs"
+    driver = "overlay"
     graphroot = "/var/lib/containers/storage"
     runroot = "/run/containers/storage"
+
+    [storage.options.overlay]
+    mountopt = "nodev"
   '';
 
   # journald config: keep storage in /run (memory-only — we don't want
