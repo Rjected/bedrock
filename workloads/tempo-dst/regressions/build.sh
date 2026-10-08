@@ -44,15 +44,24 @@ name=${1:?usage: build.sh <regression>}
 . "$here/$name/regression.env"
 read -r -a docker <<<"${DOCKER:-docker}"
 # Tempo and reth as in the pinned image (bedrock/tempo-localnet:pinned).
-tempo_rev=d3f3b28f102946dcdca1a5beb12f328f2f1bbdbd
-reth_rev=42fa3c569ad182914d26db410919d6a10c7b4859
+# Pins; an entry may override them (e.g. to build from fix or DST-profile PR
+# heads based on newer upstream).
+tempo_rev=${TEMPO_REV:-d3f3b28f102946dcdca1a5beb12f328f2f1bbdbd}
+reth_rev=${RETH_REV:-42fa3c569ad182914d26db410919d6a10c7b4859}
+# RUST_PROFILE / RUST_FEATURES: Tempo's Dockerfile build args (defaults
+# profiling / asm-keccak,jemalloc,otlp), e.g. profile `dst` with feature `dst`
+# from tempo#8198 (opt-level 3 + debug assertions + overflow checks).
+profile=${RUST_PROFILE:-profiling}
+features=${RUST_FEATURES:-asm-keccak,jemalloc,otlp}
 rustflags=""
 chef_suffix=""
 if [ "${DEBUG_ASSERTIONS:-0}" = 1 ]; then
   rustflags="-C debug-assertions=on"
   chef_suffix="-debug-assertions"
 fi
-chef=${CHEF_IMAGE:-bedrock/tempo-chef:${tempo_rev:0:8}-${reth_rev:0:8}$chef_suffix}
+profile_suffix=""
+[ "$profile" = profiling ] || profile_suffix="-$profile"
+chef=${CHEF_IMAGE:-bedrock/tempo-chef:${tempo_rev:0:8}-${reth_rev:0:8}$profile_suffix$chef_suffix}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tempo-regression.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -105,7 +114,8 @@ sed -i '/COPY --from=planner \/app\/recipe.json recipe.json/i ENV VERGEN_IDEMPOT
 
 if ! "${docker[@]}" image inspect "$chef" >/dev/null 2>&1; then
   DOCKER_BUILDKIT=1 "${docker[@]}" build --target builder -f "$work/tempo/Dockerfile.chef" \
-    --build-arg EXTRA_RUSTFLAGS="$rustflags" -t "$chef" "$work/tempo"
+    --build-arg EXTRA_RUSTFLAGS="$rustflags" --build-arg RUST_PROFILE="$profile" \
+    --build-arg RUST_FEATURES="$features" -t "$chef" "$work/tempo"
 fi
 
 reth=(git -C "$work/tempo/reth" -c user.name=regression -c user.email=regression@localhost)
@@ -122,6 +132,7 @@ build() {
   local tag=$name${1:+-$1}
   DOCKER_BUILDKIT=1 "${docker[@]}" build --target tempo-localnet -f "$work/tempo/Dockerfile" \
     --build-arg CHEF_IMAGE="$chef" --build-arg EXTRA_RUSTFLAGS="$rustflags" \
+    --build-arg RUST_PROFILE="$profile" --build-arg RUST_FEATURES="$features" \
     -t "bedrock/tempo-localnet:$tag" "$work/tempo"
   echo "Built bedrock/tempo-localnet:$tag (reth $("${reth[@]}" log --oneline -1 | cut -c1-80))"
 }
