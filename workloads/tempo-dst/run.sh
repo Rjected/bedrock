@@ -87,10 +87,14 @@ s = s.replace("image: bedrock/tempo-localnet:pinned", f"image: {sys.argv[2]}")
 (Path(sys.argv[3]) / "compose-run.yaml").write_text(s)
 PY
 NIX=${NIX:-/nix/var/nix/profiles/default/bin/nix}
-dst=$($NIX build .#bedrock-dst --no-link --print-out-paths)
-planner=$($NIX build .#tempo-dst --no-link --print-out-paths)
-kernel=$($NIX build .#guestKernel --no-link --print-out-paths)
-initrd=$($NIX build .#tempoInitrd --no-link --print-out-paths)
+# GC roots in the run dir pin every input for the whole campaign: a
+# `nix-collect-garbage` on a shared host would otherwise delete the planner
+# or driver out from under a running campaign.
+root() { $NIX build ".#$1" --out-link "$run_dir/gcroot-$1" --print-out-paths; }
+dst=$(root bedrock-dst)
+planner=$(root tempo-dst)
+kernel=$(root guestKernel)
+initrd=$(root tempoInitrd)
 images=${IMAGES:-$root/images.tar}
 sha256sum "$kernel/vmlinux" "$initrd" "$images" "$run_dir/compose-run.yaml" "$planner/bin/tempo-dst" \
   > "$run_dir/inputs.sha256"

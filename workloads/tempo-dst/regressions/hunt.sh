@@ -31,7 +31,9 @@ DOCKER="${DOCKER:-docker}" "$here/../build.sh" >>"$out/build.log" 2>&1 || build_
   bedrock/tempo-dst-chain:latest > "$out/images.tar"
 # Build the Nix inputs once; the shards then only hit the store cache.
 nix=${NIX:-/nix/var/nix/profiles/default/bin/nix}
-(cd "$here/../../.." && $nix build .#bedrock-dst .#tempo-dst .#guestKernel .#tempoInitrd --no-link)
+# Rooted in $out, so a garbage collection on a shared host can't delete them
+# mid-hunt (each shard's run.sh roots its own copy too).
+(cd "$here/../../.." && $nix build .#bedrock-dst .#tempo-dst .#guestKernel .#tempoInitrd --out-link "$out/gcroot")
 for i in $(seq 0 $((shards - 1))); do
   first=$((start + i * seeds))
   RUN_DIR="$out/shard-$i-inputs" IMAGES="$out/images.tar" "$here/../run.sh" --variant "$variant" --node-image "$image" \
