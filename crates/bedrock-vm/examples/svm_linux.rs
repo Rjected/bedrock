@@ -37,8 +37,11 @@ fn run_until(vm: &mut Vm, snapshot: bool) -> Result<u64, Box<dyn std::error::Err
         // RUN has returned, so registers and memory are no longer changing.
         if progress.elapsed() >= Duration::from_secs(10) {
             let registers = vm.get_regs()?;
-            let tables =
-                svm_tables::page_table_count(vm.memory()?, registers.control_regs.cr3.bits());
+            // Forked VMs expose their memory through the snapshot API, not
+            // direct mappings. Progress reporting must not abort a slow fork.
+            let tables = vm.memory().ok().and_then(|memory| {
+                svm_tables::page_table_count(memory, registers.control_regs.cr3.bits())
+            });
             eprintln!(
                 "SVM_LINUX_PROGRESS seconds={:.3} tsc={} rip={:#x} guest_tables={tables:?}",
                 start.elapsed().as_secs_f64(),

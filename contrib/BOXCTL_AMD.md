@@ -56,10 +56,11 @@ the script still attempts to copy its logs and leaves the box available for
 inspection. The box can also be inspected with `boxctl ssh "$BOX"`. Its disk
 and any unsaved logs disappear when it expires.
 
-The current experimental global-gate branch has an outstanding decoded-branch
-performance assertion on the `m4-metal-small` box; see the AMD status in the
-[main README](../README.md). `test` returns nonzero for that failure while the
-box remains available for focused benchmarks and debugging.
+The current experimental global-gate branch failed a decoded-branch
+performance assertion on an EPYC 4244P `m4-metal-small` box but passed on an
+EPYC 4245P box; see the AMD status in the [main README](../README.md).
+If `test` returns nonzero, the box remains available for focused benchmarks
+and debugging.
 
 The native-loop example runs nine paired measurements and reports their
 median. These short timings still vary between invocations; repeat a run
@@ -80,7 +81,12 @@ contrib/run-boxctl-svm.sh collect "$BOX"
 
 Its `instructions` and `seconds` fields give a measured instruction rate;
 CPU GHz and instructions per second are different units. The sample also
-reports VM exits and the native-to-guest slowdown.
+reports VM exits and the native-to-guest slowdown. `SVM_WORKLOAD_HOST` records
+the SVM feature bits used to select accelerated paths. Keep the box's CPU
+model and feature line with each result: the same branch measured about 6,000x
+slowdown on an EPYC 4244P box and about 1% overhead on two fresh EPYC 4245P
+boxes. The earlier box's feature bits were not recorded, so this difference
+still needs investigation.
 
 ## Linux boot and replay checks
 

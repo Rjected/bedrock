@@ -113,6 +113,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rounds: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(64);
     let samples: usize = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(3);
     assert!(rounds > 0 && samples > 0);
+    // Report the SVM capabilities that select Bedrock's accelerated paths.
+    let svm_features = std::arch::x86_64::__cpuid_count(0x8000_000a, 0).edx;
+    println!(
+        "SVM_WORKLOAD_HOST svm_features={svm_features:#010x} pmu_virtualization={} ro_gpt={} virtual_nmi={}",
+        svm_features & (1 << 8) != 0,
+        svm_features & (1 << 21) != 0,
+        svm_features & (1 << 25) != 0,
+    );
     let mut native_times = Vec::with_capacity(samples);
     let mut guest_times = Vec::with_capacity(samples);
     let original = initial_data();

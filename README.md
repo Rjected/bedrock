@@ -305,7 +305,7 @@ another 1,024 checkpoint replays pass. Later boot phases still invalidate
 these plans frequently, leaving planning as the main measured cost.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
-On a later `m4-metal-small` AMD box running Linux 7.0.0-38, the experimental
+On an EPYC 4244P `m4-metal-small` AMD box running Linux 7.0.0-38, the experimental
 global gate initially repeated an unretired intercepted instruction during
 early Linux boot. Forcing a scalar step at that boundary lets the same guest
 boot and fork successfully; two fresh roots matched in one repeat test.
@@ -313,25 +313,40 @@ The fixed gate took 18.08 and 17.76 seconds per root with about 1.34 million
 exits, while the pre-gate branch took 17.48 and 17.49 seconds with about
 0.87 million exits on the same box and guest artifacts. The gate caused about
 584,000 nested-page violations versus 8,500 before it. It is currently a
-Linux performance regression, despite near-native results for the narrow
-register-loop benchmark.
+Linux performance regression on that host, despite near-native results for the
+narrow register-loop benchmark.
 The `svm_workload` example runs the exact same memory-writing integer routine
 natively and in a long-mode guest, checking the checksum and every output word.
-On the same box, 512 passes over 32 KiB retired 18.88 million guest instructions
-in 10.35 seconds, versus 1.71 ms natively: about 6,064 times slower. About
+On the EPYC 4244P box, 512 passes over 32 KiB retired 18.88 million guest
+instructions in 10.35 seconds, versus 1.71 ms natively: about 6,064 times slower. About
 4.196 million of its 4.203 million VM exits were single steps. That is 1.82
 million instructions per second in the guest versus 11.1 billion natively;
 these are instruction rates, not CPU clock frequencies. The pre-gate AMD branch
 took 9.59 seconds for the same guest work. The mode counter recorded no
 global-gate entries for this workload. It is still well outside the 5%
-native-overhead goal and exposes the unaccelerated path for memory-reading
-and writing loops. A 1,024-pass run gave 20.34 seconds guest versus
+native-overhead goal on that host and exposes an unaccelerated path for
+memory-reading and writing loops. A 1,024-pass run gave 20.34 seconds guest versus
 3.35 ms native, a similar 6,076-fold slowdown.
-On this box, the default `svm_bench` suite also fails its decoded-branch
-acceleration assertion: one case needs 40,131 exits with the global gate and
+Two fresh EPYC 4245P `m4-metal-small` boxes with the same branch and HWE kernel
+produced a very different result for the 1,024-pass workload: 37.75 million
+instructions in 3.118 ms guest versus 3.074 ms native on one box, and
+3.126 ms guest versus 3.085 ms native on the other. That is about 1% overhead
+with only 11 to 21 VM exits per run. The second box reported SVM PMC
+virtualization, ROGPT, and virtual NMI in CPUID. The earlier box's CPUID feature
+bits were not saved, so the reason for the difference is not yet established.
+This result is specific to the memory workload. With the earlier Linux 6.18
+reference guest kernel and `svmGuestInitrd`, one EPYC 4245P box booted to the
+snapshot and replayed two forks in 18.43 seconds; the fork outputs matched.
+That verifies the integration path, but does not establish 5% overhead for
+Linux. A different, newer Linux 6.18 guest kernel reached its snapshot but
+spent over two minutes in a `delay_tsc` loop during the first fork. Those
+kernel artifacts are different workloads and must not be compared as an A/B
+performance result.
+On the EPYC 4244P box, the default `svm_bench` suite also fails its
+decoded-branch acceleration assertion: one case needs 40,131 exits with the global gate and
 20,029 without it, where the test requires fewer than 100. Its functional
 branch result matched the stepped reference, but this host's acceleration
-failure remains unresolved.
+failure remains unresolved. The same suite passes on the EPYC 4245P box.
 This backend requires SVM and nested paging.
 
 For one-hour remote AMD bare-metal boxes, use the
