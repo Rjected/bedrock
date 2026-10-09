@@ -121,21 +121,16 @@ u64 bedrock_svm_pmu_mask(void)
     return BIT_ULL(event->hw.idx);
 }
 
-/* Serialize the perf reservation's rearm with IRQs and migration disabled.
- * Its count is only used for readiness; guest IRPERF supplies retirement and
- * a separate hardware-swapped guest counter drives virtual NMI overflow.
+/* The pinned perf event reserves an active physical counter. Guest IRPERF
+ * supplies retirement, and a separate VMCB counter drives virtual NMI
+ * overflow. Its period is set in the VMCB, so the host event stays unchanged.
  * Keep attr.sample_period zero to avoid host perf sampling-rate throttling. */
 int bedrock_svm_pmu_arm(u64 period, u64 *value)
 {
     struct perf_event *event = this_cpu_read(bedrock_svm_counter);
     if (!bedrock_svm_pmu_mask() || !period || period > (1ULL << 30))
         return -EAGAIN;
-    event->pmu->stop(event, PERF_EF_UPDATE);
     *value = local64_read(&event->count);
-    event->hw.sample_period = period;
-    event->hw.last_period = period;
-    local64_set(&event->hw.period_left, period);
-    event->pmu->start(event, PERF_EF_RELOAD);
     return 0;
 }
 
