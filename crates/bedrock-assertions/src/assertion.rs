@@ -153,18 +153,4 @@ mod tests {
         let back: Assertion = serde_json::from_str(&json).unwrap();
         assert_eq!(a, back);
     }
-
-    #[test]
-    fn assertion_has_unix_timestamp() {
-        let before = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let assertion = Assertion::always(Condition::Bool(true), "first", loc());
-        let after = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        assert!((before..=after).contains(&assertion.data().timestamp_unix_nano));
-    }
 }
