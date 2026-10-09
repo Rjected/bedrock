@@ -54,6 +54,7 @@ services:
       # engine::persistence=debug emits "Saved range of blocks", which the
       # durability oracle uses as the persisted-block watermark.
       RUST_LOG: info,engine::persistence=debug,reth::engine::tree=debug
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/tempo.jsonl
     volumes:
       - tempo-data:/data
 
@@ -120,6 +121,7 @@ services:
       - never
     environment:
       RUST_LOG: info
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/tempo-ref.jsonl
     volumes:
       - tempo-ref-data:/data
 
