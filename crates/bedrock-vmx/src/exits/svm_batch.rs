@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::SVM_CODE_PAGE_CAPACITY;
+use super::super::vm_state::{SVM_CODE_PAGE_CAPACITY, SVM_RECENT_PAGE_CAPACITY};
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
@@ -2107,12 +2107,12 @@ pub(crate) fn prepare<C: VmContext>(
         }
         let current = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
-        let mut updated = [u64::MAX; SVM_CODE_PAGE_CAPACITY];
+        let mut updated = [u64::MAX; SVM_RECENT_PAGE_CAPACITY];
         updated[0] = current;
         let mut next = 1;
         // Code-page locality decays quickly. Limit speculative code scans to
         // the most recent pages; every omitted page still traps on entry.
-        for linear in recent.into_iter().take(8) {
+        for linear in recent {
             if linear == u64::MAX || linear == current {
                 continue;
             }
@@ -3470,12 +3470,14 @@ mod tests {
             let physical_page = 0x10000 + index * 4096;
             ctx.memory[0x6000 + (index + 1) * 8..0x6008 + (index + 1) * 8]
                 .copy_from_slice(&(physical_page as u64 | 7).to_le_bytes());
-            ctx.state_mut().svm_recent_pages[index] = virtual_page as u64;
+            if index < SVM_RECENT_PAGE_CAPACITY {
+                ctx.state_mut().svm_recent_pages[index] = virtual_page as u64;
+            }
         }
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare(&mut ctx, true, true, &window).unwrap();
         assert!(batch.page_execution);
-        assert_eq!(batch.code_page_count, 8);
+        assert_eq!(batch.code_page_count, SVM_RECENT_PAGE_CAPACITY);
         assert_eq!(batch.page_breakpoint_count, 0);
         let mut allocator = crate::test_mocks::MockFrameAllocator::new();
         ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(

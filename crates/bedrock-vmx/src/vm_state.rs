@@ -17,6 +17,7 @@ type DeviceStatesBox = HeapBox<DeviceStates>;
 type ExitStatsBox = HeapBox<AllExitStats>;
 
 pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
+pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
 
 /// Preallocated AMD guard workspace. Planning and permission restoration run
 /// with IRQs disabled and must neither allocate nor grow the kernel stack.
@@ -917,7 +918,7 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     pub svm_rejected_pages: [u64; 64],
     pub svm_rejected_cursor: usize,
     /// Recent virtual code pages; immutable hazard scans live in `svm_guard`.
-    pub svm_recent_pages: [u64; SVM_CODE_PAGE_CAPACITY],
+    pub svm_recent_pages: [u64; SVM_RECENT_PAGE_CAPACITY],
     pub svm_gate_scalar_page: Option<u64>,
     pub(crate) svm_guard: VmallocBox<SvmGuardScratch>,
     /// Emulated TSC: `last_instruction_count + tsc_offset`.
@@ -1171,7 +1172,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
-            svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
+            svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
             svm_gate_scalar_page: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
@@ -1949,7 +1950,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
-            svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
+            svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
             svm_gate_scalar_page: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
@@ -2167,7 +2168,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             instruction_counter,
             svm_rejected_pages: [u64::MAX; 64],
             svm_rejected_cursor: 0,
-            svm_recent_pages: [u64::MAX; SVM_CODE_PAGE_CAPACITY],
+            svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
             svm_gate_scalar_page: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0, // Child's counter starts from 0
