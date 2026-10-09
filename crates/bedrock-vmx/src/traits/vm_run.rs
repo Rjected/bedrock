@@ -289,6 +289,7 @@ where
         ctx.state_mut().ept.invalidate_all_npt_code(allocator);
         ctx.state_mut().svm_gate_scalar_page = None;
         ctx.state_mut().svm_guard.gate_dirty = true;
+        ctx.state_mut().svm_guard.gate_links_untrusted = true;
         ctx.state_mut().svm_guard.gate_host_write_count = 0;
         ctx.state_mut().svm_guard.gate_host_write_all = false;
     }
@@ -299,6 +300,7 @@ where
             if ctx.state().svm_guard.gate_host_write_all {
                 ctx.state_mut().ept.invalidate_all_npt_code(allocator);
                 ctx.state_mut().svm_guard.gate_dirty = true;
+                ctx.state_mut().svm_guard.gate_links_untrusted = true;
             } else {
                 let count = ctx.state().svm_guard.gate_host_write_count;
                 for index in 0..count {
@@ -307,6 +309,7 @@ where
                         .contains(&page)
                     {
                         ctx.state_mut().svm_guard.gate_dirty = true;
+                        ctx.state_mut().svm_guard.gate_links_untrusted = true;
                     }
                     let _ = ctx
                         .state_mut()

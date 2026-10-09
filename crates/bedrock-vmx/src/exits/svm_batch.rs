@@ -446,6 +446,39 @@ fn collect_translation_tree<C: VmContext>(ctx: &mut C, batch: &InstructionBatch)
     collect_translation_tree_pages(ctx, &batch.pages[..batch.code_page_count])
 }
 
+fn add_translation_child<C: VmContext>(
+    ctx: &mut C,
+    parent: usize,
+    level: u8,
+    child: u64,
+    code_pages: &[u64],
+) -> Option<()> {
+    if code_pages.contains(&child) {
+        return None;
+    }
+    let scratch = &mut ctx.state_mut().svm_guard;
+    let index = if let Some(index) = scratch.tables[..scratch.count]
+        .iter()
+        .position(|&page| page == child)
+    {
+        if scratch.levels[index] != level - 1 {
+            return None;
+        }
+        index
+    } else {
+        if scratch.count == scratch.tables.len() {
+            return None;
+        }
+        let index = scratch.count;
+        scratch.tables[index] = child;
+        scratch.levels[index] = level - 1;
+        scratch.count += 1;
+        index
+    };
+    scratch.children[parent] |= 1u128 << index;
+    Some(())
+}
+
 fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64]) -> Option<()> {
     let root = ctx
         .state()
@@ -510,7 +543,32 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     while cursor < ctx.state().svm_guard.count {
         let level = ctx.state().svm_guard.levels[cursor];
         let table = ctx.state().svm_guard.tables[cursor];
+        ctx.state_mut().svm_guard.children[cursor] = 0;
         if level > 1 {
+            // A guarded table cannot change behind the scanner. Its direct
+            // child links remain valid even when CR3 points to another root;
+            // newly reached or write-released tables still get read below.
+            let cached = ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
+                .iter()
+                .enumerate()
+                .find(|(index, &page)| {
+                    page == table
+                        && ctx.state().svm_guard.gate_guards[*index].valid
+                        && !ctx.state().svm_guard.gate_links_untrusted
+                        && ctx.state().svm_guard.gate_levels[*index] == level
+                })
+                .map(|(index, _)| index);
+            if let Some(index) = cached {
+                let mut links = ctx.state().svm_guard.gate_children[index];
+                while links != 0 {
+                    let child_index = links.trailing_zeros() as usize;
+                    let child = ctx.state().svm_guard.gate_tables[child_index];
+                    add_translation_child(ctx, cursor, level, child, code_pages)?;
+                    links &= links - 1;
+                }
+                cursor += 1;
+                continue;
+            }
             for offset in (0..4096).step_by(512) {
                 ctx.read_guest_memory(GuestPhysAddr::new(table + offset), &mut bytes)
                     .ok()?;
@@ -526,26 +584,7 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
                         continue;
                     }
                     let child = entry & 0x000f_ffff_ffff_f000;
-                    if code_pages.contains(&child) {
-                        return None;
-                    }
-                    let scratch = &mut ctx.state_mut().svm_guard;
-                    if let Some(index) = scratch.tables[..scratch.count]
-                        .iter()
-                        .position(|&p| p == child)
-                    {
-                        if scratch.levels[index] != level - 1 {
-                            return None;
-                        }
-                        continue;
-                    }
-                    if scratch.count == scratch.tables.len() {
-                        return None;
-                    }
-                    let index = scratch.count;
-                    scratch.tables[index] = child;
-                    scratch.levels[index] = level - 1;
-                    scratch.count += 1;
+                    add_translation_child(ctx, cursor, level, child, code_pages)?;
                 }
             }
         }
@@ -553,6 +592,25 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     }
     ctx.state_mut().svm_guard.valid = true;
     Some(())
+}
+
+fn restore_global_table_guards<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+) {
+    let count = ctx.state().svm_guard.gate_count;
+    for index in 0..count {
+        let saved = ctx.state().svm_guard.gate_guards[index];
+        if saved.valid {
+            saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
+            ctx.state_mut().svm_guard.gate_guards[index].valid = false;
+        }
+    }
+    let guard = &mut ctx.state_mut().svm_guard;
+    guard.gate_count = 0;
+    guard.gate_ready = false;
+    guard.gate_dirty = false;
+    guard.gate_links_untrusted = true;
 }
 
 pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
@@ -571,17 +629,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         // Without ROGPT, protecting page tables turns ordinary hardware page
         // walks into nested-page faults. Keep the global gate off; validated
         // bounded batches still protect their own code and store ranges.
-        let count = ctx.state().svm_guard.gate_count;
-        for index in 0..count {
-            let saved = ctx.state().svm_guard.gate_guards[index];
-            if saved.valid {
-                saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
-                ctx.state_mut().svm_guard.gate_guards[index].valid = false;
-            }
-        }
-        ctx.state_mut().svm_guard.gate_count = 0;
-        ctx.state_mut().svm_guard.gate_ready = false;
-        ctx.state_mut().svm_guard.gate_dirty = false;
+        restore_global_table_guards(ctx, allocator);
         return;
     }
     ctx.state_mut().svm_guard.gate_disabled_no_rogpt = false;
@@ -603,18 +651,6 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     {
         return;
     }
-    let old_count = ctx.state().svm_guard.gate_count;
-    for index in 0..old_count {
-        let saved = ctx.state().svm_guard.gate_guards[index];
-        if saved.valid {
-            saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
-        }
-        ctx.state_mut().svm_guard.gate_guards[index].valid = false;
-    }
-    ctx.state_mut().svm_guard.gate_count = 0;
-    ctx.state_mut().svm_guard.gate_ready = false;
-    ctx.state_mut().svm_guard.gate_dirty = false;
-    ctx.state_mut().svm_guard.gate_root = root;
     let paged = ctx
         .state()
         .vmcs
@@ -622,11 +658,18 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         .ok()
         .is_some_and(|cr0| cr0 & (1 << 31) != 0);
     if !paged {
+        restore_global_table_guards(ctx, allocator);
+        ctx.state_mut().svm_guard.gate_root = root;
         ctx.state_mut().svm_guard.gate_ready = true;
         return;
     }
     ctx.state_mut().svm_guard.valid = false;
-    if collect_translation_tree_pages(ctx, &[]).is_none() {
+    let scanned = collect_translation_tree_pages(ctx, &[]).is_some();
+    // The prior guards stay live during the walk so unchanged table links can
+    // be reused. Replace them only after the next complete tree is known.
+    restore_global_table_guards(ctx, allocator);
+    ctx.state_mut().svm_guard.gate_root = root;
+    if !scanned {
         return;
     }
     let count = ctx.state().svm_guard.count;
@@ -634,6 +677,8 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         let page = ctx.state().svm_guard.tables[index];
         let gpa = GuestPhysAddr::new(page);
         ctx.state_mut().svm_guard.gate_tables[index] = page;
+        ctx.state_mut().svm_guard.gate_levels[index] = ctx.state().svm_guard.levels[index];
+        ctx.state_mut().svm_guard.gate_children[index] = ctx.state().svm_guard.children[index];
         ctx.state_mut().svm_guard.gate_guards[index].valid = false;
         let _ = ctx.state_mut().ept.invalidate_npt_code_4k(allocator, gpa);
         match ctx.state_mut().ept.restrict_write_4k(allocator, gpa) {
@@ -658,8 +703,12 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
     }
-    ctx.state_mut().svm_guard.gate_count = count;
-    ctx.state_mut().svm_guard.gate_ready = true;
+    let guard = &mut ctx.state_mut().svm_guard;
+    guard.gate_count = count;
+    guard.gate_root = root;
+    guard.gate_dirty = false;
+    guard.gate_links_untrusted = false;
+    guard.gate_ready = true;
 }
 
 pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPage>>(
@@ -3887,6 +3936,54 @@ mod tests {
         ctx.state_mut().svm_guard.valid = false;
         collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
         assert_eq!(ctx.state().svm_guard.levels[0], 4); // Rewalked.
+    }
+
+    #[test]
+    fn guarded_table_links_follow_root_changes_and_write_invalidation() {
+        let mut ctx = paged_context(&[0x90]);
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        let count = ctx.state().svm_guard.count;
+        for index in 0..count {
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.gate_tables[index] = guard.tables[index];
+            guard.gate_levels[index] = guard.levels[index];
+            guard.gate_children[index] = guard.children[index];
+            guard.gate_guards[index].guest = guard.tables[index];
+            guard.gate_guards[index].valid = true;
+        }
+        ctx.state_mut().svm_guard.gate_count = count;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.memory[0x8000..0x8008].copy_from_slice(&0x4007u64.to_le_bytes());
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x8000);
+
+        // An unchanged guarded table can reuse its child links under another
+        // CR3. Its bytes are intentionally changed here to model a host write
+        // that bypassed NPT, which must then revoke that reuse.
+        ctx.memory[0x4000..0x4008].copy_from_slice(&0x9007u64.to_le_bytes());
+        ctx.state_mut().svm_guard.valid = false;
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        assert!(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0x5000));
+        assert!(!ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0x9000));
+
+        ctx.state_mut().svm_guard.gate_links_untrusted = true;
+        ctx.state_mut().svm_guard.valid = false;
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        assert!(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0x9000));
+        assert!(!ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0x5000));
+
+        // A guest write releases the affected table's guard; other guarded
+        // tables may still reuse their links while this one is read again.
+        ctx.memory[0x4000..0x4008].copy_from_slice(&0xa007u64.to_le_bytes());
+        let written = ctx.state().svm_guard.gate_tables[..count]
+            .iter().position(|&page| page == 0x4000).unwrap();
+        ctx.state_mut().svm_guard.gate_links_untrusted = false;
+        ctx.state_mut().svm_guard.gate_guards[written].valid = false;
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        ctx.state_mut().svm_guard.valid = false;
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        assert!(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0xa000));
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
 pub(crate) struct SvmGuardScratch {
     pub tables: [u64; 128],
     pub levels: [u8; 128],
+    // Direct child links in the last walk, indexed by this walk's table set.
+    pub children: [u128; 128],
     pub count: usize,
     pub root: u64,
     pub valid: bool,
@@ -51,11 +53,15 @@ pub(crate) struct SvmGuardScratch {
     pub gate_host_write_all: bool,
     pub gate_tables: [u64; 128],
     pub gate_guards: [SvmGuardSaved; 128],
+    pub gate_levels: [u8; 128],
+    pub gate_children: [u128; 128],
     pub gate_count: usize,
     pub gate_root: u64,
     pub gate_ready: bool,
     pub gate_disabled_no_rogpt: bool,
     pub gate_dirty: bool,
+    /// Host writes bypass NPT; guarded-table child links cannot be reused.
+    pub gate_links_untrusted: bool,
 }
 
 impl SvmGuardScratch {
