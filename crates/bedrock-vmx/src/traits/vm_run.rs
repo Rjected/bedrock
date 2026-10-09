@@ -521,6 +521,9 @@ where
             ctx.state_mut().svm_gate_scalar_page =
                 super::super::exits::InstructionWindow::read(ctx).ok()
                     .map(|window| window.physical.as_u64() & !4095);
+            // The boundary represents an unretired intercepted instruction.
+            // Execute it once without preparing another global gate.
+            force_single_step = true;
         }
         if let Some(guard) = guard {
             if guard.restore(ctx, allocator) && run_result.is_ok() {
