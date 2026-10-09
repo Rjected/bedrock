@@ -262,7 +262,18 @@ pub(crate) unsafe fn run(
         if code == 0x61 {
             unsafe { core::arch::asm!("int $2", options(nomem, nostack)); }
         }
-        let replay = (0x20..=0x3f).contains(&code) || matches!(code, 0x66 | 0x6a | 0x74);
+        // MOV SS can suppress the DR6 breakpoint bits for the following
+        // instruction even when SVM reports the debug exit at its address.
+        // Guest TF and DR7 were excluded before entering this gate, so the
+        // protected hazard address itself is sufficient to request replay.
+        let hazard_breakpoint = code == 0x41
+            && batch.page_breakpoints[..batch.page_breakpoint_count]
+                .contains(&v.read(o::RIP, 8));
+        let replay = hazard_breakpoint || (0x20..=0x3f).contains(&code)
+            || matches!(code, 0x66 | 0x6a | 0x74);
+        if hazard_breakpoint {
+            v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) & !(1 << 16));
+        }
         let mut e = if overflow_nmi || code == 0x61 || replay {
             let mut e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
                 .map_err(|_| VmEntryError::VmEntryFailed)?;

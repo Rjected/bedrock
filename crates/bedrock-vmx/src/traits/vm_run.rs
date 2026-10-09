@@ -356,7 +356,21 @@ where
         if software_exit {
             ctx.sync_gprs_to_vmx_ctx();
         }
-        let scalar_page = ctx.state().svm_gate_scalar_page;
+        let mut scalar_page = ctx.state().svm_gate_scalar_page;
+        if let (Some(page), Some(window)) = (scalar_page, instruction_window.as_ref()) {
+            let current = window.physical.as_u64() & !4095;
+            if current != page
+                && ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(current))
+            {
+                let split_fetch = window.linear & 4095 >= 4096 - 15
+                    && window.following_page(ctx).ok()
+                        .is_some_and(|next| next.as_u64() & !4095 == page);
+                if !split_fetch {
+                    ctx.state_mut().svm_gate_scalar_page = None;
+                    scalar_page = None;
+                }
+            }
+        }
         let mut batch = if Ctx::V::uses_nested_paging()
             && !software_exit
             && !force_single_step
@@ -367,8 +381,17 @@ where
                     ctx,
                     allocator,
                     runner.can_count_instructions(),
+                    false,
                     window,
                 )
+                .or_else(|| {
+                    super::super::exits::prepare_instruction_batch(
+                        ctx,
+                        runner.can_count_instructions(),
+                        runner.can_guard_page_tables(),
+                        window,
+                    )
+                })
             })
         } else if Ctx::V::uses_nested_paging()
             && !software_exit
@@ -380,12 +403,14 @@ where
                 None
             } else {
                 instruction_window.as_ref().and_then(|window| {
-                    super::super::exits::prepare_instruction_batch(
-                        ctx,
-                        runner.can_count_instructions(),
-                        runner.can_guard_page_tables(),
-                        window,
-                    )
+                    super::super::exits::prepare_global(ctx, allocator,
+                        runner.can_count_instructions(), true, window)
+                        .or_else(|| super::super::exits::prepare_instruction_batch(
+                            ctx,
+                            runner.can_count_instructions(),
+                            runner.can_guard_page_tables(),
+                            window,
+                        ))
                 })
             }
         } else {
@@ -424,6 +449,47 @@ where
         });
         if batch.is_some() && guard.is_none() {
             batch = None;
+        }
+        #[cfg(not(feature = "cargo"))]
+        if Ctx::V::uses_nested_paging() {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static ENTRIES: AtomicU64 = AtomicU64::new(0);
+            static GLOBAL: AtomicU64 = AtomicU64::new(0);
+            static PAGE: AtomicU64 = AtomicU64::new(0);
+            static REGION: AtomicU64 = AtomicU64::new(0);
+            static SCALAR: AtomicU64 = AtomicU64::new(0);
+            static STALE_TRUSTED: AtomicU64 = AtomicU64::new(0);
+            static TRUSTED_SAME: AtomicU64 = AtomicU64::new(0);
+            static TRUSTED_OTHER: AtomicU64 = AtomicU64::new(0);
+            let n = ENTRIES.fetch_add(1, Ordering::Relaxed) + 1;
+            if batch.as_ref().is_some_and(|b| b.global_execution) {
+                GLOBAL.fetch_add(1, Ordering::Relaxed);
+            } else if batch.as_ref().is_some_and(|b| b.page_execution) {
+                PAGE.fetch_add(1, Ordering::Relaxed);
+            } else if batch.is_some() {
+                REGION.fetch_add(1, Ordering::Relaxed);
+            } else if !software_exit {
+                SCALAR.fetch_add(1, Ordering::Relaxed);
+            }
+            if scalar_page.is_some() && instruction_window.as_ref().is_some_and(|window| {
+                ctx.state().ept.npt_trusted_code_4k(allocator,
+                    GuestPhysAddr::new(window.physical.as_u64() & !4095))
+            }) {
+                STALE_TRUSTED.fetch_add(1, Ordering::Relaxed);
+                if instruction_window.as_ref().is_some_and(|window|
+                    Some(window.physical.as_u64() & !4095) == scalar_page) {
+                    TRUSTED_SAME.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    TRUSTED_OTHER.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if n % 100_000 == 0 {
+                log_err!("SVM gate mode entries={} global={} page={} region={} scalar={} trusted={} same={} other={}", n,
+                    GLOBAL.load(Ordering::Relaxed), PAGE.load(Ordering::Relaxed),
+                    REGION.load(Ordering::Relaxed), SCALAR.load(Ordering::Relaxed),
+                    STALE_TRUSTED.load(Ordering::Relaxed), TRUSTED_SAME.load(Ordering::Relaxed),
+                    TRUSTED_OTHER.load(Ordering::Relaxed));
+            }
         }
         if Ctx::V::uses_nested_paging() {
             super::super::exits::retain_translation_cache(
@@ -472,9 +538,14 @@ where
         }
         if let Some(execute) = scalar_execute {
             execute.restore(&mut ctx.state_mut().ept, allocator);
-            if batch.as_ref().is_none_or(|batch| !batch.page_execution)
+            let replay = ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
+                .ok().is_some_and(|qual| qual
+                    & super::super::traits::InstructionBatch::PAGE_SCALAR_REPLAY != 0);
+            if (batch.as_ref().is_some_and(|batch| batch.global_execution)
+                && !replay && !force_single_step)
+                || (batch.as_ref().is_none_or(|batch| !batch.page_execution)
                 && runner.completed_instructions().is_some_and(|count| count != 0)
-            {
+                ) {
                 ctx.state_mut().svm_gate_scalar_page = None;
             }
         }

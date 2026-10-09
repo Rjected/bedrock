@@ -1184,22 +1184,23 @@ pub(crate) fn globally_safe_code<C: VmContext>(ctx: &C, physical: u64) -> bool {
 }
 
 pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
-    ctx: &C,
+    ctx: &mut C,
     allocator: &A,
     can_count: bool,
+    allow_unsafe: bool,
     window: &super::svm::InstructionWindow,
 ) -> Option<InstructionBatch> {
-    let state = ctx.state();
-    let v = &state.vmcs;
     let page = window.physical.as_u64() & !4095;
+    let trusted = ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page));
     if !can_count
-        || !state.svm_guard.gate_ready
-        || state.svm_guard.gate_dirty
-        || !state.ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
-        || state.mtf_enabled
-        || v.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
-        || v.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0
-        || v.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
+        || !ctx.state().svm_guard.gate_ready
+        || ctx.state().svm_guard.gate_dirty
+        || (!trusted && !allow_unsafe)
+        || ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count].contains(&page)
+        || ctx.state().mtf_enabled
+        || ctx.state().vmcs.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
+        || ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0
+        || ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
     {
         return None;
     }
@@ -1208,7 +1209,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         return None;
     }
     let mut batch = InstructionBatch {
-        start: v.read_natural(VmcsFieldNatural::GuestRip).ok()?,
+        start: ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?,
         offsets: [0; 65],
         count: 0,
         repeat: None,
@@ -1233,14 +1234,31 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         instruction_budget: budget,
     };
     batch.pages[0] = page;
+    if !trusted {
+        let hazard = cached_page_hazards(ctx, page)?;
+        if hazard.count == 0 || hazard.edge & 15 != 15
+            || hazard.boundary[31] == 0x0f
+            || hazard.boundary[30..] == [0x0f, 0xc7]
+            || hazard.offsets[..hazard.count].contains(&((window.physical.as_u64() & 4095) as u16))
+        {
+            return None;
+        }
+        collect_page_breakpoints(ctx, &mut batch, core::slice::from_ref(&hazard))?;
+        if batch.page_breakpoint_count == 0 {
+            return None;
+        }
+    }
     Some(batch)
 }
 
 fn collect_page_breakpoints<C: VmContext>(
     ctx: &mut C,
     batch: &mut InstructionBatch,
-    hazards: &[PageHazards; SVM_CODE_PAGE_CAPACITY],
+    hazards: &[PageHazards],
 ) -> Option<()> {
+    if hazards.len() < batch.code_page_count {
+        return None;
+    }
     batch.page_breakpoint_count = 0;
     if hazards[..batch.code_page_count]
         .iter()
@@ -2474,6 +2492,20 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
         execution: None,
     };
     if batch.global_execution {
+        if batch.page_breakpoint_count != 0 {
+            let page = batch.pages[0];
+            match ctx.state_mut().ept.restrict_write_4k(
+                allocator, GuestPhysAddr::new(page)) {
+                Ok(Some(write_guard)) => {
+                    ctx.state_mut().svm_guard.saved[0] = super::super::vm_state::SvmGuardSaved {
+                        guest: page, write_guard, valid: true,
+                    };
+                    guard.saved_count = 1;
+                }
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+        }
         return Some(guard);
     }
     if !batch.accesses_memory && batch.branch_exit_count == 0 {
