@@ -261,6 +261,20 @@ six-run modified passes had Linux medians of 2.74 and 2.75 seconds against a
 2.72-second control pass. VM runner-cycle medians overlapped as well. The
 change was reverted: the replacement counter read did not produce a repeatable
 end-to-end improvement on this workload.
+Recurrent hazardous pages now retain their full-page scan under a persistent
+NPT write guard. A page is selected only after 16 repeated fetches, with an
+eight-page cap. Guest writes release the guard and invalidate the proof;
+Bedrock host writes, RUN boundaries, and changed NPT mappings force a byte
+recheck before reuse. On a boxctl EPYC 4245P, the final guarded-cache variant
+had a six-run Linux boot/fork median of 2.66 seconds, versus 2.78 seconds in
+the same-box control. Exit counts remained about 844,000, but median exit
+handling fell from 420 to 265 million cycles and median VM-entry preparation
+from 4.74 to 4.45 billion cycles. The hardware suite, exact-deadline checks,
+two fresh Linux boots, fork replay, snapshot TSC, and RAM hash matched. This
+is a roughly 4.5% improvement to Linux runtime, while the broader near-native
+goal remains unmet. As with the existing globally trusted code path, direct
+userspace writes through a RAM mapping must occur between RUN calls; writes
+performed by Bedrock while RUN is active invalidate the cached proof.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000

@@ -59,6 +59,9 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
                 && !gate.gate_dirty
                 && !gate.gate_tables[..gate.gate_count].contains(&page);
             let safe = may_trust && super::svm_batch::globally_safe_code(ctx, page);
+            if may_trust {
+                super::svm_batch::protect_recurrent_code(ctx, allocator, page);
+            }
             if safe {
                 if ctx
                     .state_mut()
@@ -75,6 +78,13 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
         if qual.write && super::svm_batch::release_global_table_write(ctx, allocator, page) {
+            let scalar_page = super::svm::InstructionWindow::read(ctx)
+                .ok()
+                .map(|window| window.physical.as_u64() & !4095);
+            ctx.state_mut().svm_gate_scalar_page = scalar_page;
+            return ExitHandlerResult::Continue;
+        }
+        if qual.write && super::svm_batch::release_recurrent_code_write(ctx, allocator, page) {
             let scalar_page = super::svm::InstructionWindow::read(ctx)
                 .ok()
                 .map(|window| window.physical.as_u64() & !4095);

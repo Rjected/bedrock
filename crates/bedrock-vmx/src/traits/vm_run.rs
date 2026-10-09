@@ -286,6 +286,18 @@ where
     if Ctx::V::uses_nested_paging() {
         // Userspace may have changed RAM between RUN calls.
         ctx.state_mut().svm_guard.valid = false;
+        let mut guarded_code = false;
+        for memo in &mut ctx.state_mut().svm_guard.hazard_memos {
+            if memo.guarded {
+                memo.valid = false;
+                guarded_code = true;
+            }
+        }
+        if guarded_code {
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.code_epoch = guard.code_epoch.wrapping_add(1);
+            guard.code_count = 0;
+        }
         ctx.state_mut().ept.invalidate_all_npt_code(allocator);
         ctx.state_mut().svm_gate_scalar_page = None;
         ctx.state_mut().svm_guard.gate_dirty = true;

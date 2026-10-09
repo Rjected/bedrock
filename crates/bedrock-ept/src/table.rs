@@ -27,6 +27,7 @@ pub struct EptPageTable<Frame> {
     frames: EptVec<Frame>,
     execution_workspace: Option<EptBox<NptExecutionScratch>>,
     execution_generation: u64,
+    mapping_generation: u64,
 }
 
 /// Temporary AMD execute restriction. Restore before changing mappings or
@@ -36,8 +37,8 @@ pub struct NptExecutionGuard {
     saved: EptBox<NptExecutionScratch>,
 }
 
-/// Temporary write restriction for an AMD 4KB leaf. Restore before changing
-/// mappings or sharing these tables with another vCPU; flush on guest entry.
+/// Write restriction for an AMD 4KB leaf. Restoration checks the original
+/// mapping before making it writable; flush translations on guest entry.
 #[must_use]
 #[derive(Clone, Copy)]
 pub struct NptWriteGuard {
@@ -67,6 +68,27 @@ impl NptExecuteGuard {
 }
 
 impl NptWriteGuard {
+    pub fn is_active<Frame, A: FrameAllocator>(
+        self,
+        ept: &EptPageTable<Frame>,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> bool {
+        if ept.format != PageTableFormat::AmdNpt || ept.pml4_phys != self.root {
+            return false;
+        }
+        let Some((table, index)) = ept.npt_leaf_4k(allocator, guest) else {
+            return false;
+        };
+        if table != self.table || index != self.index {
+            return false;
+        }
+        let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
+        // SAFETY: npt_leaf_4k validated the current leaf of this EPT.
+        let entry = unsafe { &*leaf.add(index as usize) };
+        entry.addr() == self.host && entry.raw() & 2 == 0
+    }
+
     pub fn restore<Frame, A: FrameAllocator>(self, ept: &mut EptPageTable<Frame>, allocator: &A) {
         assert_eq!(ept.format, PageTableFormat::AmdNpt);
         assert_eq!(ept.pml4_phys, self.root);
@@ -169,6 +191,7 @@ impl<Frame> EptPageTable<Frame> {
             format,
             execution_workspace: execution_workspace(format),
             execution_generation: 0,
+            mapping_generation: 0,
         })
     }
 
@@ -180,6 +203,11 @@ impl<Frame> EptPageTable<Frame> {
         let mem_type = 6u64; // WB
         let page_walk_len = 3u64; // 4 levels - 1
         self.pml4_phys.as_u64() | (page_walk_len << 3) | mem_type
+    }
+
+    /// Changes whenever a 4KB guest-to-host mapping is created or replaced.
+    pub fn mapping_generation(&self) -> u64 {
+        self.mapping_generation
     }
 
     /// Host physical address and permissions for `gpa`, if mapped.
@@ -578,6 +606,7 @@ impl<Frame> EptPageTable<Frame> {
     ) -> Result<(), A::Error> {
         // Mapping can allocate new intermediate tables or change execution.
         self.execution_generation = self.execution_generation.wrapping_add(1);
+        self.mapping_generation = self.mapping_generation.wrapping_add(1);
         let guest_virt = VirtAddr::new(guest_phys.as_u64());
 
         let table_perms = if self.format == PageTableFormat::AmdNpt {
@@ -671,6 +700,7 @@ impl<Frame> EptPageTable<Frame> {
             self.execution_generation = self.execution_generation.wrapping_add(1);
         }
         *pte = replacement;
+        self.mapping_generation = self.mapping_generation.wrapping_add(1);
         Ok(())
     }
 
@@ -907,6 +937,7 @@ impl<Frame> EptPageTable<Frame> {
             frames,
             execution_workspace: execution_workspace(self.format),
             execution_generation: 0,
+            mapping_generation: 0,
         })
     }
 }

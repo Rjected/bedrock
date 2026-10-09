@@ -86,13 +86,46 @@ impl SvmGuardScratch {
         }
         let Some(last) = guest.checked_add(len as u64 - 1) else {
             self.gate_host_write_all = true;
+            let mut changed = false;
+            for memo in &mut self.hazard_memos {
+                if memo.guarded {
+                    memo.valid = false;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.code_epoch = self.code_epoch.wrapping_add(1);
+                self.code_count = 0;
+            }
             return;
         };
         let mut page = guest & !4095;
         while page <= last {
+            let mut changed = false;
+            for memo in &mut self.hazard_memos {
+                if memo.guarded && memo.proof.page == page {
+                    memo.valid = false;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.code_epoch = self.code_epoch.wrapping_add(1);
+                self.code_count = 0;
+            }
             if !self.gate_host_writes[..self.gate_host_write_count].contains(&page) {
                 if self.gate_host_write_count == self.gate_host_writes.len() {
                     self.gate_host_write_all = true;
+                    let mut changed = false;
+                    for memo in &mut self.hazard_memos {
+                        if memo.guarded {
+                            memo.valid = false;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        self.code_epoch = self.code_epoch.wrapping_add(1);
+                        self.code_count = 0;
+                    }
                     return;
                 }
                 self.gate_host_writes[self.gate_host_write_count] = page;
@@ -159,6 +192,10 @@ pub(crate) struct SvmCodeProof {
 pub(crate) struct SvmHazardMemo {
     pub valid: bool,
     pub rejected: bool,
+    pub guarded: bool,
+    pub hits: u16,
+    pub write_guard: NptWriteGuard,
+    pub guarded_mapping_generation: u64,
     pub revision: u64,
     pub proof: SvmCodeProof,
     pub bytes: [u8; 4096],
