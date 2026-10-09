@@ -456,6 +456,16 @@ instructions in 3.118 ms guest versus 3.074 ms native on one box, and
 with only 11 to 21 VM exits per run. The second box reported SVM PMC
 virtualization, ROGPT, and virtual NMI in CPUID. The earlier box's CPUID feature
 bits were not saved, so the reason for the difference is not yet established.
+On an EPYC 4245P boxctl box running HWE `7.0.0-38`, a sustained 1,048,576-pass
+run retired 38.659 billion guest instructions in a three-sample median of
+3.1625 seconds versus 3.1579 seconds natively (0.15% slower), with 3,904 to
+4,310 VM exits per sample. That is 12.22 billion guest instructions per second,
+an instruction throughput rather than a 12.22 GHz CPU clock. The Linux
+`amd-pstate-epp` frequency reading on the pinned CPU was about 5.44–5.45 GHz
+during the paired run, implying about 2.24 retired guest instructions per CPU
+cycle. In the same box's short branch-heavy comparisons, guest time was about
+50% higher than native. These measurements show near-native performance for
+this memory workload, not for the full Linux boot/fork path.
 On a later EPYC 4245P box, a clean build of the current branch passed the SVM
 smoke, transition, and benchmark suites. A nine-sample 1,024-pass memory run
 took 4.030 ms guest versus 3.974 ms native (1.01x, about 12 exits). To isolate a likely
