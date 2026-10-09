@@ -8,23 +8,21 @@
 //! with other randomness ([`Vary::Rng`]), other harness decisions
 //! ([`Vary::Decisions`]), both, or nothing ([`Vary::None`]: the original run
 //! again). This module holds the pure parts: parsing a moment, deriving each
-//! branch's seed and decisions, listing moments, and summarizing branches.
+//! branch's seed, listing moments, and summarizing branches. Re-drawing a
+//! branch's decisions is the workload planner's (`Redraw` in the contract).
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
+use bedrock_dst_contract::Moment as WorkloadMoment;
 use bedrock_lab::{Cut, InputRecording, VirtTime};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-use crate::scenario::{Generation, Kill, Scenario};
-use crate::{splitmix64, NEMESIS_MAX_DOWN_SECS, NEMESIS_WARMUP_SECS};
+use crate::splitmix64;
 
 /// Salt of a branch's suffix RNG seed.
 const BRANCH_RNG_SALT: u64 = 0x6272_616e_6368_7231; // "branchr1"
-/// Salt of a branch's re-drawn decisions.
-const BRANCH_DECISION_SALT: u64 = 0x6272_616e_6368_6431; // "branchd1"
 
 /// What a branch changes after the moment.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,9 +35,9 @@ pub enum Vary {
     /// Tempo's and the kernel's own RNG, guest-drawn spec seeds).
     #[default]
     Rng,
-    /// Harness decisions: the nemesis kills and load generations not yet
-    /// applied at the moment are re-drawn from the branch seed (delivered
-    /// with `tempo-dst redecide`); randomness continues the original stream.
+    /// The workload's decisions not yet applied at the moment are re-drawn
+    /// by its planner from the branch seed (delivered with the planner's
+    /// mid-run action); randomness continues the original stream.
     Decisions,
     /// Both.
     Both,
@@ -139,9 +137,8 @@ pub struct RngStream {
     pub skip: u64,
 }
 
-/// A host command a branch issues at a virtual time mid-run (the
-/// `tempo-dst redecide` of `--vary decisions`); `replay --tape` issues it
-/// again.
+/// A host command a branch issues at a virtual time mid-run (the planner's
+/// action of `--vary decisions`); `replay --tape` issues it again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostAction {
     pub at_instructions: u64,
@@ -207,86 +204,6 @@ pub fn branch_seed(parent_tape_sha256: &str, at: VirtTime, branch: u64) -> u64 {
     )
 }
 
-/// A branch's decisions: the parent's up to the moment, re-drawn after it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Redraw {
-    pub nemesis_plan: Vec<Kill>,
-    pub generations: Vec<Generation>,
-    /// How many of each come from the parent.
-    #[serde(skip)]
-    pub kept_kills: usize,
-    #[serde(skip)]
-    pub kept_generations: usize,
-}
-
-/// Re-draws the decisions of `parent` not yet applied `t_secs` after its
-/// nemesis started: kills that fired before stay, as do the load generations
-/// started before (generation 0, and one per restart done); the rest of the
-/// plan is drawn like the guest planner would, starting after the moment,
-/// from `seed`, with fresh txgen and spec seeds for the later generations.
-/// The guest has the last word on what already happened
-/// (`tempo-dst redecide` keeps every kill that fired).
-pub fn redraw_decisions(parent: &Scenario, t_secs: f64, seed: u64) -> Redraw {
-    let plan0 = parent.nemesis.plan.clone().unwrap_or_default();
-    let mut plan: Vec<Kill> = plan0
-        .iter()
-        .take_while(|k| (k.at_secs as f64) < t_secs)
-        .copied()
-        .collect();
-    let kept_kills = plan.len();
-    let restarted = plan
-        .iter()
-        .filter(|k| ((k.at_secs + k.down_secs) as f64) < t_secs)
-        .count();
-    let mut state = splitmix64(seed ^ BRANCH_DECISION_SALT);
-    let mut next = || {
-        state = splitmix64(state);
-        state
-    };
-    let n = &parent.nemesis;
-    if n.enabled {
-        let gap = u64::from(n.min_gap_secs.max(1));
-        let after = t_secs.ceil() as u64 + 1;
-        let mut t = plan
-            .last()
-            .map_or(NEMESIS_WARMUP_SECS, |k| k.at_secs + k.down_secs + gap)
-            .max(after);
-        while plan.len() < n.max_kills as usize {
-            let at = t + next() % (gap + 1);
-            let down = next() % (NEMESIS_MAX_DOWN_SECS + 1);
-            if at + down + gap > parent.run_secs {
-                break;
-            }
-            plan.push(Kill {
-                at_secs: at,
-                down_secs: down,
-            });
-            t = at + down + gap;
-        }
-    }
-    let gens0 = &parent.load.generations;
-    let kept_generations = if gens0.is_empty() {
-        0
-    } else {
-        gens0.len().min(1 + restarted)
-    };
-    let mut generations = gens0[..kept_generations].to_vec();
-    if !gens0.is_empty() {
-        for _ in kept_generations..=plan.len() {
-            generations.push(Generation {
-                txgen_seed: next() >> 32,
-                spec_seed: next(),
-            });
-        }
-    }
-    Redraw {
-        nemesis_plan: plan,
-        generations,
-        kept_kills,
-        kept_generations,
-    }
-}
-
 /// One moment worth branching from.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Moment {
@@ -298,57 +215,31 @@ pub struct Moment {
     pub what: String,
 }
 
-/// Moments of a recorded run, from its events (nemesis kills and restarts,
-/// load generations, re-decisions, each Always signature's first failure and
-/// its last pass before it) and its tape (the start action). Guest event
-/// times are mapped to virtual time through the run's first event, which
-/// `tempo-dst start` emits while the start action (on the tape) runs, so
+/// Moments of a recorded run: the start action (from the tape) and the
+/// moments the workload found in its events (`observe`). Guest event times
+/// are mapped to virtual time through the run's first event (`origin_ns`),
+/// which the start hook emits while the start action (on the tape) runs, so
 /// they are good to a few hundred ms; `--at input:<n>` is exact.
-pub fn moments(events: &str, rec: &InputRecording, start: VirtTime, run_secs: u64) -> Vec<Moment> {
+pub fn moments(
+    workload: &[WorkloadMoment],
+    origin_ns: Option<u64>,
+    start_label: &str,
+    rec: &InputRecording,
+    start: VirtTime,
+    run_secs: u64,
+) -> Vec<Moment> {
     let freq = start.frequency();
     let Some(start_io) = rec.io_inputs().first() else {
         return Vec::new();
     };
-    let evs: Vec<Value> = events
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let mut raw: Vec<(f64, String)> = vec![(
-        start_io.at.as_secs_f64(),
-        "`tempo-dst start` (branch from after it)".into(),
-    )];
-    if let Some(first_ns) = evs.first().and_then(|e| e["guest_time_ns"].as_u64()) {
-        let vt = |ns: u64| start_io.at.as_secs_f64() + (ns as f64 - first_ns as f64) / 1e9;
-        for e in &evs {
-            let Some(ns) = e["guest_time_ns"].as_u64() else {
-                continue;
-            };
-            let d = &e["detail"];
-            let node = e["container"].as_str() == Some("tempo");
-            match (e["source"].as_str(), e["kind"].as_str()) {
-                (Some("nemesis"), Some("kill")) if node => {
-                    raw.push((vt(ns), format!("nemesis kill #{}", d["index"])));
-                }
-                (Some("nemesis"), Some("restart")) if node => {
-                    raw.push((vt(ns), format!("nemesis restart #{}", d["index"])));
-                }
-                (Some("nemesis"), Some("redecide")) => {
-                    raw.push((vt(ns), "decisions re-drawn (branch)".into()));
-                }
-                (Some("load"), Some("generation")) if d["generation"].as_u64() != Some(0) => {
-                    raw.push((vt(ns), format!("load generation {}", d["generation"])));
-                }
-                (Some("assertion"), Some("first-failure")) => {
-                    let sig = d["signature"].as_str().unwrap_or("?");
-                    raw.push((vt(ns), format!("first failure: {sig}")));
-                    raw.push((vt(ns) - 5.0, format!("5 s before first failure: {sig}")));
-                    if let Some(p) = d["last_pass_ns"].as_u64() {
-                        raw.push((vt(p), format!("last pass before failure: {sig}")));
-                    }
-                }
-                _ => {}
-            }
-        }
+    let mut raw: Vec<(f64, String)> = vec![(start_io.at.as_secs_f64(), start_label.into())];
+    if let Some(first_ns) = origin_ns {
+        let vt = |ns: i64| start_io.at.as_secs_f64() + (ns as f64 - first_ns as f64) / 1e9;
+        raw.extend(
+            workload
+                .iter()
+                .map(|m| (vt(m.guest_time_ns), m.what.clone())),
+        );
     }
     let lo = start_io.at.as_secs_f64();
     let hi = start.as_secs_f64() + run_secs as f64;
@@ -414,7 +305,6 @@ pub fn summarize(results: &[BranchResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::tests::sample;
     use bedrock_lab::{BashTarget, IoInput, RandomInput};
     use bedrock_vm::events::RandomSource;
 
@@ -449,84 +339,6 @@ mod tests {
         assert_eq!(At::Vt(71.0).resolve(&rec, start).unwrap(), vt(71.0));
         assert_eq!(At::Input(0).resolve(&rec, start).unwrap(), vt(75.0));
         assert!(At::Input(1).resolve(&rec, start).is_err());
-    }
-
-    /// A guest-decided trie scenario: kills at 10+2 and 40+1, gap 20, three
-    /// load generations.
-    fn parent() -> Scenario {
-        let mut s = sample();
-        s.run_secs = 90;
-        s.nemesis.enabled = true;
-        s.nemesis.max_kills = 3;
-        s.nemesis.min_gap_secs = 20;
-        s.nemesis.plan = Some(vec![
-            Kill {
-                at_secs: 10,
-                down_secs: 2,
-            },
-            Kill {
-                at_secs: 40,
-                down_secs: 1,
-            },
-        ]);
-        s.load.generations = (0..3)
-            .map(|g| Generation {
-                txgen_seed: 99 + g,
-                spec_seed: 3,
-            })
-            .collect();
-        s
-    }
-
-    #[test]
-    fn redraw_keeps_decisions_before_the_moment() {
-        let p = parent();
-        let plan0 = p.nemesis.plan.clone().unwrap();
-        // 20 s in: kill 0 fired and restarted, so it and generations 0 and
-        // 1 stay; everything after is re-drawn.
-        let r = redraw_decisions(&p, 20.0, 1);
-        assert_eq!((r.kept_kills, r.kept_generations), (1, 2));
-        assert_eq!(r.nemesis_plan[0], plan0[0]);
-        assert_eq!(r.generations[..2], p.load.generations[..2]);
-        // One generation per restart plus the first.
-        assert_eq!(r.generations.len(), r.nemesis_plan.len() + 1);
-        // The re-drawn kills come after the moment and follow the planner's
-        // constraints.
-        for w in r.nemesis_plan.windows(2) {
-            assert!(w[1].at_secs >= w[0].at_secs + w[0].down_secs + 20, "{r:?}");
-        }
-        for k in &r.nemesis_plan[1..] {
-            assert!(k.at_secs > 20 && k.down_secs <= NEMESIS_MAX_DOWN_SECS);
-            assert!(k.at_secs + k.down_secs + 20 <= p.run_secs);
-        }
-        assert!(r.nemesis_plan.len() <= 3);
-        // A pure function of the seed; other seeds give other decisions.
-        assert_eq!(redraw_decisions(&p, 20.0, 1), r);
-        let others: std::collections::BTreeSet<_> = (0..16)
-            .map(|s| format!("{:?}", redraw_decisions(&p, 20.0, s).generations))
-            .collect();
-        assert!(others.len() > 8);
-
-        // 11 s in: kill 0 fired but its restart (at 12) has not: generation
-        // 1 starts after the moment, so it is re-drawn.
-        let mid = redraw_decisions(&p, 11.0, 1);
-        assert_eq!((mid.kept_kills, mid.kept_generations), (1, 1));
-        // Before any kill: the whole plan is re-drawn, after the moment.
-        let early = redraw_decisions(&p, 3.0, 2);
-        assert_eq!((early.kept_kills, early.kept_generations), (0, 1));
-        assert!(early.nemesis_plan.iter().all(|k| k.at_secs > 3));
-        // After the last kill and its restart: nothing left to re-draw but
-        // whatever still fits.
-        let late = redraw_decisions(&p, 80.0, 3);
-        assert_eq!(late.nemesis_plan, plan0);
-        assert_eq!(late.generations, p.load.generations);
-        // No nemesis, no load: nothing to draw.
-        let mut quiet = p.clone();
-        quiet.nemesis.enabled = false;
-        quiet.nemesis.plan = Some(vec![]);
-        quiet.load.generations.clear();
-        let q = redraw_decisions(&quiet, 20.0, 4);
-        assert!(q.nemesis_plan.is_empty() && q.generations.is_empty());
     }
 
     #[test]
@@ -598,43 +410,47 @@ mod tests {
     }
 
     #[test]
-    fn moments_come_from_events_and_tape() {
+    fn moments_come_from_the_workload_and_tape() {
         let start = vt(70.0);
         let rec = InputRecording::from_parts(
             (0..100).map(|i| rd(70.0 + f64::from(i), None)).collect(),
             vec![IoInput {
                 at: vt(70.5),
                 target: BashTarget::Host,
-                command: "tempo-dst start '{}'".into(),
+                command: "wl start '{}'".into(),
                 record_output: true,
             }],
         );
-        let s = 1_000_000_000u64;
+        let s = 1_000_000_000i64;
+        let wm = |t: i64, what: &str| WorkloadMoment {
+            guest_time_ns: t * s,
+            what: what.into(),
+        };
         // Guest clock 1000 s at the start action's first event.
-        let events = [
-            format!(r#"{{"source":"load","kind":"generation","container":"txgen","guest_time_ns":{},"detail":{{"generation":0}}}}"#, 1000 * s),
-            format!(r#"{{"source":"nemesis","kind":"plan","container":"tempo","guest_time_ns":{},"detail":{{"kills":[]}}}}"#, 1000 * s),
-            format!(r#"{{"source":"nemesis","kind":"kill","container":"tempo","guest_time_ns":{},"detail":{{"index":0}}}}"#, 1010 * s),
-            format!(r#"{{"source":"nemesis","kind":"kill","container":"txgen","guest_time_ns":{},"detail":{{}}}}"#, 1012 * s),
-            format!(r#"{{"source":"nemesis","kind":"restart","container":"tempo","guest_time_ns":{},"detail":{{"index":0}}}}"#, 1012 * s),
-            format!(r#"{{"source":"load","kind":"generation","container":"txgen","guest_time_ns":{},"detail":{{"generation":1}}}}"#, 1013 * s),
-            format!(r#"{{"source":"assertion","kind":"first-failure","guest_time_ns":{},"detail":{{"signature":"E5/storage-root-mismatch","last_pass_ns":{}}}}}"#, 1030 * s, 1029 * s),
-            // After the run: dropped.
-            format!(r#"{{"source":"nemesis","kind":"kill","container":"tempo","guest_time_ns":{},"detail":{{"index":1}}}}"#, 1100 * s),
-        ]
-        .join("\n");
-        let m = moments(&events, &rec, start, 90);
+        let workload = [
+            wm(1030, "first failure: E5"),
+            wm(1010, "kill #0"),
+            wm(1025, "5 s before first failure: E5"),
+            // Before the start action, and after the run: dropped.
+            wm(999, "early"),
+            wm(1100, "kill #1"),
+        ];
+        let m = moments(
+            &workload,
+            Some(1000 * s as u64),
+            "`wl start`",
+            &rec,
+            start,
+            90,
+        );
         let what: Vec<_> = m.iter().map(|m| m.what.as_str()).collect();
         assert_eq!(
             what,
             [
-                "`tempo-dst start` (branch from after it)",
-                "nemesis kill #0",
-                "nemesis restart #0",
-                "load generation 1",
-                "5 s before first failure: E5/storage-root-mismatch",
-                "last pass before failure: E5/storage-root-mismatch",
-                "first failure: E5/storage-root-mismatch",
+                "`wl start`",
+                "kill #0",
+                "5 s before first failure: E5",
+                "first failure: E5",
             ]
         );
         let kill = &m[1];
@@ -642,7 +458,9 @@ mod tests {
         assert!((kill.run_secs - 10.5).abs() < 1e-6);
         // Inputs at 70..=80 s come before it.
         assert_eq!(kill.input, 11);
-        assert!(moments("", &InputRecording::new(), start, 90).is_empty());
+        // Without events only the start action is known.
+        assert_eq!(moments(&workload, None, "s", &rec, start, 90).len(), 1);
+        assert!(moments(&[], None, "s", &InputRecording::new(), start, 90).is_empty());
     }
 
     #[test]

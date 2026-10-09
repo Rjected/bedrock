@@ -9,10 +9,18 @@
 # regressions/) in place of bedrock/tempo-localnet:pinned; it must be in the
 # images tar (IMAGES); the E7 reference node runs it too.
 #
-# --reference (a bedrock-dst flag, passed through) keeps the E7 reference node
-# (compose.yaml's `# >>> reference` blocks) in compose-run.yaml.
+# Everything else goes to `bedrock-dst campaign`; the Tempo workload's
+# arguments are `--workload-arg key=value` (e.g. `load=trie`, `reference=true`,
+# `tip20_tps=50`; see README "Workload contract" for the keys) or
+# `--workload-config file.json`. The planner (the tempo-dst binary that also
+# runs in the guest) comes from `nix build .#tempo-dst`.
 #
-# e.g. ./workloads/tempo-dst/run.sh --seeds 20 --run-secs 180 --out /tmp/dst-out
+# reference=true (as a --workload-arg, or in the --workload-config file) also
+# keeps the E7 reference node (compose.yaml's `# >>> reference` blocks) in
+# compose-run.yaml.
+#
+# e.g. ./workloads/tempo-dst/run.sh --workload-arg load=trie --seeds 20 \
+#        --run-secs 180 --out /tmp/dst-out
 #
 # Variants that change node flags change the compose file, hence the boot
 # prefix: compare variants by campaign, not by seed within one campaign.
@@ -34,10 +42,26 @@ done
 root=workloads/tempo-dst
 mkdir -p "${RUN_DIR:-$root}"
 run_dir=$(cd "${RUN_DIR:-$root}" && pwd)
-reference=0
+# The compose file needs to know whether the reference node runs: the last
+# `reference` workload arg, else the --workload-config file's.
+reference=
+config=
+prev=
 for arg in "$@"; do
-  if [ "$arg" = --reference ]; then reference=1; fi
+  case "$prev" in
+    --workload-arg) case "$arg" in reference=*) reference=${arg#reference=} ;; esac ;;
+    --workload-config) config=$arg ;;
+  esac
+  case "$arg" in
+    --workload-arg=reference=*) reference=${arg#--workload-arg=reference=} ;;
+    --workload-config=*) config=${arg#--workload-config=} ;;
+  esac
+  prev=$arg
 done
+if [ -z "$reference" ] && [ -n "$config" ]; then
+  reference=$(python3 -c 'import json, sys; print(str(json.load(open(sys.argv[1])).get("reference", False)).lower())' "$config")
+fi
+if [ "$reference" = true ]; then reference=1; else reference=0; fi
 python3 - "$variant" "$node_image" "$run_dir" "$reference" <<'PY'
 import re, sys
 from pathlib import Path
@@ -64,6 +88,7 @@ s = s.replace("image: bedrock/tempo-localnet:pinned", f"image: {sys.argv[2]}")
 PY
 NIX=${NIX:-/nix/var/nix/profiles/default/bin/nix}
 dst=$($NIX build .#bedrock-dst --no-link --print-out-paths)
+planner=$($NIX build .#tempo-dst --no-link --print-out-paths)
 kernel=$($NIX build .#guestKernel --no-link --print-out-paths)
 initrd=$($NIX build .#podmanInitrd --no-link --print-out-paths)
 ./workloads/tempo/prepare-initrd.sh "$initrd" "$run_dir/initrd.gz"
@@ -75,4 +100,5 @@ if [ ! -c /dev/bedrock ]; then
   exit 1
 fi
 exec "$dst/bin/bedrock-dst" campaign --vmlinux "$kernel/vmlinux" \
-  --initrd "$run_dir/initrd.gz" --compose "$run_dir/compose-run.yaml" --images "$images" "$@"
+  --initrd "$run_dir/initrd.gz" --compose "$run_dir/compose-run.yaml" --images "$images" \
+  --workload-cmd tempo-dst --workload-planner "$planner/bin/tempo-dst" "$@"

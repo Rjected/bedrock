@@ -17,7 +17,7 @@ own branch from a warm checkpoint, with different perturbations:
 - **Forced preemption** (swarm): each seed draws a preemption period (off,
   200k, 2M or 20M guest instructions) from a host-side PRNG of the seed;
   the driver applies it to the branch (`Branch::set_preempt`) for every load,
-  with or without `--reference`. `--no-preempt` turns it off and never calls
+  with or without `reference=true`. `--no-preempt` turns it off and never calls
   the ioctl. A `bedrock.ko` without `SET_PREEMPT_CONFIG` is rejected before
   boot when any seed would use it.
 
@@ -33,18 +33,74 @@ failures can be grouped by feature (`regressions/hunt.sh` prints that table).
 
 | Piece | Where | Role |
 |---|---|---|
-| `bedrock-dst` | `crates/bedrock-dst` | Host driver: boot, warm checkpoint, branch per seed, collect, verdict, replay |
-| `tempo-dst` | `guest/tempo-dst` | In-guest nemesis and oracles, installed in the podman initrd |
+| `bedrock-dst` | `crates/bedrock-dst` | Workload-agnostic host driver: boot, warm checkpoint, branch per seed, collect, verdict, replay ([contract](#workload-contract)) |
+| `tempo-dst` | `guest/tempo-dst` | The workload: in-guest warmup, nemesis and oracles (installed in the podman initrd), and the host-side planner |
 | `workload-monitor` | `guest/workload-monitor` | Excuses container SIGKILL deaths that the nemesis logged |
 | compose / run | `workloads/tempo-dst` | Node config, variants, campaign entry point |
 
 Guest contract: each writer appends serialized `bedrock_assertions::Assertion`
 records to its own `/bedrock/assertions/<writer>.jsonl` file. Records include a
 `timestamp_unix_nano` and a message of `<signature>: <detail>`. Guest init
-forwards complete lines to the serial log; at the end of each seed, the guest
-merges all files by timestamp for the host's `assertions.jsonl` and verdict.
-Control events go to `/bedrock/events.jsonl` (`{source, kind, container,
-guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
+forwards complete lines to the serial log; at the end of each seed, `finalize`
+merges all files by timestamp into `/bedrock/out/assertions.jsonl`, the host's
+`assertions.jsonl` and verdict. Control events go to `/bedrock/events.jsonl`
+(`{source, kind, container, guest_time_ns, detail}`). The `start` hook
+installs its config as `/bedrock/in/config.json`.
+
+## Workload contract
+
+`bedrock-dst` is workload-agnostic: it boots, warms, checkpoints, branches
+per seed, draws and applies forced preemption, runs, collects, judges,
+replays and branches from moments, and knows a workload only through the
+hooks below. The request/response types are in
+`crates/bedrock-dst-contract` (serde structs, shared by the driver and the
+workload); the workload fills in their type parameters with its own types
+(here `TempoArgs`, `Config`, `Scenario`, `Swarm` in `guest/tempo-dst`), the
+driver carries them as opaque JSON it stores and passes back verbatim.
+
+| Hook | Runs | Request → response |
+|---|---|---|
+| `<planner> parse-args -` | host, once per campaign | `ArgsRequest {config_file, args: ["k=v", ...]}` → the workload's `Args` (typed; unknown keys are errors) |
+| `<cmd> warmup '<json>'` | guest, after boot, every 5 virtual s | `WarmupRequest {warmup: {run_secs, warm_blocks, warm_timeout_secs}, args}` (nothing seed-specific: a one-seed replay rebuilds the same warm prefix) → `WarmupStatus {ready, detail}` (last stdout line); checkpoint once `ready` |
+| `<planner> config -` | host, per seed / replay / branch | `PlanRequest {campaign, args, seed, preempt, derivation_salt, decisions?, redraw?, rng_seed?}` → `Plan {config, decisions, run: {seed, rng_seed, run_secs, preempt, swarm}, required, replays_exactly, action?, notes}` |
+| `<cmd> start '<config>'` | guest, at each branch's start | `Plan.config` → exit 0 |
+| `<cmd> <Plan.action>` | guest, at a branch's moment | (`--vary decisions`) anything, exit 0 |
+| `<cmd> finalize` | guest, at the end | end-of-run checks; leaves the run's assertions in `/bedrock/out/assertions.jsonl`, exit 0 |
+| `<planner> observe -` | host, after each run | `ObserveRequest {decisions, original?, events_path}` → `Observation {decisions, decision_diff, moments, events_origin_ns}` |
+
+Host hooks get their request on stdin and print one JSON answer; they must be
+pure functions of the request (that is what makes a seed replayable), and run
+on the host so planning never perturbs guest time. `campaign` is
+`CampaignInfo {run_secs, warm_blocks, warm_timeout_secs, seed_start,
+seeds}`. `config` without `decisions` plans `seed` (the driver's `preempt`
+draw recorded in the swarm); with recorded `decisions` (a scenario.json) it
+must derive nothing (`replay --scenario`); `redraw {after, seed}` keeps what
+was applied before `after` virtual seconds since `start` and re-draws the
+rest, returning the guest command (`action`) that applies it; `rng_seed`
+records a branch's fresh randomness in the decisions. `decisions` is
+written as scenario.json, `config` as config.json, `run.swarm` into
+verdict.json and summary.json; `required` lists coverage signatures the
+verdict demands. The driver collects `/bedrock/events.jsonl`,
+`/bedrock/out/assertions.jsonl`, `/bedrock/out/finalize.json`
+and `/bedrock/out/{oracle,nemesis}.log`.
+
+`bedrock-dst campaign` takes `--workload-cmd` (default `tempo-dst`),
+`--workload-planner` (default: the command on PATH; replay, branch and
+moments take an override), `--workload-arg key=value` (repeatable) and
+`--workload-config file.json`; the parsed arguments are recorded as
+`workload_args` in campaign.json and every manifest.json. Here the planner is
+the same static `tempo-dst` binary as in the guest (`nix build .#tempo-dst`);
+`run.sh` passes it. campaign.json files from before the contract (Tempo
+fields at top level, no `workload_args`) are refused.
+
+`TempoArgs` (defaults in parentheses): `load` (`transfers`|`trie`|`tip20`|`chain`),
+`txgen_count` (20000), `txgen_tps` (100), `trie_tps` (5), `tip20_tps` (50),
+`chain_tps` (10), `reference` (false), `no_nemesis` (false), `max_kills` (3),
+`min_gap_secs` (30), `liveness_secs` (60), `workload_seed` (99), `decisions`
+(`guest`|`explicit`), `spec_seeds_from_getrandom` (false).
+`guest/tempo-dst/testdata/planner-golden.json`, generated by the driver
+before the contract, pins the planner's configs, decisions and required
+coverage byte for byte.
 
 ## Oracles
 
@@ -55,31 +111,31 @@ guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 | `E1/trie-diff-*` | `--engine.state-root-task-compare-updates`: sparse-trie task vs. regular state-root updates differ |
 | `E2/head-stalled` | Head did not advance for `liveness_secs` while the node was up |
 | `E3/finalized-block-changed`, `E3/head-below-finalized` | The block the node reported finalized (`eth_getBlockByNumber("finalized")`) before a kill keeps its hash after the restart, and the head gets back to it. Unfinalized blocks may legitimately be rebuilt: reth unwinds to its persisted state-trie frontier, which trails the `Saved range of blocks` frontier (observed: saved 318, unwound to 308, finalized 269) |
-| `E5/storage-root-mismatch`, `E5/{multiproof,untargeted}-storage-root-mismatch` | `--load trie`: at every checked block, the RawStorage contract's `storageHash` (`eth_getProof`, `eth_getProof` without targets, `eth_getMultiProof`) equals a root rebuilt from scratch from its slot values (`eth_getStorageAt`) with alloy-trie's `HashBuilder`, not the node's incremental trie |
-| `E6/account-proof-invalid`, `E6/storage-proof-invalid`, `E6/proof-value-mismatch` (and `multiproof-`/`untargeted-` forms) | `--load trie`: each proof response verifies (`alloy_trie::proof::verify_proof`): the account proof against the header `stateRoot`, each slot's proof against `storageHash`, and the proven values equal `eth_getStorageAt` |
-| `E8/tip20-supply-changed`, `E8/tip20-balances-not-conserved`, `E8/tip20-balance-exceeds-supply` | `--load tip20`: at every checked block, the token's `totalSupply` is the minted supply, the holders' `balanceOf` sum to it, and none exceeds it (all reads `eth_call` at that block's hash, EIP-1898) |
-| `E8/tip20-transfers-unexplained` | `--load tip20`: a block's balances are exactly its parent's plus the token's `Transfer` logs in the block's receipts (`eth_getBlockReceipts`; reverted transfers must leave none): catches partially applied blocks and reads that mix two versions of the state |
-| `E8/tip20-snapshot-changed` | `--load tip20`: pinned blocks' balances, re-read every tick while the block stays canonical (after more blocks, persistence of the block, node restarts), are unchanged |
-| `E9/chain-link-broken` | `--load chain`: in canonical receipt order, each ChainOfBlocks `Appended` log has the next index and link `keccak(prev, payload, index)`: the node never executed an append against the wrong pre-state |
-| `E9/chain-state-mismatch` | `--load chain`: at every checked block B, the stored `length`, `head` and `links[length-1]` (`eth_getStorageAt` at B) equal the chain rebuilt from the receipts of blocks `..=B`; one swept old link per tick at the head too |
-| `E9/chain-shrunk` | `--load chain`: the stored length never decreases between checked canonical blocks |
-| `E9/chain-not-prefix` | `--load chain`: the chain stored at an older block (depths 2-48 and 49-250, like E5) is a prefix of the chain stored at the head; state against state, no receipts |
-| `E9/chain-entry-lost` | `--load chain`: after a restart, the head still holds the chain stored at the block finalized before the kill |
-| `E9/chain-history-changed` | `--load chain`: re-reading a pinned finalized block's stored chain (one pin per kill, re-read round-robin) gives the value read when it was pinned, across persistence cycles and restarts |
-| `E7/reference-<E1 pattern>`, `E7/reference-rejected` | `--reference`: the reference node logs one of E1's patterns (e.g. `E7/reference-bad-block`, `E7/reference-state-root-mismatch`) or rejects a block (`Invalid block error on new payload`, pipeline validation/execution error) the primary produced |
-| `E7/reference-stalled` | `--reference`: the reference's head stays more than 32 blocks behind the primary's for `liveness_secs` while the primary is up (clock restarts at each primary restart) |
-| `E7/block-hash-differs`, `E7/state-root-differs` | `--reference`: at the highest block both nodes have, they disagree for `liveness_secs` (a crash may rebuild unfinalized blocks; the reference must reorg onto them), named by whether the state roots differ too; or the same header hash comes with different `stateRoot`s |
-| `E7/proof-differs` | `--reference --load trie`: on blocks both nodes agree on (new ones, plus E5/E6's depth sweep), RawStorage's `eth_getProof` `storageHash` and proven values, `eth_getMultiProof` `storageHash`, and `eth_getStorageAt` values are equal on both |
-| `E7/reference-graceful-stop` | `--reference`: the reference stops cleanly at the end of the run |
+| `E5/storage-root-mismatch`, `E5/{multiproof,untargeted}-storage-root-mismatch` | `load=trie`: at every checked block, the RawStorage contract's `storageHash` (`eth_getProof`, `eth_getProof` without targets, `eth_getMultiProof`) equals a root rebuilt from scratch from its slot values (`eth_getStorageAt`) with alloy-trie's `HashBuilder`, not the node's incremental trie |
+| `E6/account-proof-invalid`, `E6/storage-proof-invalid`, `E6/proof-value-mismatch` (and `multiproof-`/`untargeted-` forms) | `load=trie`: each proof response verifies (`alloy_trie::proof::verify_proof`): the account proof against the header `stateRoot`, each slot's proof against `storageHash`, and the proven values equal `eth_getStorageAt` |
+| `E8/tip20-supply-changed`, `E8/tip20-balances-not-conserved`, `E8/tip20-balance-exceeds-supply` | `load=tip20`: at every checked block, the token's `totalSupply` is the minted supply, the holders' `balanceOf` sum to it, and none exceeds it (all reads `eth_call` at that block's hash, EIP-1898) |
+| `E8/tip20-transfers-unexplained` | `load=tip20`: a block's balances are exactly its parent's plus the token's `Transfer` logs in the block's receipts (`eth_getBlockReceipts`; reverted transfers must leave none): catches partially applied blocks and reads that mix two versions of the state |
+| `E8/tip20-snapshot-changed` | `load=tip20`: pinned blocks' balances, re-read every tick while the block stays canonical (after more blocks, persistence of the block, node restarts), are unchanged |
+| `E9/chain-link-broken` | `load=chain`: in canonical receipt order, each ChainOfBlocks `Appended` log has the next index and link `keccak(prev, payload, index)`: the node never executed an append against the wrong pre-state |
+| `E9/chain-state-mismatch` | `load=chain`: at every checked block B, the stored `length`, `head` and `links[length-1]` (`eth_getStorageAt` at B) equal the chain rebuilt from the receipts of blocks `..=B`; one swept old link per tick at the head too |
+| `E9/chain-shrunk` | `load=chain`: the stored length never decreases between checked canonical blocks |
+| `E9/chain-not-prefix` | `load=chain`: the chain stored at an older block (depths 2-48 and 49-250, like E5) is a prefix of the chain stored at the head; state against state, no receipts |
+| `E9/chain-entry-lost` | `load=chain`: after a restart, the head still holds the chain stored at the block finalized before the kill |
+| `E9/chain-history-changed` | `load=chain`: re-reading a pinned finalized block's stored chain (one pin per kill, re-read round-robin) gives the value read when it was pinned, across persistence cycles and restarts |
+| `E7/reference-<E1 pattern>`, `E7/reference-rejected` | `reference=true`: the reference node logs one of E1's patterns (e.g. `E7/reference-bad-block`, `E7/reference-state-root-mismatch`) or rejects a block (`Invalid block error on new payload`, pipeline validation/execution error) the primary produced |
+| `E7/reference-stalled` | `reference=true`: the reference's head stays more than 32 blocks behind the primary's for `liveness_secs` while the primary is up (clock restarts at each primary restart) |
+| `E7/block-hash-differs`, `E7/state-root-differs` | `reference=true`: at the highest block both nodes have, they disagree for `liveness_secs` (a crash may rebuild unfinalized blocks; the reference must reorg onto them), named by whether the state roots differ too; or the same header hash comes with different `stateRoot`s |
+| `E7/proof-differs` | `reference=true load=trie`: on blocks both nodes agree on (new ones, plus E5/E6's depth sweep), RawStorage's `eth_getProof` `storageHash` and proven values, `eth_getMultiProof` `storageHash`, and `eth_getStorageAt` values are equal on both |
+| `E7/reference-graceful-stop` | `reference=true`: the reference stops cleanly at the end of the run |
 | `E4/graceful-stop`, `E4/re-execute` | At the end of the run, the node stops cleanly, and `tempo re-execute` over `[1, head]` from its datadir agrees |
 | `container <name> exit code is zero` | workload-monitor: no unexplained container death |
 | `D/guest-exited` | The guest VM stopped mid-run (kernel panic, shutdown) |
 | `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed`, `S/load-included`, `S/trie-checked`, `S/trie-all-slots-live`, `S/chain-appended`, `S/chain-survived-restart`, `S/chain-history-reread` | Coverage (Sometimes): the fault, crash-recovery unwind, recovery, and load paths actually ran |
 | `S/tip20-checked`, `S/tip20-transfers-in-block`, `S/tip20-pinned-read-survived-persistence`, `S/tip20-pinned-read-survived-restart` | Coverage for E8: a block passed; a block with 2+ transfers passed; a block pinned before it was persisted (newer than the last `Saved range of blocks`) read the same after a save covered it; a block pinned before a node restart read the same after it |
-| `S/reference-compared`, `S/reference-synced`, `S/reference-followed-restart` | Coverage with `--reference`: a common block was compared, the reference reached the primary's head, and after a primary restart it followed past the pre-kill head |
-| `C/missing/<signature>` | Required coverage never satisfied: `S/load-included` always, plus `S/trie-checked` with `--load trie`; with `--load tip20` all four `S/tip20-*` above; with `--load chain` `S/chain-appended` and `S/chain-survived-restart` (the `-survived-restart` signatures only when every seed's nemesis plan has a kill); plus `S/reference-compared` and `S/reference-synced` with `--reference`. A run whose load never landed proves nothing |
+| `S/reference-compared`, `S/reference-synced`, `S/reference-followed-restart` | Coverage with `reference=true`: a common block was compared, the reference reached the primary's head, and after a primary restart it followed past the pre-kill head |
+| `C/missing/<signature>` | Required coverage never satisfied: `S/load-included` always, plus `S/trie-checked` with `load=trie`; with `load=tip20` all four `S/tip20-*` above; with `load=chain` `S/chain-appended` and `S/chain-survived-restart` (the `-survived-restart` signatures only when every seed's nemesis plan has a kill); plus `S/reference-compared` and `S/reference-synced` with `reference=true`. A run whose load never landed proves nothing |
 
-## Trie load (`--load trie`)
+## Trie load (`load=trie`)
 
 `trie/RawStorage.sol` writes exactly `sstore(slot, value)`, so its storage trie
 is shaped only by the workload. `trie/deploy.yaml` deploys it from dev account 0
@@ -104,7 +160,7 @@ E5/E6 check every new block plus two older ones per tick (depths 2-48 and
 49-250), with `eth_getProof`, `eth_getProof` without storage targets, and
 `eth_getMultiProof`.
 
-## TIP-20 load (`--load tip20`)
+## TIP-20 load (`load=tip20`)
 
 A bank-transfer workload: a closed set of holders of a fresh TIP-20 token
 whose whole supply they hold, so transfers among them conserve it.
@@ -129,7 +185,7 @@ sweep. It pins the run's first block and the latest few multiples of 25, and
 re-reads them every tick; a pin whose block is rewound by crash recovery is
 dropped (unfinalized blocks may be rebuilt; E3 covers finalized ones).
 
-## Chain load (`--load chain`)
+## Chain load (`load=chain`)
 
 The [chain of blocks](https://antithesis.com/docs/resources/chain-of-blocks/)
 workload, against one node's own history instead of replicas.
@@ -156,9 +212,9 @@ from dev account 9 before the warm checkpoint (address
   [block]` checks every append block once; `tempo-dst chain-watch <secs>` runs
   the stateful oracle and treats RPC loss/return as kill/restart.
 
-## Reference node (`--reference`, E7)
+## Reference node (`reference=true`, E7)
 
-`run.sh ... --reference` keeps compose.yaml's `# >>> reference` blocks: a
+`run.sh ... --workload-arg reference=true` keeps compose.yaml's `# >>> reference` blocks: a
 second node, `tempo-ref` (same image, RPC on 8547, own `tempo-ref-data`
 volume), that re-executes every primary block on reth's simplest paths:
 `--engine.disable-prewarming --engine.disable-precompile-cache
@@ -197,10 +253,11 @@ runtime) never receive timer interrupts.
 DOCKER='sudo docker' ./workloads/tempo-dst/build.sh
 ./workloads/tempo-dst/run.sh --seeds 20 --run-secs 180 --out dst-out
 ./workloads/tempo-dst/run.sh --variant no-prewarm --seeds 20 --out dst-out-noprewarm
-./workloads/tempo-dst/run.sh --load trie --seeds 20 --out dst-out-trie
-./workloads/tempo-dst/run.sh --load tip20 --seeds 20 --out dst-out-tip20
-./workloads/tempo-dst/run.sh --load chain --seeds 20 --out dst-out-chain
-./workloads/tempo-dst/run.sh --load trie --reference --seeds 20 --out dst-out-ref
+./workloads/tempo-dst/run.sh --workload-arg load=trie --seeds 20 --out dst-out-trie
+./workloads/tempo-dst/run.sh --workload-arg load=tip20 --seeds 20 --out dst-out-tip20
+./workloads/tempo-dst/run.sh --workload-arg load=chain --seeds 20 --out dst-out-chain
+./workloads/tempo-dst/run.sh --workload-arg load=trie --workload-arg reference=true \
+  --seeds 20 --out dst-out-ref
 bedrock-dst replay dst-out/seed-3
 ```
 
@@ -245,7 +302,7 @@ prandom, not getrandom). `--no-tape` skips writing the tape.
 byte-reproducible, so a tape is tied to the `RUN_DIR` initrd it was recorded
 with (`replay --tape` names the mismatch if it was rebuilt).
 
-**`replay --tape`** (validated live: a `--decisions explicit --load trie` seed with preemption, two nemesis kills and three load generations replays identically) re-checks the manifest against the current files and
+**`replay --tape`** (validated live: a `decisions=explicit load=trie` seed with preemption, two nemesis kills and three load generations replays identically) re-checks the manifest against the current files and
 module (refusing on any mismatch unless `--force`), boots, checks the warm
 checkpoint lands at the recorded virtual time, then branches it with a
 `RecordedInputSource`: randomness comes from the tape (the in-VM PRNG is not
@@ -263,12 +320,12 @@ values and derives only what is absent). It never calls the driver's swarm
 draw, nemesis planner or seed derivations. Whether it is byte-identical
 depends on who made the decisions in the original run:
 
-- `--decisions explicit` campaigns: the driver derives the kill plan and load
+- `decisions=explicit` campaigns: the driver derives the kill plan and load
   seeds from the seed before the run and delivers them, so the replay
   delivers the same config and must match byte for byte. This changes which
   kill plan each seed gets (drawn by the driver, not from guest getrandom),
   so it is opt-in.
-- `--decisions guest` (default, and all older campaigns): the nemesis draws
+- `decisions=guest` (default, and all older campaigns): the nemesis draws
   its plan in the guest; the driver reads it back from the `plan` event. The
   replay has to add it to the config, which shifts guest timing, so it
   checks only that the same decisions were made (plan, per-generation seeds
@@ -279,7 +336,7 @@ slot or spec generator changed). `BEDROCK_DST_DERIVATION_SALT=<n>` perturbs
 the driver's derivations, to check that a scenario replay does not depend on
 them.
 
-`--spec-seeds-from-getrandom` moves each generated load's spec seed onto
+`spec_seeds_from_getrandom=true` moves each generated load's spec seed onto
 Bedrock's controlled stream: the guest draws it from getrandom when the
 generation starts (attributed to its pid on the tape, logged in the `load`
 event, copied into `scenario.json`). It changes every seed's load and makes
@@ -392,7 +449,7 @@ are distinct runs (by assertions and events) and how many equal the parent.
   failure to stay reproducible; each failing branch is a smaller, replayable
   seed.
 
-**Validated live** on a `--load trie --run-secs 90` seed on the pinned image
+**Validated live** on a `load=trie`, `--run-secs 90` seed on the pinned image
 (one kill at 27 s, failing with the known E5/E6 multiproof/untargeted
 signatures at ~73 s): `--vary none` from the restart (30.9 s, input 89 of
 370) reproduced every artifact, the tape and console.log byte for byte; 4
@@ -424,7 +481,7 @@ draft PR that names it.
 - [x] **A4** `replay <out>/seed-N` compares assertions, events, finalize and verdict byte-for-byte
 - [ ] **A4b** Also compare exit-record streams (reuse `compare-traces.py`) for divergence localization
 - [ ] **A5** Parallel seeds. A `Branch` is single-driver: shard seeds across processes, each booting its own prefix, or add multi-branch driving. Watch fork memory (oss-garage/bedrock#28)
-- [x] **A6** Trace replay: per-seed `tape.bin` + `manifest.json` (`replay --tape`) and `scenario.json` (`replay --scenario`); `--decisions explicit`
+- [x] **A6** Trace replay: per-seed `tape.bin` + `manifest.json` (`replay --tape`) and `scenario.json` (`replay --scenario`); `decisions=explicit`
 - [ ] **A6b** Validate `replay --tape`/`--scenario` across loads and many seeds (one trie seed done)
 - [x] **A6c** Branching from a moment of a recorded run: `bedrock-dst branch --at T --vary none|rng|decisions|both` (`PrefixSource`, `tempo-dst redecide`), `bedrock-dst moments`
 
@@ -445,9 +502,9 @@ draft PR that names it.
 - [ ] **D1** Spike: tuner (`tempoxyz/tuner`) `StructureTxGenerator` → serializable tx program
 - [ ] **D2** Genesis/fixture mapping: tuner fixture EOAs to dev accounts (mnemonic `test … junk`)
 - [ ] **D3** Lowering + in-guest submitter: resolve nonces at submit time, sign Tempo AA and EVM envelopes, record accepted/rejected/unknown
-- [x] **D4** Trie-shaping load (`--load trie`): raw-storage writes over per-seed generated slot shapes and values, checked by E5 and E6
-- [x] **D6** TIP-20 bank-transfer load (`--load tip20`): per-seed transfers among a closed set of holders of a fresh token, checked by E8
-- [x] **D7** Chain-of-blocks load (`--load chain`): hash-chained appends from one sender, checked by E9
+- [x] **D4** Trie-shaping load (`load=trie`): raw-storage writes over per-seed generated slot shapes and values, checked by E5 and E6
+- [x] **D6** TIP-20 bank-transfer load (`load=tip20`): per-seed transfers among a closed set of holders of a fresh token, checked by E8
+- [x] **D7** Chain-of-blocks load (`load=chain`): hash-chained appends from one sender, checked by E9
 - [ ] **D5** Coverage-guided mutation with tuner's mutator (needs G3)
 
 ### E: Oracles (`guest/tempo-dst`)
@@ -456,10 +513,10 @@ draft PR that names it.
 - [x] **E3** Durability of finalized blocks across crash/restart (the `Saved range` frontier is not durable: reth unwinds to its state-trie frontier)
 - [x] **E4** Graceful stop + `tempo re-execute`. Verify on host that `--chain dev` matches the dev node's chain spec (override with `TEMPO_DST_CHAIN`)
 - [ ] **E4b** Independent state-root check: rebuild the trie from the final state, separate from the sparse trie
-- [x] **E7** Reference-node differential oracle (`--reference`): a vanilla-flags follower re-executes every block; logs, lag, header/state-root and proof answers compared (`guest/tempo-dst/src/reference.rs`)
-- [ ] **E7b** First campaign with `--reference`; then consider defaulting it on
+- [x] **E7** Reference-node differential oracle (`reference=true`): a vanilla-flags follower re-executes every block; logs, lag, header/state-root and proof answers compared (`guest/tempo-dst/src/reference.rs`)
+- [ ] **E7b** First campaign with `reference=true`; then consider defaulting it on
 - [x] **E8** TIP-20 ledger: conservation, per-block explanation by `Transfer` logs, pinned snapshots stable across persistence and restarts
-- [ ] **E8b** Run `--load tip20` under Bedrock and tune the pin cadence and required coverage from real runs
+- [ ] **E8b** Run `load=tip20` under Bedrock and tune the pin cadence and required coverage from real runs
 - [x] **E9** Chain of blocks: receipts-rebuilt hash chain vs. state at every block, prefix/monotonic history, finalized entries and pinned history across restarts
 - [ ] **E5** Triage: tune `E1/error-log/*` noise from real runs and promote recurring targets to named signatures
 

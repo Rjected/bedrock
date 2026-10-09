@@ -429,6 +429,10 @@ in
 pkgs.stdenv.mkDerivation {
   name = "bedrock-podman-rootfs";
 
+  # The tempo-dst binary also runs on the host, as the Tempo workload's
+  # planner (bedrock-dst --workload-planner); flake output `tempo-dst`.
+  passthru = { inherit tempoDst; };
+
   nativeBuildInputs = [ pkgs.cpio pkgs.gzip ];
 
   dontUnpack = true;

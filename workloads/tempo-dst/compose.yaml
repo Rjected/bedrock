@@ -6,7 +6,7 @@
 # controlled getrandom stream. run.sh appends variant flags to `command`.
 #
 # Lines between `# >>> reference` and `# <<< reference` are the E7 reference
-# node (README "Reference node"); run.sh drops them unless `--reference`.
+# node (README "Reference node"); run.sh drops them unless `--workload-arg reference=true`.
 services:
   tempo:
     image: bedrock/tempo-localnet:pinned
