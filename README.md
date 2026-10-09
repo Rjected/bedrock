@@ -234,6 +234,18 @@ Samples of the scalar fetch faults clustered on Linux's `memcpy`/`memmove`
 page (`0x1ed1000`) and `insn_decode` page (`0x1ecc000`), with the global
 page-table gate ready. This points to repeated execution of pages containing
 instruction hazards, rather than gate refresh or COW, as the main fault source.
+An EPYC 4245P box-only experiment used AMD's DR address-mask MSRs to fit the
+seven hazards on these two pages into four instruction breakpoints and permit
+both pages to execute under the existing global gate. The Linux boot/fork
+replay matched the baseline snapshot TSC (`499445737`) and RAM hash
+(`dd6a53449a59f0aa`). Promoting both pages from every eligible trusted-page
+entry reduced exits from 844,300 to 697,715, but increased entry-preparation
+cost from 4.82 to 6.13 billion cycles and root runtime from 2.83 to 3.00
+seconds. Promoting them only when starting on either hot page made 773,769
+exits and a 2.80-second root run, which is too close to the baseline to claim
+a speedup from one sample. The hardcoded page promotion and mask swapping were
+reverted; a general cached proof and lower entry cost would be needed before
+using masked breakpoints in production.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
