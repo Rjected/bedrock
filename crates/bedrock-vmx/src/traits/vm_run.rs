@@ -551,10 +551,20 @@ where
             if (batch.as_ref().is_some_and(|batch| batch.global_execution)
                 && !replay && !force_single_step)
                 || (batch.as_ref().is_none_or(|batch| !batch.page_execution)
-                && runner.completed_instructions().is_some_and(|count| count != 0)
-                ) {
+                    && runner.completed_instructions().is_some_and(|count| count != 0)
+                    && ctx.state().svm_gate_scalar_page.is_some_and(|page| {
+                        ctx.state()
+                            .ept
+                            .npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
+                    }))
+            {
                 ctx.state_mut().svm_gate_scalar_page = None;
             }
+            // Keep an untrusted page selected across scalar steps. Its NPT
+            // execute permission is restored above on every entry, so this
+            // skips the redundant fetch fault and full-page hazard scan
+            // before the next instruction on that page. A trusted page
+            // returns to the global gate after its one scalar replay.
         }
 
         if pebs_armed_this_iter {

@@ -371,6 +371,20 @@ the final build with explicit guard-revocation checks took 17.64 seconds.
 The snapshot TSC and memory hash matched; VM-entry setup cycles fell by about
 9%. This improves the ROGPT path but does not address the unaccelerated
 no-ROGPT path or establish 5% overhead for Linux against native execution.
+Keeping an untrusted code page selected across scalar steps, while restoring
+its NPT execute permission after every step, reduced nested-page faults on a
+later EPYC 4245P Linux boot from 581,817 to 392,952–395,252. Boot and fork
+replay still matched the reference snapshot and memory hash. The two measured
+Linux wall times were 17.77 and 16.74 seconds versus 17.94 seconds before this
+change on the same box; that limited timing sample does not establish a stable
+wall-time speedup. A fetch-fault profile showed that most remaining faults are
+repeated visits to pages with instruction hazards, and sampled scalar entries
+cluster in early Linux text patching, including `IRETQ`.
+On the same 4245P box, disabling only Bedrock's instruction-counter capability
+for a diagnostic run made the 37.75-million-instruction memory workload 4.43x
+slower than native; the smoke and transition suites still passed. This ablation
+matches the separate 4244P finding that PMC virtualization is the decisive
+feature for the current general fast path.
 An EPYC 4244P box later identified the other major feature dependency:
 CPUID Fn8000_000A_EDX was `0x1ebfbcff`, with ROGPT and virtual NMI present
 but PMC virtualization absent. With instruction-counter batches disabled, a
