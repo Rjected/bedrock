@@ -246,6 +246,15 @@ exits and a 2.80-second root run, which is too close to the baseline to claim
 a speedup from one sample. The hardcoded page promotion and mask swapping were
 reverted; a general cached proof and lower entry cost would be needed before
 using masked breakpoints in production.
+A second box-only upper-bound diagnostic reused those pages' virtual-alias
+breakpoint plan after its first validation, deliberately omitting code-write
+invalidation. Six Linux runs passed the snapshot and RAM-hash replay checks
+and made about 692,000-694,000 exits. Their 2.77-second median was effectively
+the same as the unchanged branch's 2.76-second median over six nearby runs,
+despite roughly 150,000 fewer exits. Its entry-preparation cost was about
+4.83-6.05 billion cycles across the runs, versus 4.45-4.76 billion for the
+control. The unsafe cache was discarded; this experiment does not justify
+persistent masked breakpoints without a cheaper setup path.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
