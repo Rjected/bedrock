@@ -2110,7 +2110,9 @@ pub(crate) fn prepare<C: VmContext>(
         let mut updated = [u64::MAX; SVM_CODE_PAGE_CAPACITY];
         updated[0] = current;
         let mut next = 1;
-        for linear in recent {
+        // Code-page locality decays quickly. Limit speculative code scans to
+        // the most recent pages; every omitted page still traps on entry.
+        for linear in recent.into_iter().take(8) {
             if linear == u64::MAX || linear == current {
                 continue;
             }
@@ -3458,7 +3460,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_page_sets_keep_the_four_breakpoint_limit() {
+    fn recent_page_window_keeps_the_four_breakpoint_limit() {
         extern crate std;
         let mut ctx = paged_context(&[0x90]);
         ctx.memory.resize(0x60000, 0);
@@ -3473,7 +3475,7 @@ mod tests {
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare(&mut ctx, true, true, &window).unwrap();
         assert!(batch.page_execution);
-        assert_eq!(batch.code_page_count, SVM_CODE_PAGE_CAPACITY);
+        assert_eq!(batch.code_page_count, 8);
         assert_eq!(batch.page_breakpoint_count, 0);
         let mut allocator = crate::test_mocks::MockFrameAllocator::new();
         ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
