@@ -8,6 +8,7 @@
 //! Bedrock's controlled getrandom stream.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Duration;
@@ -278,6 +279,7 @@ pub fn read_events() -> Vec<DstEvent> {
 /// Records an assertion. `signature` is a stable id the driver dedups by; it
 /// prefixes the message.
 pub fn assert_always(cond: Condition, component: &str, signature: &str, detail: &str) {
+    note_always(cond.evaluate(), component, signature, detail);
     write_assertion(Assertion::always(
         cond,
         message(signature, detail),
@@ -291,6 +293,42 @@ pub fn assert_sometimes(cond: Condition, component: &str, signature: &str, detai
         message(signature, detail),
         location(component),
     ));
+}
+
+/// Per Always signature in this process: guest time of its last pass, and
+/// whether it has failed.
+static ALWAYS_SEEN: std::sync::Mutex<BTreeMap<String, (Option<u64>, bool)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Emits an `assertion`/`first-failure` event the first time an Always
+/// signature fails in this process, with the guest time of its last pass
+/// (if it ever passed): when it went wrong, for picking a moment to branch
+/// from (`bedrock-dst moments`). Assertions themselves carry no time.
+fn note_always(ok: bool, component: &str, signature: &str, detail: &str) {
+    let mut seen = ALWAYS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = seen.entry(signature.to_string()).or_default();
+    if ok {
+        entry.0 = Some(guest_time_ns());
+        return;
+    }
+    if entry.1 {
+        return;
+    }
+    entry.1 = true;
+    let last_pass_ns = entry.0;
+    drop(seen);
+    let detail: String = detail.chars().take(200).collect();
+    emit_event(
+        "assertion",
+        "first-failure",
+        None,
+        json!({
+            "signature": signature,
+            "component": component,
+            "detail": detail,
+            "last_pass_ns": last_pass_ns,
+        }),
+    );
 }
 
 fn location(component: &str) -> Location {

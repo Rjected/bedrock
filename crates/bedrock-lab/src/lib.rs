@@ -60,8 +60,8 @@ pub use checkpoint::{Checkpoint, CheckpointId, LabOpts};
 pub use error::LabError;
 pub use event::{Event, EventSink};
 pub use rng::{
-    InputRecording, InputSource, IoInput, RandomInput, RecordedInputSource, RngMode, SeededSource,
-    SystemRng,
+    Cut, InputRecording, InputSource, IoInput, PrefixSource, RandomInput, RecordedInputSource,
+    RngMode, SeededSource, SystemRng,
 };
 pub use tape::{Tape, TapeError, TAPE_MAGIC, TAPE_VERSION};
 pub use time::{VirtDuration, VirtTime};

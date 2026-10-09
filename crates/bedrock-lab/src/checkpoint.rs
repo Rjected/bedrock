@@ -262,15 +262,32 @@ impl Checkpoint {
     /// Fork a branch with `source` overriding the tree's input source and
     /// [`RngMode`](crate::RngMode) (e.g. one fuzz input per branch). Forces
     /// exit-to-userspace RDRAND on the new VM, which descendants inherit.
+    ///
+    /// `source` replaces the checkpoint's source entirely, host actions
+    /// included: a host action the old source supplied but the branch had
+    /// not queued yet is dropped, and the branch pulls its own from `source`.
+    /// Inputs consumed before the checkpoint stay in the branch's
+    /// [`input_recording`](Branch::input_recording).
     pub fn branch_with_input_source<S: InputSource + 'static>(&self, source: S) -> Result<Branch> {
         self.branch_inner(Some(Box::new(source)), true)
     }
 
+    /// `replaces_source`: the branch's source is not the checkpoint's, so
+    /// the checkpoint's pending host action does not carry over.
     fn branch_inner(
         &self,
         input_source: Option<Box<dyn InputSource>>,
-        force_exit_to_userspace: bool,
+        replaces_source: bool,
     ) -> Result<Branch> {
+        let force_exit_to_userspace = replaces_source;
+        let (pending_input_io, input_io_exhausted) = if replaces_source {
+            (None, false)
+        } else {
+            (
+                self.inner.pending_input_io.clone(),
+                self.inner.input_io_exhausted,
+            )
+        };
         let child_vm = self.inner.vm.fork()?;
         if force_exit_to_userspace {
             child_vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
@@ -284,8 +301,8 @@ impl Checkpoint {
             self.inner.lab.clone(),
             self.inner.partial_line.clone(),
             input_source,
-            self.inner.pending_input_io.clone(),
-            self.inner.input_io_exhausted,
+            pending_input_io,
+            input_io_exhausted,
             self.inner.input_recording.clone(),
         );
         branch.enable_event_capture()?;
