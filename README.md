@@ -233,7 +233,16 @@ A safe negative-cache experiment compared rejected code pages only every 256th
 visit, with immediate invalidation for host writes. It passed unit and hardware
 tests, including Linux replay, but its five-run median was 2.885 seconds,
 identical to the same-box baseline; it was reverted. On this Linux image, the
-hot `memcpy` page has four REP hazard-entry offsets (`0x5cc`, `0x7c1`, `0x7e8`,
+first million global-gate planning attempts included about 537,000 successes;
+about 270,000 fallback bounded plans succeeded and cost roughly 1.56 billion
+host cycles to prepare. Temporarily allowing one recent hazardous page during
+otherwise trusted global batches passed replay checks but slowed the Linux
+five-run median from 2.93 to 3.14 seconds, so it was reverted. Keeping a page
+plan's tree-generation key stable while reusing an unchanged global table tree
+also passed checks but did not improve the median (2.902 versus 2.904 seconds);
+it was reverted. The next optimization needs to reduce the number or cost of
+bounded page plans without adding per-entry byte checks or breakpoint setup.
+The hot `memcpy` page has four REP hazard-entry offsets (`0x5cc`, `0x7c1`, `0x7e8`,
 `0x8ff`). A guarded global batch can cover them with all four hardware
 breakpoints when its current translation tree exposes one executable alias,
 but those breakpoints are available only for that batch. Retaining the page's
