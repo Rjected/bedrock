@@ -359,7 +359,8 @@ million exits with the previous fallback. Allowing verified read-modify-write
 stores and decoding MOVSXD reduced the no-ROGPT run to 205.72 seconds and
 117.35 million exits; both no-ROGPT runs reached the same snapshot TSC and
 memory hash. About 117 million exits were still single steps. An early-boot
-opcode sample found direct CALL and RET at nearly half of scalar entries. The
+opcode sample found direct CALL and RET at nearly half of scalar entries; the
+Linux `__x86_return_thunk` RET was the most frequent sampled site. The
 no-ROGPT functional suite passes with its PUSHF performance assertion replaced
 by a diagnostic: native PUSHF still exits once per iteration. Near-native AMD
 execution without ROGPT remains unfinished.
