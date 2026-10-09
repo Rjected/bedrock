@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SVM_CODE_PAGE_CAPACITY, SVM_RECENT_PAGE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SVM_ALIAS_EDGE_CAPACITY, SVM_CODE_PAGE_CAPACITY, SVM_RECENT_PAGE_CAPACITY};
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
@@ -538,12 +538,15 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     scratch.tables[0] = root;
     scratch.levels[0] = 4;
     scratch.count = 1;
+    scratch.upper_count = 0;
     let mut cursor = 0;
     let mut bytes = [0u8; 512];
     while cursor < ctx.state().svm_guard.count {
         let level = ctx.state().svm_guard.levels[cursor];
         let table = ctx.state().svm_guard.tables[cursor];
         ctx.state_mut().svm_guard.children[cursor] = 0;
+        let edge_start = ctx.state().svm_guard.upper_count;
+        let mut edge_len = 0usize;
         if level > 1 {
             // A guarded table cannot change behind the scanner. Its direct
             // child links remain valid even when CR3 points to another root;
@@ -559,6 +562,22 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
                 })
                 .map(|(index, _)| index);
             if let Some(index) = cached {
+                let old_len = ctx.state().svm_guard.gate_upper_lengths[index];
+                let old_start = usize::from(ctx.state().svm_guard.gate_upper_starts[index]);
+                if old_len != u16::MAX
+                    && old_start + usize::from(old_len) <= ctx.state().svm_guard.gate_upper_count
+                    && edge_start + usize::from(old_len) <= SVM_ALIAS_EDGE_CAPACITY
+                {
+                    for old in old_start..old_start + usize::from(old_len) {
+                        let edge = ctx.state().svm_guard.gate_upper_edges[old];
+                        let write = ctx.state().svm_guard.upper_count;
+                        ctx.state_mut().svm_guard.upper_edges[write] = edge;
+                        ctx.state_mut().svm_guard.upper_count += 1;
+                    }
+                    edge_len = usize::from(old_len);
+                } else {
+                    edge_len = usize::from(u16::MAX);
+                }
                 let mut links = ctx.state().svm_guard.gate_children[index];
                 while links != 0 {
                     let child_index = links.trailing_zeros() as usize;
@@ -566,16 +585,29 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
                     add_translation_child(ctx, cursor, level, child, code_pages)?;
                     links &= links - 1;
                 }
+                ctx.state_mut().svm_guard.upper_starts[cursor] = edge_start as u16;
+                ctx.state_mut().svm_guard.upper_lengths[cursor] = edge_len as u16;
                 cursor += 1;
                 continue;
             }
             for offset in (0..4096).step_by(512) {
                 ctx.read_guest_memory(GuestPhysAddr::new(table + offset), &mut bytes)
                     .ok()?;
-                for entry in bytes.chunks_exact(8) {
+                for (part, entry) in bytes.chunks_exact(8).enumerate() {
                     let entry = u64::from_le_bytes(entry.try_into().ok()?);
                     if entry & 1 == 0 {
                         continue;
+                    }
+                    if edge_len != usize::from(u16::MAX) {
+                        if ctx.state().svm_guard.upper_count < SVM_ALIAS_EDGE_CAPACITY {
+                            let slot = (offset / 8 + part as u64) as u16;
+                            let write = ctx.state().svm_guard.upper_count;
+                            ctx.state_mut().svm_guard.upper_edges[write] = SvmAliasEdge { slot, entry };
+                            ctx.state_mut().svm_guard.upper_count += 1;
+                            edge_len += 1;
+                        } else {
+                            edge_len = usize::from(u16::MAX);
+                        }
                     }
                     if entry & (1 << 7) != 0 {
                         if level == 4 {
@@ -588,6 +620,8 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
                 }
             }
         }
+        ctx.state_mut().svm_guard.upper_starts[cursor] = edge_start as u16;
+        ctx.state_mut().svm_guard.upper_lengths[cursor] = edge_len as u16;
         cursor += 1;
     }
     ctx.state_mut().svm_guard.valid = true;
@@ -679,6 +713,8 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         ctx.state_mut().svm_guard.gate_tables[index] = page;
         ctx.state_mut().svm_guard.gate_levels[index] = ctx.state().svm_guard.levels[index];
         ctx.state_mut().svm_guard.gate_children[index] = ctx.state().svm_guard.children[index];
+        ctx.state_mut().svm_guard.gate_upper_starts[index] = ctx.state().svm_guard.upper_starts[index];
+        ctx.state_mut().svm_guard.gate_upper_lengths[index] = ctx.state().svm_guard.upper_lengths[index];
         ctx.state_mut().svm_guard.gate_guards[index].valid = false;
         let _ = ctx.state_mut().ept.invalidate_npt_code_4k(allocator, gpa);
         match ctx.state_mut().ept.restrict_write_4k(allocator, gpa) {
@@ -704,6 +740,10 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         }
     }
     let guard = &mut ctx.state_mut().svm_guard;
+    guard.gate_upper_count = guard.upper_count;
+    for index in 0..guard.upper_count {
+        guard.gate_upper_edges[index] = guard.upper_edges[index];
+    }
     guard.gate_count = count;
     guard.gate_root = root;
     guard.gate_dirty = false;
@@ -1390,6 +1430,60 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
     Some(batch)
 }
 
+fn visit_alias_entry<C: VmContext>(
+    ctx: &mut C,
+    batch: &mut InstructionBatch,
+    hazards: &[PageHazards],
+    walk: super::super::vm_state::SvmAliasWalk,
+    slot: u16,
+    entry: u64,
+    count: &mut usize,
+) -> Option<()> {
+    if entry & 1 == 0 || entry & (1 << 63) != 0 {
+        return Some(());
+    }
+    let shift = 12 + 9 * (walk.level - 1);
+    let base = walk.base | (u64::from(slot) << shift);
+    let physical = entry & 0x000f_ffff_ffff_f000;
+    if walk.level == 1 || entry & (1 << 7) != 0 {
+        let physical = physical & !((1u64 << shift) - 1);
+        for (index, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
+            let page = batch.pages[index];
+            if page < physical || page - physical >= 1 << shift {
+                continue;
+            }
+            let virtual_page = base + (page - physical);
+            let virtual_page = if virtual_page & (1 << 47) != 0 {
+                virtual_page | (!0u64 << 48)
+            } else {
+                virtual_page
+            };
+            for &offset in &hazard.offsets[..hazard.count] {
+                let address = virtual_page + u64::from(offset);
+                if batch.page_breakpoints[..batch.page_breakpoint_count].contains(&address) {
+                    continue;
+                }
+                if batch.page_breakpoint_count == 4 {
+                    return None;
+                }
+                batch.page_breakpoints[batch.page_breakpoint_count] = address;
+                batch.page_breakpoint_count += 1;
+            }
+        }
+    } else {
+        if *count == ctx.state().svm_guard.aliases.len() {
+            return None;
+        }
+        ctx.state_mut().svm_guard.aliases[*count] = super::super::vm_state::SvmAliasWalk {
+            table: physical,
+            base,
+            level: walk.level - 1,
+        };
+        *count += 1;
+    }
+    Some(())
+}
+
 fn collect_page_breakpoints<C: VmContext>(
     ctx: &mut C,
     batch: &mut InstructionBatch,
@@ -1460,55 +1554,40 @@ fn collect_page_breakpoints<C: VmContext>(
     batch.page_breakpoint_count = 0;
     while cursor < count {
         let walk = ctx.state().svm_guard.aliases[cursor];
-        let shift = 12 + 9 * (walk.level - 1);
+        let cached = if walk.level > 1 && !ctx.state().svm_guard.gate_links_untrusted {
+            ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
+                .iter()
+                .enumerate()
+                .find(|(index, &page)| {
+                    page == walk.table
+                        && ctx.state().svm_guard.gate_guards[*index].valid
+                        && ctx.state().svm_guard.gate_levels[*index] == walk.level
+                        && ctx.state().svm_guard.gate_upper_lengths[*index] != u16::MAX
+                        && usize::from(ctx.state().svm_guard.gate_upper_starts[*index])
+                            + usize::from(ctx.state().svm_guard.gate_upper_lengths[*index])
+                            <= ctx.state().svm_guard.gate_upper_count
+                })
+                .map(|(index, _)| index)
+        } else {
+            None
+        };
+        if let Some(index) = cached {
+            let start = usize::from(ctx.state().svm_guard.gate_upper_starts[index]);
+            let end = start + usize::from(ctx.state().svm_guard.gate_upper_lengths[index]);
+            for edge_index in start..end {
+                let edge = ctx.state().svm_guard.gate_upper_edges[edge_index];
+                visit_alias_entry(ctx, batch, hazards, walk, edge.slot, edge.entry, &mut count)?;
+            }
+            cursor += 1;
+            continue;
+        }
         for offset in (0..4096).step_by(512) {
             ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes)
                 .ok()?;
             for (part, entry) in bytes.chunks_exact(8).enumerate() {
                 let entry = u64::from_le_bytes(entry.try_into().ok()?);
-                if entry & 1 == 0 || entry & (1 << 63) != 0 {
-                    continue;
-                }
-                let base = walk.base | ((offset / 8 + part as u64) << shift);
-                let physical = entry & 0x000f_ffff_ffff_f000;
-                if walk.level == 1 || entry & (1 << 7) != 0 {
-                    let physical = physical & !((1u64 << shift) - 1);
-                    for (index, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
-                        let page = batch.pages[index];
-                        if page < physical || page - physical >= 1 << shift {
-                            continue;
-                        }
-                        let virtual_page = base + (page - physical);
-                        let virtual_page = if virtual_page & (1 << 47) != 0 {
-                            virtual_page | (!0u64 << 48)
-                        } else {
-                            virtual_page
-                        };
-                        for &offset in &hazard.offsets[..hazard.count] {
-                            let address = virtual_page + u64::from(offset);
-                            if batch.page_breakpoints[..batch.page_breakpoint_count]
-                                .contains(&address)
-                            {
-                                continue;
-                            }
-                            if batch.page_breakpoint_count == 4 {
-                                return None;
-                            }
-                            batch.page_breakpoints[batch.page_breakpoint_count] = address;
-                            batch.page_breakpoint_count += 1;
-                        }
-                    }
-                } else {
-                    if count == ctx.state().svm_guard.aliases.len() {
-                        return None;
-                    }
-                    ctx.state_mut().svm_guard.aliases[count] = SvmAliasWalk {
-                        table: physical,
-                        base,
-                        level: walk.level - 1,
-                    };
-                    count += 1;
-                }
+                let slot = (offset / 8 + part as u64) as u16;
+                visit_alias_entry(ctx, batch, hazards, walk, slot, entry, &mut count)?;
             }
         }
         cursor += 1;
@@ -3984,6 +4063,65 @@ mod tests {
         ctx.state_mut().svm_guard.valid = false;
         collect_translation_tree_pages(&mut ctx, &[]).unwrap();
         assert!(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0xa000));
+    }
+
+    #[test]
+    fn guarded_alias_edges_follow_host_write_invalidation() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
+        let count = ctx.state().svm_guard.count;
+        let edge_count = ctx.state().svm_guard.upper_count;
+        for index in 0..count {
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.gate_tables[index] = guard.tables[index];
+            guard.gate_levels[index] = guard.levels[index];
+            guard.gate_upper_starts[index] = guard.upper_starts[index];
+            guard.gate_upper_lengths[index] = guard.upper_lengths[index];
+            guard.gate_guards[index].valid = true;
+        }
+        for index in 0..edge_count {
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.gate_upper_edges[index] = guard.upper_edges[index];
+        }
+        ctx.state_mut().svm_guard.gate_count = count;
+        ctx.state_mut().svm_guard.gate_upper_count = edge_count;
+
+        let hazard = cached_page_hazards(&mut ctx, 0x1000).unwrap();
+        let mut batch = planned(&ctx).unwrap();
+        collect_page_breakpoints(&mut ctx, &mut batch, &[hazard]).unwrap();
+        assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1100]);
+
+        // A host write bypasses NPT. The next walk must read the changed
+        // table instead of trusting its previously guarded edge list.
+        ctx.memory[0x4000..0x4008].fill(0);
+        ctx.memory[0x4008..0x4010].copy_from_slice(&0x5007u64.to_le_bytes());
+        ctx.state_mut().svm_guard.gate_links_untrusted = true;
+        for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
+            proof.valid = false;
+        }
+        collect_page_breakpoints(&mut ctx, &mut batch, &[hazard]).unwrap();
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x4000_1100]
+        );
+
+        // A guest write drops that table's NPT guard and must likewise force
+        // a fresh read, even when the other upper tables stay guarded.
+        ctx.memory[0x4008..0x4010].fill(0);
+        ctx.memory[0x4010..0x4018].copy_from_slice(&0x5007u64.to_le_bytes());
+        let written = ctx.state().svm_guard.gate_tables[..count]
+            .iter().position(|&page| page == 0x4000).unwrap();
+        ctx.state_mut().svm_guard.gate_links_untrusted = false;
+        ctx.state_mut().svm_guard.gate_guards[written].valid = false;
+        for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
+            proof.valid = false;
+        }
+        collect_page_breakpoints(&mut ctx, &mut batch, &[hazard]).unwrap();
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x8000_1100]
+        );
     }
 
     #[test]
