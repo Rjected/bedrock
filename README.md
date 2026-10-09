@@ -321,6 +321,11 @@ A box-only diagnostic confirmed that this fallback is exercised: it observed
 NPT mapping-generation changes during the root boot as early as emulated TSC
 2 and again near TSC 200,000, plus changes in both forked children. The
 temporary counters were removed after the check.
+On a second EPYC 4245P box with the same HWE kernel, ten modified Linux
+boot/two-fork runs had a 2.567-second median versus 2.588 seconds for ten
+nearby control runs (about 0.8% faster). Every run matched the snapshot TSC
+and RAM hash. This supports a smaller cross-box gain than the first box's
+2.2% estimate, and leaves the broader near-native target unmet.
 A separate EPYC 4245P diagnostic counted the first million SVM entries during
 Linux boot and fork replay: none had guest CR0.TS or CR0.EM set, and the guest
 XCR0 was `0x7`. Skipping FPU state switching only while the guest disables
