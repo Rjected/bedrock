@@ -298,18 +298,6 @@ On an EPYC 4245P boxctl box running HWE `7.0.0-38`, a clean-build
 The same box's Linux boot and two-fork replay took 2.733 seconds with 847,994
 root VM exits and the expected snapshot TSC and RAM hash. The memory-loop
 result therefore does not establish near-native Linux performance.
-Guest writes to leaf page tables now rearm only the released leaf NPT guards.
-They cannot change which page-table frames are reachable, so rebuilding the
-whole guarded tree is unnecessary; the path still discards cached translations
-and executable-alias proofs. Upper-level writes, host writes, and CR3 changes
-take the full refresh path. The write profile counted 10,000 leaf-table guard
-releases versus about 1,000 second-level releases in one Linux run. On the
-same EPYC 4245P box, a six-run clean-build control had a 2.682-second Linux
-boot/two-fork median; an eight-run modified pass had a 2.618-second median
-(about 2.4% faster). The modified pass had the expected snapshot instruction
-count and RAM hash in all eight runs. The box suite, 222 host unit tests, and
-two final fresh Linux replays passed. Linux still makes roughly 848,000 exits,
-so this is an incremental improvement rather than the near-native goal.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
