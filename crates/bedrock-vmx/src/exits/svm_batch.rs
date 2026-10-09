@@ -651,6 +651,18 @@ fn restore_global_table_guards<C: VmContext, A: CowAllocator<C::CowPage>>(
     guard.gate_links_untrusted = true;
 }
 
+fn can_refresh_leaf_only(guard: &super::super::vm_state::SvmGuardScratch, root: u64) -> bool {
+    guard.gate_ready
+        && guard.gate_dirty
+        && !guard.gate_links_untrusted
+        && guard.gate_root == root
+        && guard.gate_count != 0
+        && guard.gate_guards[..guard.gate_count].iter().any(|saved| !saved.valid)
+        && (0..guard.gate_count).all(|index| {
+            guard.gate_guards[index].valid || guard.gate_levels[index] == 1
+        })
+}
+
 pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &A,
@@ -700,6 +712,50 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         ctx.state_mut().svm_guard.gate_root = root;
         ctx.state_mut().svm_guard.gate_ready = true;
         return;
+    }
+    // A guest store to a leaf PTE cannot change which page-table frames are
+    // reachable. Once the store has retired, rearm only its released leaf
+    // guard. Upper-level writes, host writes, and CR3 changes still rebuild
+    // the complete guarded tree below.
+    let leaf_only = can_refresh_leaf_only(&ctx.state().svm_guard, root);
+    if leaf_only {
+        let count = ctx.state().svm_guard.gate_count;
+        let mut rearmed = true;
+        for index in 0..count {
+            if ctx.state().svm_guard.gate_guards[index].valid {
+                continue;
+            }
+            let page = ctx.state().svm_guard.gate_tables[index];
+            let gpa = GuestPhysAddr::new(page);
+            let _ = ctx.state_mut().ept.invalidate_npt_code_4k(allocator, gpa);
+            match ctx.state_mut().ept.restrict_write_4k(allocator, gpa) {
+                Ok(Some(write_guard)) => {
+                    ctx.state_mut().svm_guard.gate_guards[index] =
+                        super::super::vm_state::SvmGuardSaved {
+                            guest: page,
+                            write_guard,
+                            valid: true,
+                        };
+                }
+                _ => {
+                    rearmed = false;
+                    break;
+                }
+            }
+        }
+        if rearmed {
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.valid = false;
+            guard.translation_count = 0;
+            guard.translation_cursor = 0;
+            guard.tree_generation = guard.tree_generation.wrapping_add(1);
+            guard.alias_proof.valid = false;
+            for proof in &mut guard.alias_proofs {
+                proof.valid = false;
+            }
+            guard.gate_dirty = false;
+            return;
+        }
     }
     ctx.state_mut().svm_guard.valid = false;
     let scanned = collect_translation_tree_pages(ctx, &[]).is_some();
@@ -4159,6 +4215,31 @@ mod tests {
         ctx.state_mut().svm_guard.valid = false;
         collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
         assert_eq!(ctx.state().svm_guard.levels[0], 4); // Rewalked.
+    }
+
+    #[test]
+    fn leaf_refresh_requires_only_guest_leaf_writes_on_the_same_root() {
+        let mut ctx = paged_context(&[0x90]);
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.gate_ready = true;
+        guard.gate_dirty = true;
+        guard.gate_root = 0x3000;
+        guard.gate_count = 2;
+        guard.gate_levels[0] = 4;
+        guard.gate_levels[1] = 1;
+        guard.gate_guards[0].valid = true;
+        guard.gate_guards[1].valid = false;
+        assert!(can_refresh_leaf_only(guard, 0x3000));
+        assert!(!can_refresh_leaf_only(guard, 0x8000));
+
+        guard.gate_links_untrusted = true;
+        assert!(!can_refresh_leaf_only(guard, 0x3000));
+        guard.gate_links_untrusted = false;
+        guard.gate_guards[0].valid = false;
+        assert!(!can_refresh_leaf_only(guard, 0x3000));
+        guard.gate_guards[0].valid = true;
+        guard.gate_guards[1].valid = true;
+        assert!(!can_refresh_leaf_only(guard, 0x3000));
     }
 
     #[test]
