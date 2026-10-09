@@ -137,6 +137,7 @@ pub(crate) struct SvmCodeProof {
 /// Kept in the boxed scratch workspace, never copied through the kernel stack.
 pub(crate) struct SvmHazardMemo {
     pub valid: bool,
+    pub rejected: bool,
     pub revision: u64,
     pub proof: SvmCodeProof,
     pub bytes: [u8; 4096],

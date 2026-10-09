@@ -1057,6 +1057,62 @@ struct PageHazards {
     count: usize,
 }
 
+fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHazards> {
+    // Rejected pages also recur at NPT instruction-fetch faults. Their exact
+    // bytes let us skip another full hazard scan without assuming code is
+    // immutable: a changed page is rescanned before trusting it.
+    let memo = ctx
+        .state()
+        .svm_guard
+        .hazard_memos
+        .iter()
+        .position(|memo| memo.valid && memo.proof.page == physical);
+    let unchanged = memo.is_some_and(|index| {
+        ctx.guest_memory_matches(
+            GuestPhysAddr::new(physical),
+            &ctx.state().svm_guard.hazard_memos[index].bytes,
+        ) == Ok(true)
+    });
+    if unchanged {
+        let memo = &ctx.state().svm_guard.hazard_memos[memo.unwrap()];
+        return (!memo.rejected).then_some(PageHazards {
+            boundary: memo.proof.boundary,
+            edge: memo.proof.edge,
+            offsets: memo.proof.offsets,
+            count: memo.proof.count,
+        });
+    }
+    let hazards = page_hazards(ctx, physical);
+    let mut bytes = [0u8; 512];
+    let index = memo.unwrap_or(ctx.state().svm_guard.hazard_memo_cursor);
+    let cache = &mut ctx.state_mut().svm_guard;
+    cache.code_epoch = cache.code_epoch.wrapping_add(1);
+    // Region proofs are keyed by page and revision, not by memo slot. Use a
+    // scratch-wide revision so eviction cannot revive an older proof.
+    cache.hazard_memos[index].revision = cache.code_epoch;
+    cache.hazard_memos[index].valid = false;
+    for offset in (0..4096).step_by(bytes.len()) {
+        ctx.read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
+            .ok()?;
+        ctx.state_mut().svm_guard.hazard_memos[index].bytes[offset..offset + bytes.len()]
+            .copy_from_slice(&bytes);
+    }
+    let cache = &mut ctx.state_mut().svm_guard;
+    cache.hazard_memos[index].rejected = hazards.is_none();
+    cache.hazard_memos[index].proof = super::super::vm_state::SvmCodeProof {
+        page: physical,
+        boundary: hazards.map_or([0; 32], |hazards| hazards.boundary),
+        edge: hazards.map_or(0, |hazards| hazards.edge),
+        offsets: hazards.map_or([0; 4], |hazards| hazards.offsets),
+        count: hazards.map_or(0, |hazards| hazards.count),
+    };
+    cache.hazard_memos[index].valid = true;
+    if memo.is_none() {
+        cache.hazard_memo_cursor = (index + 1) % cache.hazard_memos.len();
+    }
+    hazards
+}
+
 fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHazards> {
     if !ctx.state().svm_guard.valid {
         ctx.state_mut().svm_guard.code_count = 0;
@@ -1089,56 +1145,7 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
             count: proof.count,
         });
     }
-    // Translation invalidation does not necessarily change code. Reuse a
-    // previous scan only after comparing every byte, including page edges.
-    let memo = ctx
-        .state()
-        .svm_guard
-        .hazard_memos
-        .iter()
-        .position(|memo| memo.valid && memo.proof.page == physical);
-    let unchanged = memo.is_some_and(|index| {
-        ctx.guest_memory_matches(
-            GuestPhysAddr::new(physical),
-            &ctx.state().svm_guard.hazard_memos[index].bytes,
-        ) == Ok(true)
-    });
-    let hazards = if unchanged {
-        let proof = ctx.state().svm_guard.hazard_memos[memo.unwrap()].proof;
-        PageHazards {
-            boundary: proof.boundary,
-            edge: proof.edge,
-            offsets: proof.offsets,
-            count: proof.count,
-        }
-    } else {
-        let hazards = page_hazards(ctx, physical)?;
-        let mut bytes = [0u8; 512];
-        let index = memo.unwrap_or(ctx.state().svm_guard.hazard_memo_cursor);
-        let cache = &mut ctx.state_mut().svm_guard;
-        cache.hazard_memos[index].revision = cache.hazard_memos[index].revision.wrapping_add(1);
-        cache.code_epoch = cache.code_epoch.wrapping_add(1);
-        ctx.state_mut().svm_guard.hazard_memos[index].valid = false;
-        for offset in (0..4096).step_by(bytes.len()) {
-            ctx.read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
-                .ok()?;
-            ctx.state_mut().svm_guard.hazard_memos[index].bytes[offset..offset + bytes.len()]
-                .copy_from_slice(&bytes);
-        }
-        let cache = &mut ctx.state_mut().svm_guard;
-        cache.hazard_memos[index].proof = super::super::vm_state::SvmCodeProof {
-            page: physical,
-            boundary: hazards.boundary,
-            edge: hazards.edge,
-            offsets: hazards.offsets,
-            count: hazards.count,
-        };
-        cache.hazard_memos[index].valid = true;
-        if memo.is_none() {
-            cache.hazard_memo_cursor = (index + 1) % cache.hazard_memos.len();
-        }
-        hazards
-    };
+    let hazards = page_hazards_memo(ctx, physical)?;
     let cache = &mut ctx.state_mut().svm_guard;
     let index = if cache.code_count < cache.code.len() {
         let index = cache.code_count;
@@ -1256,8 +1263,8 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
 /// A globally executable page must be safe at every entry byte, including
 /// joins with any other executable page. Unknown pages remain NX until this
 /// proof succeeds and their NPT leaves become write-protected.
-pub(crate) fn globally_safe_code<C: VmContext>(ctx: &C, physical: u64) -> bool {
-    let Some(hazards) = page_hazards(ctx, physical) else {
+pub(crate) fn globally_safe_code<C: VmContext>(ctx: &mut C, physical: u64) -> bool {
+    let Some(hazards) = page_hazards_memo(ctx, physical) else {
         return false;
     };
     hazards.count == 0
@@ -4294,6 +4301,37 @@ mod tests {
         ctx.memory[0x1ffd..0x2000].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         ctx.state_mut().svm_guard.valid = false;
         assert!(cached_page_hazards(&mut ctx, 0x1000).is_none());
+    }
+
+    #[test]
+    fn rejected_hazard_memo_rechecks_code_before_trusting_it() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        for offset in [0x100, 0x200, 0x300, 0x400, 0x500] {
+            ctx.memory[0x1000 + offset..0x1003 + offset]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        assert!(!globally_safe_code(&mut ctx, 0x1000));
+        let revision = ctx.state().svm_guard.hazard_memos[0].revision;
+        assert!(ctx.state().svm_guard.hazard_memos[0].rejected);
+        assert!(!globally_safe_code(&mut ctx, 0x1000));
+        assert!(cached_page_hazards(&mut ctx, 0x1000).is_none());
+        assert_eq!(ctx.state().svm_guard.hazard_memos[0].revision, revision);
+
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        assert!(globally_safe_code(&mut ctx, 0x1000));
+        assert!(!ctx.state().svm_guard.hazard_memos[0].rejected);
+        assert_eq!(ctx.state().svm_guard.hazard_memos[0].revision, revision + 1);
+    }
+
+    #[test]
+    fn hazard_revisions_are_unique_across_memo_slots() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        assert!(page_hazards_memo(&mut ctx, 0x1000).is_some());
+        assert!(page_hazards_memo(&mut ctx, 0x2000).is_some());
+        let memos = &ctx.state().svm_guard.hazard_memos;
+        assert_ne!(memos[0].revision, memos[1].revision);
     }
 
     #[test]
