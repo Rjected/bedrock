@@ -283,6 +283,21 @@ to starts on either hot page made about 771,000 exits and a 2.66-second
 median, effectively equal to the guarded-cache baseline. Both hardcoded
 probes were reverted. The remaining cost lies in arming and protecting the
 promoted pages on each entry, not only in revalidating their bytes.
+An isolated Linux-entry profile attributed about 0.59 billion cycles over
+200,000 unsafe global-gate successes to executable-alias collection. A
+direct-mapped alias-plan cache hit on roughly 177,000 of those successes, but
+about 14,000 full page-table walks still dominated the stage; its measured
+cost only fell to about 0.56 billion cycles. Repeated six-run wall-time passes
+did not show a stable benefit, so the experimental cache and temporary
+profiling counters were discarded. The remaining alias work is concentrated
+after guest page-table writes invalidate the global table guard.
+On an EPYC 4245P boxctl box running HWE `7.0.0-38`, a clean-build
+1,048,576-pass memory workload retired 38.659 billion guest instructions in
+3.152 seconds (three-sample median), versus 3.147 seconds natively. That is
+12.27 billion retired guest instructions per second, not a 12.27 GHz clock.
+The same box's Linux boot and two-fork replay took 2.733 seconds with 847,994
+root VM exits and the expected snapshot TSC and RAM hash. The memory-loop
+result therefore does not establish near-native Linux performance.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
