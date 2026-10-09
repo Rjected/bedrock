@@ -321,6 +321,10 @@ A box-only diagnostic confirmed that this fallback is exercised: it observed
 NPT mapping-generation changes during the root boot as early as emulated TSC
 2 and again near TSC 200,000, plus changes in both forked children. The
 temporary counters were removed after the check.
+A separate EPYC 4245P diagnostic counted the first million SVM entries during
+Linux boot and fork replay: none had guest CR0.TS or CR0.EM set, and the guest
+XCR0 was `0x7`. Skipping FPU state switching only while the guest disables
+FPU access therefore cannot improve this workload. The diagnostic was removed.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
