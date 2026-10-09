@@ -255,6 +255,12 @@ despite roughly 150,000 fewer exits. Its entry-preparation cost was about
 4.83-6.05 billion cycles across the runs, versus 4.45-4.76 billion for the
 control. The unsafe cache was discarded; this experiment does not justify
 persistent masked breakpoints without a cheaper setup path.
+A same-box `RDPMC` trial replaced the host PMC0 `RDMSR` in SVM entry with an
+ordered `RDPMC` read. The hardware suite and Linux replay passed, but two
+six-run modified passes had Linux medians of 2.74 and 2.75 seconds against a
+2.72-second control pass. VM runner-cycle medians overlapped as well. The
+change was reverted: the replacement counter read did not produce a repeatable
+end-to-end improvement on this workload.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
