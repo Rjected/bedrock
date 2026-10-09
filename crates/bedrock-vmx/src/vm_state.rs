@@ -56,6 +56,7 @@ pub(crate) struct SvmGuardScratch {
     pub alias_proof: SvmAliasProof,
     pub alias_proofs: [SvmAliasProof; 32],
     pub alias_cursor: usize,
+    pub alias_last_hit: usize,
     pub region_proofs: [SvmRegionProof; 32],
     pub region_cursor: usize,
     pub page_plans: [SvmPagePlan; 128],

@@ -1675,7 +1675,7 @@ fn collect_page_breakpoints<C: VmContext>(
     let guard = &ctx.state().svm_guard;
     let tree_guarded = (guard.valid && guard.root == root)
         || (guard.gate_ready && !guard.gate_dirty && guard.gate_root == root);
-    let cached = ctx.state().svm_guard.alias_proofs.iter().find(|proof| {
+    let matches = |proof: &super::super::vm_state::SvmAliasProof| {
         tree_guarded
             && proof.valid
             && proof.root == root
@@ -1693,10 +1693,21 @@ fn collect_page_breakpoints<C: VmContext>(
                                     && proof.offsets[slot][..h.count] == h.offsets[..h.count]
                             })
                 })
-    });
-    if let Some(proof) = cached {
+    };
+    let cache = &ctx.state().svm_guard;
+    let last = cache.alias_last_hit;
+    let cached = if last < cache.alias_proofs.len() && matches(&cache.alias_proofs[last]) {
+        Some(last)
+    } else {
+        cache.alias_proofs.iter().enumerate()
+            .find(|(index, proof)| *index != last && matches(proof))
+            .map(|(index, _)| index)
+    };
+    if let Some(index) = cached {
+        let proof = &ctx.state().svm_guard.alias_proofs[index];
         batch.page_breakpoints = proof.breakpoints;
         batch.page_breakpoint_count = proof.breakpoint_count;
+        ctx.state_mut().svm_guard.alias_last_hit = index;
         return Some(());
     }
     // Enumerate executable virtual aliases. NPT alone protects physical pages;
@@ -1787,6 +1798,7 @@ fn collect_page_breakpoints<C: VmContext>(
     let cursor = cache.alias_cursor;
     let proof = cache.alias_proof;
     cache.alias_proofs[cursor] = proof;
+    cache.alias_last_hit = cursor;
     cache.alias_cursor = (cursor + 1) % cache.alias_proofs.len();
     Some(())
 }
@@ -4151,6 +4163,7 @@ mod tests {
             &first.page_breakpoints[..first.page_breakpoint_count],
             &[0x1100]
         );
+        assert_eq!(ctx.state().svm_guard.alias_last_hit, 0);
 
         ctx.set_guest_rip(0x7000);
         ctx.state_mut().svm_recent_pages.fill(u64::MAX);
@@ -4160,6 +4173,7 @@ mod tests {
             &second.page_breakpoints[..second.page_breakpoint_count],
             &[0x7100]
         );
+        assert_eq!(ctx.state().svm_guard.alias_last_hit, 1);
 
         ctx.state_mut().svm_guard.aliases[0].table = 0;
         ctx.set_guest_rip(0x1000);
@@ -4170,6 +4184,7 @@ mod tests {
             &first_again.page_breakpoints[..first_again.page_breakpoint_count],
             &[0x1100]
         );
+        assert_eq!(ctx.state().svm_guard.alias_last_hit, 0);
         assert_eq!(ctx.state().svm_guard.aliases[0].table, 0);
     }
 
