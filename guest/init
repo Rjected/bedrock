@@ -163,7 +163,11 @@ bedrock-file-fetch \
     compose.yaml /workload/compose.yaml \
     images.tar   /images/images.tar \
     '?tempo-dst' /usr/local/bin/tempo-dst 2>&1 | systemd-cat -t init
-if [ -f /usr/local/bin/tempo-dst ]; then
+fetch_status=${PIPESTATUS[0]}
+if [ "$fetch_status" -ne 0 ]; then
+    rm -f /usr/local/bin/tempo-dst
+    echo "workload file fetch failed" | systemd-cat -t init
+elif [ -f /usr/local/bin/tempo-dst ]; then
     chmod +x /usr/local/bin/tempo-dst
 fi
 
