@@ -242,6 +242,10 @@ plan's tree-generation key stable while reusing an unchanged global table tree
 also passed checks but did not improve the median (2.902 versus 2.904 seconds);
 it was reverted. The next optimization needs to reduce the number or cost of
 bounded page plans without adding per-entry byte checks or breakpoint setup.
+A single-page plan reuse probe under the global table guard found only 307
+new cache hits in 500,000 calls; its five-run median was 2.897 seconds against
+2.902 seconds for the nearby baseline. This was too small to justify its
+full-page byte check and extra hot-path branches, so it was also reverted.
 The hot `memcpy` page has four REP hazard-entry offsets (`0x5cc`, `0x7c1`, `0x7e8`,
 `0x8ff`). A guarded global batch can cover them with all four hardware
 breakpoints when its current translation tree exposes one executable alias,
