@@ -180,6 +180,15 @@ replays matched. Also, 256 accelerated forks matched an instruction-stepped
 reference at ten checkpoints
 from 8.00 to 8.10 million instructions and 64 forks at ten checkpoints from
 100.00 to 100.10 million instructions.
+An instrumented Linux boot/replay on that EPYC 4245P counted the first million
+SVM entries: 526,656 global batches, 149,182 page batches, 108,331 bounded
+batches, and 215,831 scalar entries. The normal run still makes about 880,000
+VM exits and takes about 2.85 seconds; the near-native synthetic loop result
+does not describe this boot. Attempts to shorten instruction fetches, retain
+the global gate across ordinary COW remaps, or remove redundant VMCB/PMU writes
+did not produce a repeatable Linux speedup and were reverted. The remaining
+work is to reduce the Linux exit rate and per-entry cost while preserving exact
+instruction counts and replay state.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.
