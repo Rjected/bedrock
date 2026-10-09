@@ -77,9 +77,17 @@
       podmanInitrd = import ./nix/podman-initrd.nix {
         inherit pkgs guestKernel;
       };
+      svmPodmanInitrd = import ./nix/podman-initrd.nix {
+        inherit pkgs;
+        guestKernel = svmGuestKernel;
+      };
 
       tempoInitrd = import ./nix/tempo-initrd.nix {
         inherit pkgs podmanInitrd;
+      };
+      svmTempoInitrd = import ./nix/tempo-initrd.nix {
+        inherit pkgs;
+        podmanInitrd = svmPodmanInitrd;
       };
 
       # A workload is a directory under workloads/ holding a compose.yaml and a
@@ -126,6 +134,7 @@
         tempo-dst = userland.tempo-dst;
         inherit podmanInitrd;
         inherit tempoInitrd;
+        inherit svmPodmanInitrd svmTempoInitrd;
         default = userland.bedrock-cli;
       };
 

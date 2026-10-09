@@ -3,6 +3,7 @@
 //! Checkpoints — immutable moments in virtual time.
 
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use bedrock_vm::file_xfer::FileServer;
 use bedrock_vm::{
@@ -82,6 +83,27 @@ pub(crate) struct CheckpointInner {
     pub(crate) input_recording: InputRecording,
 }
 
+fn report_boot_progress(vm: &Vm, at: VirtTime, elapsed: Duration) {
+    let regs = vm.get_regs().ok();
+    let rip = regs.as_ref().map(|regs| regs.rip);
+    let rax = regs.as_ref().map(|regs| regs.gprs.rax);
+    let rdi = regs.as_ref().map(|regs| regs.gprs.rdi);
+    let stats = vm.get_exit_stats().ok();
+    eprintln!(
+        "BEDROCK_BOOT_PROGRESS wall_seconds={:.1} virtual_seconds={:.3} rip={rip:?} rax={rax:?} rdi={rdi:?} exits={:?} npt={:?} mtf={:?} rdtsc={:?} io={:?} vmcall={:?} exception={:?} other={:?}",
+        elapsed.as_secs_f64(),
+        at.as_secs_f64(),
+        stats.as_ref().map(|s| s.total_exit_count()),
+        stats.as_ref().map(|s| s.ept_violation.count),
+        stats.as_ref().map(|s| s.mtf.count),
+        stats.as_ref().map(|s| s.rdtsc.count),
+        stats.as_ref().map(|s| s.io_instruction.count),
+        stats.as_ref().map(|s| s.vmcall.count),
+        stats.as_ref().map(|s| s.exception_nmi.count),
+        stats.as_ref().map(|s| s.other.count),
+    );
+}
+
 impl Checkpoint {
     /// Boot a fully set-up root [`Vm`] (unforked, like `bedrock-cli`) until
     /// `HYPERCALL_READY` and make the initial checkpoint there. Errors if
@@ -111,9 +133,16 @@ impl Checkpoint {
             })?;
         vm.set_stop_at_tsc(Some(deadline.instructions()))?;
         let mut partial_line = PartialLine::default();
+        let progress_enabled = std::env::var_os("BEDROCK_BOOT_PROGRESS").is_some();
+        let boot_started = Instant::now();
+        let mut last_progress = boot_started;
         loop {
             let exit = vm.run()?;
             let at = VirtTime::from_instructions(exit.emulated_tsc, opts.tsc_frequency);
+            if progress_enabled && last_progress.elapsed() >= Duration::from_secs(10) {
+                report_boot_progress(&vm, at, boot_started.elapsed());
+                last_progress = Instant::now();
+            }
             let event_len = exit.event_len as usize;
             if event_len > 0 {
                 if let Some(buffer) = vm.event_buffer() {
@@ -151,7 +180,12 @@ impl Checkpoint {
                     continue;
                 }
                 ExitKind::Continue | ExitKind::EventBufferFull => continue,
-                kind => return Err(LabError::UnexpectedExit { at, kind }),
+                kind => {
+                    if progress_enabled {
+                        report_boot_progress(&vm, at, boot_started.elapsed());
+                    }
+                    return Err(LabError::UnexpectedExit { at, kind });
+                }
             }
         }
     }

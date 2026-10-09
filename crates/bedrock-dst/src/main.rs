@@ -579,6 +579,7 @@ fn warmup_cmd(args: &CampaignArgs) -> Result<String> {
 /// `probe_preempt`: some branch will use forced preemption, so check the
 /// ioctl exists before the long boot.
 fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Result<Checkpoint> {
+    let started = Instant::now();
     let mut vm = VmBuilder::new().memory_mb(args.memory_mb).build()?;
     if probe_preempt {
         // Probe for the ioctl before the long boot. Disabled is a fresh VM's
@@ -612,7 +613,11 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
             ..Default::default()
         },
     )?;
-    println!("ready at vt {:.1}s", ready.time().as_secs_f64());
+    println!(
+        "ready at vt {:.1}s (wall {:.1}s)",
+        ready.time().as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    );
 
     let wl = args.workload(None);
     let cmd = warmup_cmd(args)?;
@@ -645,7 +650,11 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
     let (_, mem) = host_bash(&mut warm, MEM_REPORT)?;
     fs::write(args.out.join("guest-mem.txt"), mem)?;
     let cp = warm.checkpoint()?;
-    println!("warm checkpoint at vt {:.1}s", cp.time().as_secs_f64());
+    println!(
+        "warm checkpoint at vt {:.1}s (wall {:.1}s)",
+        cp.time().as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    );
     Ok(cp)
 }
 
