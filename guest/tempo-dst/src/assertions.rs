@@ -90,7 +90,11 @@ fn merge(dir: &Path, offsets: &BTreeMap<String, u64>) -> io::Result<String> {
 
 pub fn merge_seed() -> io::Result<()> {
     let offsets = serde_json::from_slice(&fs::read(OFFSETS)?)?;
-    fs::write(MERGED, merge(Path::new(DIR), &offsets)?)
+    fs::write(MERGED, merge(Path::new(DIR), &offsets)?)?;
+    // The live forwarder holds lines briefly to interleave nearby timestamps.
+    // Let it drain finalizer records before the host stops this branch.
+    std::thread::sleep(Duration::from_secs(2));
+    Ok(())
 }
 
 #[derive(Default)]
