@@ -331,6 +331,25 @@ Linux boot and fork replay: none had guest CR0.TS or CR0.EM set, and the guest
 XCR0 was `0x7` versus the box host's `0x2e7`. Skipping FPU state switching
 only while the guest disables FPU access, or skipping redundant XCR0 changes,
 therefore cannot improve this workload. The diagnostic was removed.
+A box-only stage profile of the same Linux boot and two forks attributed about
+2.73–2.84 billion cycles over roughly 1.05 million entries to batch planning,
+versus 0.43–0.48 billion each for global-tree refresh, instruction-window
+preparation, and execution protection. Within planning, the global-gate attempt
+used about 1.1 billion cycles and the fallback batch planner about 1.6 billion.
+The NPT trusted-code lookup and deadline calculation each cost only about
+29 cycles per measured call, so moving those checks did not improve the next
+Linux run. These figures include temporary `RDTSC` instrumentation and the
+forked children; they are diagnostic attribution, not an uninstrumented
+root-runtime breakdown. The temporary instrumentation was not committed.
+A narrower box-only upper-bound probe promoted just the recurrent Linux
+`memcpy`/`memset` page using three debug breakpoints and one address-mask MSR.
+Six nearby clean-branch runs had a 2.576-second median and about 843,000 exits;
+six probe runs had a 2.737-second median and about 820,000 exits. Every run
+matched snapshot TSC `499445737` and RAM hash `dd6a53449a59f0aa`.
+The probe's hardcoded page and cached alias proof lack code-write invalidation,
+so it was discarded; even its exit reduction was too small to offset setup
+cost. This reinforces that a useful accelerated path must cut planner and
+entry cost as well as exit count.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
