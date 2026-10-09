@@ -85,29 +85,39 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, 32(%rsp)
  mov $0x400, %rax
  mov %rax, %dr7
- movq $0, 80(%rsp)
- /* Scalar entries need no hardware execution breakpoints. Guest DR access
-  * is intercepted; DR7 stays disabled while host DR0-DR3 remain untouched. */
- testb $0xff, 0x560(%r9)
- jz .Lsvm_skip_breakpoint_regs_entry
- movq $1, 80(%rsp)
+ /* Only enabled guest execution breakpoints need an address-register swap.
+  * DR7 is disabled here, so unused host DR0-DR3 remain untouched. */
+ movzbl 0x560(%r9), %eax
+ and $0x55, %eax
+ mov %rax, 80(%rsp)
+ testb $1, 80(%rsp)
+ jz .Lsvm_skip_dr0_entry
  mov %dr0, %rax
  mov %rax, 24(%rsp)
- mov %dr1, %rax
- mov %rax, 56(%rsp)
- mov %dr2, %rax
- mov %rax, 64(%rsp)
- mov %dr3, %rax
- mov %rax, 72(%rsp)
  mov 0(%rcx), %rax
  mov %rax, %dr0
+.Lsvm_skip_dr0_entry:
+ testb $4, 80(%rsp)
+ jz .Lsvm_skip_dr1_entry
+ mov %dr1, %rax
+ mov %rax, 56(%rsp)
  mov 8(%rcx), %rax
  mov %rax, %dr1
+.Lsvm_skip_dr1_entry:
+ testb $16, 80(%rsp)
+ jz .Lsvm_skip_dr2_entry
+ mov %dr2, %rax
+ mov %rax, 64(%rsp)
  mov 16(%rcx), %rax
  mov %rax, %dr2
+.Lsvm_skip_dr2_entry:
+ testb $64, 80(%rsp)
+ jz .Lsvm_skip_dr3_entry
+ mov %dr3, %rax
+ mov %rax, 72(%rsp)
  mov 24(%rcx), %rax
  mov %rax, %dr3
-.Lsvm_skip_breakpoint_regs_entry:
+.Lsvm_skip_dr3_entry:
  mov %rdx, %rax
  vmsave %rax
 	mov	VMXCTX_XCR0_MASK(%rdi), %rax
@@ -247,17 +257,26 @@ SYM_FUNC_START(svm_run_guest)
 	xrstor64 (%rcx)
 
 .Lsvm_skip_xsave_exit:
- cmpq $0, 80(%rsp)
- je .Lsvm_skip_breakpoint_regs_exit
+ testb $1, 80(%rsp)
+ jz .Lsvm_skip_dr0_exit
  mov 24(%rsp), %rax
  mov %rax, %dr0
+.Lsvm_skip_dr0_exit:
+ testb $4, 80(%rsp)
+ jz .Lsvm_skip_dr1_exit
  mov 56(%rsp), %rax
  mov %rax, %dr1
+.Lsvm_skip_dr1_exit:
+ testb $16, 80(%rsp)
+ jz .Lsvm_skip_dr2_exit
  mov 64(%rsp), %rax
  mov %rax, %dr2
+.Lsvm_skip_dr2_exit:
+ testb $64, 80(%rsp)
+ jz .Lsvm_skip_dr3_exit
  mov 72(%rsp), %rax
  mov %rax, %dr3
-.Lsvm_skip_breakpoint_regs_exit:
+.Lsvm_skip_dr3_exit:
  mov 32(%rsp), %rax
  mov %rax, %dr7
  stgi

@@ -207,6 +207,11 @@ full XSAVE before XSAVEOPT, repeated after guest XCR0 changes. A hardware test
 preserves a guest XMM value and a host x87 value across VM exits and two forks;
 the Linux snapshot and RAM hash matched in all measured runs. This is a modest
 entry-cost improvement, not a solution to the repeated execute faults.
+The SVM entry assembly now swaps only the enabled DR0-DR3 breakpoint address
+registers. On the same EPYC box, a five-run Linux baseline median of 2.888
+seconds compared with 2.846 and 2.855 seconds in two modified five-run passes;
+all runs matched the snapshot and RAM hash. This reduces per-entry debug-state
+work but does not address the repeated faults on hazardous code pages.
 A boxctl EPYC 4245P profile classified the first 350,000 nested-page faults
 in the Linux boot/fork run: 326,702 (93.3%) selected scalar execution on an
 untrusted code page, 18,464 released a page-table write guard, 3,587 trusted a
