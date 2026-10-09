@@ -4,11 +4,12 @@
 # its own boot. Failures on this image are novel-bug candidates.
 #
 #   DOCKER='sudo docker' SHARDS=8 SEEDS=25 ./workloads/tempo-dst/regressions/hunt.sh \
-#     [--variant masking] [bedrock-dst campaign args, e.g. --load trie --run-secs 180]
+#     [--variant masking] [bedrock-dst campaign args, e.g.
+#      --workload-arg load=trie --run-secs 180]
 #
 # Every load's image (trie, tip20, chain) is in the shards' images tar, so any
-# --load works; --reference (passed through to run.sh) adds the E7 reference
-# node, which runs the known-fixes image too.
+# `--workload-arg load=...` works; `--workload-arg reference=true` adds the E7
+# reference node, which runs the known-fixes image too.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 read -r -a docker <<<"${DOCKER:-docker}"
@@ -30,7 +31,7 @@ DOCKER="${DOCKER:-docker}" "$here/../build.sh" >>"$out/build.log" 2>&1 || build_
   bedrock/tempo-dst-chain:latest > "$out/images.tar"
 # Build the Nix inputs once; the shards then only hit the store cache.
 nix=${NIX:-/nix/var/nix/profiles/default/bin/nix}
-(cd "$here/../../.." && $nix build .#bedrock-dst .#guestKernel .#tempoInitrd .#tempo-dst --no-link)
+(cd "$here/../../.." && $nix build .#bedrock-dst .#tempo-dst .#guestKernel .#tempoInitrd --no-link)
 for i in $(seq 0 $((shards - 1))); do
   first=$((start + i * seeds))
   RUN_DIR="$out/shard-$i-inputs" IMAGES="$out/images.tar" "$here/../run.sh" --variant "$variant" --node-image "$image" \

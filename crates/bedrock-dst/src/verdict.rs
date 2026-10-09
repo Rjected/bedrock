@@ -13,8 +13,38 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
-use serde_json::Value;
+use bedrock_dst_contract::Signature;
+use serde::{Deserialize, Serialize};
+
+use crate::workload::Opaque;
+
+/// One assertion record, as far as the verdict needs it. Lenient: a record
+/// without a `result` counts as failing, like one whose result is false.
+#[derive(Deserialize)]
+enum Record {
+    Always(RecordData),
+    Sometimes(RecordData),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RecordData {
+    result: bool,
+    message: String,
+    location: RecordLocation,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RecordLocation {
+    file: String,
+}
+
+/// Just a verdict's outcome (reading a verdict.json back).
+#[derive(Deserialize)]
+pub struct VerdictPass {
+    pub pass: bool,
+}
 
 #[derive(Debug, Default, Serialize, PartialEq)]
 pub struct Verdict {
@@ -25,10 +55,10 @@ pub struct Verdict {
     pub sometimes_unsatisfied: BTreeSet<String>,
     pub records: usize,
     pub unparsed: usize,
-    /// The seed's swarm record (the driver's `Swarm`), so failures can be
+    /// The seed's swarm record (the workload's), so failures can be
     /// grouped by feature.
-    #[serde(skip_serializing_if = "Value::is_null")]
-    pub swarm: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<Opaque>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -42,46 +72,35 @@ pub fn signature(message: &str) -> &str {
     message.split_once(": ").map_or(message, |(s, _)| s)
 }
 
-pub fn aggregate(assertions_jsonl: &str, required: &[&str]) -> Verdict {
+pub fn aggregate(assertions_jsonl: &str, required: &[Signature]) -> Verdict {
     let mut v = Verdict::default();
     let mut sometimes: BTreeMap<String, bool> = BTreeMap::new();
     for line in assertions_jsonl.lines().filter(|l| !l.trim().is_empty()) {
-        let Ok(rec) = serde_json::from_str::<Value>(line) else {
+        let Ok(rec) = serde_json::from_str::<Record>(line) else {
             v.unparsed += 1;
             continue;
         };
-        let (kind, data) = match (rec.get("Always"), rec.get("Sometimes")) {
-            (Some(d), _) => ("always", d),
-            (_, Some(d)) => ("sometimes", d),
-            _ => {
-                v.unparsed += 1;
-                continue;
-            }
+        let (always, data) = match rec {
+            Record::Always(d) => (true, d),
+            Record::Sometimes(d) => (false, d),
         };
         v.records += 1;
-        let result = data.get("result").and_then(Value::as_bool).unwrap_or(false);
-        let message = data.get("message").and_then(Value::as_str).unwrap_or("");
-        let sig = signature(message).to_string();
-        if kind == "sometimes" {
-            *sometimes.entry(sig).or_insert(false) |= result;
-        } else if !result {
-            let location = data
-                .pointer("/location/file")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+        let sig = signature(&data.message).to_string();
+        if !always {
+            *sometimes.entry(sig).or_insert(false) |= data.result;
+        } else if !data.result {
             v.failures
                 .entry(sig)
                 .and_modify(|f| f.count += 1)
                 .or_insert_with(|| Failure {
                     count: 1,
-                    first: message.to_string(),
-                    location,
+                    first: data.message.clone(),
+                    location: data.location.file.clone(),
                 });
         }
     }
-    for sig in required {
-        if !sometimes.get(*sig).copied().unwrap_or(false) {
+    for Signature(sig) in required {
+        if !sometimes.get(sig).copied().unwrap_or(false) {
             v.failures.insert(
                 format!("C/missing/{sig}"),
                 Failure {
@@ -107,10 +126,18 @@ pub fn aggregate(assertions_jsonl: &str, required: &[&str]) -> Verdict {
 mod tests {
     use super::*;
 
+    fn sigs(s: &[&str]) -> Vec<Signature> {
+        s.iter().map(|s| Signature::from(*s)).collect()
+    }
+
     fn rec(kind: &str, result: bool, msg: &str) -> String {
-        serde_json::json!({kind: {"condition": {"Bool": result}, "result": result, "message": msg,
-            "location": {"file": "tempo-dst/oracle", "line": 0, "column": 0}}})
-        .to_string()
+        use bedrock_assertions::{Assertion, Condition, Location};
+        let loc = Location::new("guest/oracle", 0, 0);
+        let a = match kind {
+            "Always" => Assertion::always(Condition::Bool(result), msg, loc),
+            _ => Assertion::sometimes(Condition::Bool(result), msg, loc),
+        };
+        serde_json::to_string(&a).unwrap()
     }
 
     #[test]
@@ -120,7 +147,7 @@ mod tests {
 
     #[test]
     fn missing_required_coverage_fails() {
-        let v = aggregate("", &["S/load-included"]);
+        let v = aggregate("", &sigs(&["S/load-included"]));
         assert!(!v.pass);
         assert!(v.failures.contains_key("C/missing/S/load-included"));
         let log = [
@@ -128,13 +155,13 @@ mod tests {
             rec("Sometimes", true, "S/kill"),
         ]
         .join("\n");
-        let v = aggregate(&log, &["S/load-included", "S/kill"]);
+        let v = aggregate(&log, &sigs(&["S/load-included", "S/kill"]));
         assert_eq!(
             v.failures.keys().collect::<Vec<_>>(),
             ["C/missing/S/load-included"]
         );
         let log = rec("Sometimes", true, "S/load-included");
-        assert!(aggregate(&log, &["S/load-included"]).pass);
+        assert!(aggregate(&log, &sigs(&["S/load-included"])).pass);
     }
 
     #[test]
@@ -153,7 +180,7 @@ mod tests {
         let f = &v.failures["E1/panic"];
         assert_eq!(f.count, 2);
         assert_eq!(f.first, "E1/panic: at a.rs:1");
-        assert_eq!(f.location, "tempo-dst/oracle");
+        assert_eq!(f.location, "guest/oracle");
     }
 
     #[test]
@@ -173,8 +200,8 @@ mod tests {
     #[test]
     fn workload_monitor_records_parse() {
         // Shape written by workload-monitor's always_eq!.
-        let line = r#"{"Always":{"condition":{"Eq":{"x":101,"y":0}},"result":false,"message":"container tempo exit code is zero","location":{"file":"guest/workload-monitor/src/main.rs","line":1,"column":1}}}"#;
+        let line = r#"{"Always":{"condition":{"Eq":{"x":101,"y":0}},"result":false,"message":"container node exit code is zero","location":{"file":"guest/workload-monitor/src/main.rs","line":1,"column":1}}}"#;
         let v = aggregate(line, &[]);
-        assert!(v.failures.contains_key("container tempo exit code is zero"));
+        assert!(v.failures.contains_key("container node exit code is zero"));
     }
 }

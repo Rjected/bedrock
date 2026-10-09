@@ -7,6 +7,8 @@
 //! - E4: stops the node gracefully, checks its trie, then re-executes
 //!   `[1, head]` from its datadir in a fresh container.
 //! - E7: stops and checks the reference node (if any) first.
+//! - merges the run's assertion files into `/bedrock/out/assertions.jsonl`
+//!   for the driver.
 
 use std::path::Path;
 use std::process::Command;
@@ -138,4 +140,9 @@ pub fn run() {
         serde_json::to_vec_pretty(&summary).unwrap(),
     );
     common::emit_event("oracle", "finalized", None, summary);
+    // The contract: finalize leaves the run's assertions for the driver.
+    if let Err(e) = crate::assertions::merge_seed() {
+        eprintln!("merge-assertions: {e}");
+        std::process::exit(1);
+    }
 }

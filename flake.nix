@@ -109,6 +109,7 @@
         bedrock-cli = userland.bedrock-cli;
         bedrock-determinism = userland.bedrock-determinism;
         bedrock-dst = userland.bedrock-dst;
+        # The Tempo workload's planner is also fetched into the guest at boot.
         tempo-dst = userland.tempo-dst;
         inherit podmanInitrd;
         inherit tempoInitrd;

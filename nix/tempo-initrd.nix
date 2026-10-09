@@ -4,5 +4,5 @@
 pkgs.runCommand "tempo-podman-initrd" {
   nativeBuildInputs = [ pkgs.cpio pkgs.gzip pkgs.python3 pkgs.findutils ];
 } ''
-  ${../workloads/tempo/prepare-initrd.sh} ${podmanInitrd} "$out"
+  ${pkgs.bash}/bin/bash ${../workloads/tempo/prepare-initrd.sh} ${podmanInitrd} "$out"
 ''

@@ -16,9 +16,9 @@ use crate::common::{
 };
 
 /// Guest seconds after nemesis start before the first kill may land.
-const WARMUP_SECS: u64 = 5;
+pub(crate) const WARMUP_SECS: u64 = 5;
 /// Longest the node stays down before restart.
-const MAX_DOWN_SECS: u64 = 3;
+pub(crate) const MAX_DOWN_SECS: u64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Kill {
