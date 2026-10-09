@@ -196,6 +196,18 @@ reduced that interval to 3.80 billion cycles, and omitting XCR0 switching as
 well reduced it to 3.55 billion. Both changes violate FPU isolation or
 guest-visible XCR0 semantics and were reverted. They bound the benefit of
 FPU-switch optimization on this workload; reducing VM exits remains necessary.
+A boxctl EPYC 4245P profile classified the first 350,000 nested-page faults
+in the Linux boot/fork run: 326,702 (93.3%) selected scalar execution on an
+untrusted code page, 18,464 released a page-table write guard, 3,587 trusted a
+safe code page, 677 handled copy-on-write, and 570 invalidated trusted code.
+Samples of the scalar fetch faults clustered on Linux's `memcpy`/`memmove`
+page (`0x1ed1000`) and `insn_decode` page (`0x1ecc000`), with the global
+page-table gate ready. This points to repeated execution of pages containing
+instruction hazards, rather than gate refresh or COW, as the main fault source.
+An isolated diagnostic that skipped code-byte rechecks for rejected pages
+changed the five-run median only from 2.89 to 2.85 seconds on that box;
+skipping rechecks for accepted pages failed the REP code-write regression.
+Both diagnostic changes were reverted.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.
