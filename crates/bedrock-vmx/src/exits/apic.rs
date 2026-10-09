@@ -13,6 +13,10 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+#[cfg(test)]
+#[path = "apic_tests.rs"]
+mod tests;
+
 /// APIC base address (Local APIC MMIO region).
 pub const APIC_BASE: u64 = 0xFEE0_0000;
 /// Size of APIC MMIO region.
@@ -111,6 +115,49 @@ pub fn handle_apic_access<C: VmContext>(
     ExitHandlerResult::Continue
 }
 
+/// ICR delivery-status bit (SDM Vol 3A 12.6.1).
+const ICR_DELIVERY_PENDING: u32 = 1 << 12;
+
+/// Deliver the IPI just written to the ICR. With a single vCPU only IPIs that
+/// reach this APIC matter: they queue their vector in the IRR like any other
+/// fixed interrupt (Linux raises irq_work and sched_ext kicks this way, as a
+/// self-IPI). Other delivery modes (SMI, NMI, INIT, SIPI) and IPIs aimed only
+/// at other CPUs are dropped (SDM Vol 3A 12.6.1, Figure 12-12).
+fn send_ipi(apic: &mut ApicState) {
+    let icr = apic.icr_lo;
+    let vector = icr & 0xFF;
+    // Delivery mode, bits 10:8: fixed (000) or lowest priority (001).
+    if (icr >> 8) & 0b111 > 0b001 {
+        return;
+    }
+    let to_self = match (icr >> 18) & 0b11 {
+        // No shorthand: match the destination field.
+        0b00 => {
+            let dest = apic.icr_hi >> 24;
+            if icr & (1 << 11) == 0 {
+                // Physical: our APIC ID or broadcast.
+                dest == apic.id || dest == 0xFF
+            } else {
+                // Logical, flat model: a bit set in both MDA and LDR.
+                dest & (apic.ldr >> 24) != 0
+            }
+        }
+        // Self, or all including self.
+        0b01 | 0b10 => true,
+        // All excluding self.
+        _ => false,
+    };
+    if !to_self {
+        return;
+    }
+    // Vectors 0-15 are illegal: set "send illegal vector" (ESR bit 5).
+    if vector < 16 {
+        apic.esr |= 1 << 5;
+        return;
+    }
+    apic.irr[(vector / 32) as usize] |= 1 << (vector % 32);
+}
+
 /// Read an emulated APIC register (map: SDM Vol 3A Table 12-1).
 fn read_apic_register(apic: &ApicState, offset: u32) -> u32 {
     match offset {
@@ -197,9 +244,11 @@ fn write_apic_register(apic: &mut ApicState, offset: u32, value: u32, current_ts
         0x0F0 => apic.svr = value,
         // Error Status Register - write clears it
         0x280 => apic.esr = 0,
-        // Interrupt Command Register (low) - IPIs ignored (single vCPU)
+        // Interrupt Command Register (low). Writing it sends the IPI; the
+        // delivery-status bit (12) is read-only and reads idle.
         0x300 => {
-            apic.icr_lo = value;
+            apic.icr_lo = value & !ICR_DELIVERY_PENDING;
+            send_ipi(apic);
         }
         // Interrupt Command Register (high)
         0x310 => apic.icr_hi = value,
