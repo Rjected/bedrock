@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SVM_ALIAS_EDGE_CAPACITY, SVM_CODE_PAGE_CAPACITY, SVM_RECENT_PAGE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SVM_ALIAS_EDGE_CAPACITY, SVM_CODE_PAGE_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_TABLE_CAPACITY};
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
@@ -13,6 +13,7 @@ use crate::prelude::*;
 use bedrock_ept::NptExecutionGuard;
 
 const _: () = assert!(SVM_CODE_PAGE_CAPACITY <= NptExecutionGuard::MAX_PAGES);
+const _: () = assert!(SVM_TABLE_CAPACITY % 64 == 0);
 
 /// Unknown instructions and control transfers terminate a batch. The flags
 /// distinguish memory access from stores, including implicit stack accesses.
@@ -479,7 +480,7 @@ fn add_translation_child<C: VmContext>(
         scratch.count += 1;
         index
     };
-    scratch.children[parent] |= 1u128 << index;
+    scratch.children[parent][index / 64] |= 1u64 << (index % 64);
     Some(())
 }
 
@@ -548,7 +549,7 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     while cursor < ctx.state().svm_guard.count {
         let level = ctx.state().svm_guard.levels[cursor];
         let table = ctx.state().svm_guard.tables[cursor];
-        ctx.state_mut().svm_guard.children[cursor] = 0;
+        ctx.state_mut().svm_guard.children[cursor].fill(0);
         let edge_start = ctx.state().svm_guard.upper_count;
         let mut edge_len = 0usize;
         if level > 1 {
@@ -582,12 +583,15 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
                 } else {
                     edge_len = usize::from(u16::MAX);
                 }
-                let mut links = ctx.state().svm_guard.gate_children[index];
-                while links != 0 {
-                    let child_index = links.trailing_zeros() as usize;
-                    let child = ctx.state().svm_guard.gate_tables[child_index];
-                    add_translation_child(ctx, cursor, level, child, code_pages)?;
-                    links &= links - 1;
+                let child_words = ctx.state().svm_guard.gate_children[index];
+                for (word_index, word) in child_words.into_iter().enumerate() {
+                    let mut links = word;
+                    while links != 0 {
+                        let child_index = word_index * 64 + links.trailing_zeros() as usize;
+                        let child = ctx.state().svm_guard.gate_tables[child_index];
+                        add_translation_child(ctx, cursor, level, child, code_pages)?;
+                        links &= links - 1;
+                    }
                 }
                 ctx.state_mut().svm_guard.upper_starts[cursor] = edge_start as u16;
                 ctx.state_mut().svm_guard.upper_lengths[cursor] = edge_len as u16;
@@ -4016,9 +4020,9 @@ mod tests {
     #[test]
     fn page_execution_accepts_large_trees_and_falls_back_at_workspace_capacity() {
         let mut ctx = paged_context(&[0x90]);
-        ctx.memory.resize(1024 * 1024, 0);
+        ctx.memory.resize(4 * 1024 * 1024, 0);
         ctx.memory[0x1000..0x2000].fill(0x90);
-        for index in 1..91 {
+        for index in 1..150 {
             let table = 0x7000 + index * 4096;
             ctx.memory[0x5000 + index * 8..0x5008 + index * 8]
                 .copy_from_slice(&(table as u64 | 7).to_le_bytes());
@@ -4029,11 +4033,11 @@ mod tests {
                 .unwrap()
                 .page_execution
         );
-        assert_eq!(ctx.state().svm_guard.count, 94);
+        assert_eq!(ctx.state().svm_guard.count, 153);
         assert!(ctx.state().svm_guard.tables[..94].contains(&(0x7000 + 90 * 4096)));
         // Simulate returning to userspace before changing RAM.
         ctx.state_mut().svm_guard.valid = false;
-        for index in 91..128 {
+        for index in 150..(SVM_TABLE_CAPACITY - 2) {
             let table = 0x7000 + index * 4096;
             ctx.memory[0x5000 + index * 8..0x5008 + index * 8]
                 .copy_from_slice(&(table as u64 | 7).to_le_bytes());
@@ -4315,6 +4319,36 @@ mod tests {
         ctx.state_mut().svm_guard.valid = false;
         collect_translation_tree_pages(&mut ctx, &[]).unwrap();
         assert!(ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].contains(&0xa000));
+    }
+
+    #[test]
+    fn guarded_table_links_reuse_children_beyond_first_bitmap_word() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory.resize(4 * 1024 * 1024, 0);
+        for index in 1..150 {
+            let table = 0x7000 + index * 4096;
+            ctx.memory[0x5000 + index * 8..0x5008 + index * 8]
+                .copy_from_slice(&(table as u64 | 7).to_le_bytes());
+        }
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        let count = ctx.state().svm_guard.count;
+        assert_eq!(count, 153);
+        for index in 0..count {
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.gate_tables[index] = guard.tables[index];
+            guard.gate_levels[index] = guard.levels[index];
+            guard.gate_children[index] = guard.children[index];
+            guard.gate_guards[index].valid = true;
+        }
+        ctx.state_mut().svm_guard.gate_count = count;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.memory[0x300000..0x300008].copy_from_slice(&0x4007u64.to_le_bytes());
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x300000);
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        assert_eq!(ctx.state().svm_guard.count, count);
+        assert!(ctx.state().svm_guard.tables[..count].contains(&(0x7000 + 149 * 4096)));
     }
 
     #[test]

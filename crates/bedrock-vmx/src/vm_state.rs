@@ -19,6 +19,8 @@ type ExitStatsBox = HeapBox<AllExitStats>;
 pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
 pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
 pub(crate) const SVM_ALIAS_EDGE_CAPACITY: usize = 2048;
+pub(crate) const SVM_TABLE_CAPACITY: usize = 512;
+pub(crate) const SVM_TABLE_WORDS: usize = SVM_TABLE_CAPACITY / 64;
 
 #[derive(Clone, Copy)]
 pub(crate) struct SvmAliasEdge {
@@ -29,13 +31,13 @@ pub(crate) struct SvmAliasEdge {
 /// Preallocated AMD guard workspace. Planning and permission restoration run
 /// with IRQs disabled and must neither allocate nor grow the kernel stack.
 pub(crate) struct SvmGuardScratch {
-    pub tables: [u64; 128],
-    pub levels: [u8; 128],
+    pub tables: [u64; SVM_TABLE_CAPACITY],
+    pub levels: [u8; SVM_TABLE_CAPACITY],
     // Direct child links in the last walk, indexed by this walk's table set.
-    pub children: [u128; 128],
+    pub children: [[u64; SVM_TABLE_WORDS]; SVM_TABLE_CAPACITY],
     pub upper_edges: [SvmAliasEdge; SVM_ALIAS_EDGE_CAPACITY],
-    pub upper_starts: [u16; 128],
-    pub upper_lengths: [u16; 128],
+    pub upper_starts: [u16; SVM_TABLE_CAPACITY],
+    pub upper_lengths: [u16; SVM_TABLE_CAPACITY],
     pub upper_count: usize,
     pub count: usize,
     pub root: u64,
@@ -49,7 +51,7 @@ pub(crate) struct SvmGuardScratch {
     pub translation_count: usize,
     pub translation_cursor: usize,
     // Code pages, up to four entry-walk tables, and the guarded tree.
-    pub saved: [SvmGuardSaved; 128 + SVM_CODE_PAGE_CAPACITY + 4],
+    pub saved: [SvmGuardSaved; SVM_TABLE_CAPACITY + SVM_CODE_PAGE_CAPACITY + 4],
     pub aliases: [SvmAliasWalk; 512],
     pub alias_proof: SvmAliasProof,
     pub alias_proofs: [SvmAliasProof; 32],
@@ -62,13 +64,13 @@ pub(crate) struct SvmGuardScratch {
     pub gate_host_writes: [u64; 32],
     pub gate_host_write_count: usize,
     pub gate_host_write_all: bool,
-    pub gate_tables: [u64; 128],
-    pub gate_guards: [SvmGuardSaved; 128],
-    pub gate_levels: [u8; 128],
-    pub gate_children: [u128; 128],
+    pub gate_tables: [u64; SVM_TABLE_CAPACITY],
+    pub gate_guards: [SvmGuardSaved; SVM_TABLE_CAPACITY],
+    pub gate_levels: [u8; SVM_TABLE_CAPACITY],
+    pub gate_children: [[u64; SVM_TABLE_WORDS]; SVM_TABLE_CAPACITY],
     pub gate_upper_edges: [SvmAliasEdge; SVM_ALIAS_EDGE_CAPACITY],
-    pub gate_upper_starts: [u16; 128],
-    pub gate_upper_lengths: [u16; 128],
+    pub gate_upper_starts: [u16; SVM_TABLE_CAPACITY],
+    pub gate_upper_lengths: [u16; SVM_TABLE_CAPACITY],
     pub gate_upper_count: usize,
     pub gate_count: usize,
     pub gate_root: u64,
