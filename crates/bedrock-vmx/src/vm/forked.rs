@@ -7,7 +7,7 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
-use super::{ForkableVm, ParentVm};
+use super::{equal_guest_bytes, ForkableVm, ParentVm};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
@@ -293,7 +293,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         };
         // SAFETY: the selected page is resident and first_len stays within it.
         let actual = unsafe { core::slice::from_raw_parts(base.add(offset), first_len) };
-        if actual != &expected[..first_len] {
+        if !equal_guest_bytes(actual, &expected[..first_len]) {
             return Ok(false);
         }
         if first_len == expected.len() {

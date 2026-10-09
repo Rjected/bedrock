@@ -19,6 +19,33 @@ pub use forked::{ForkedVm, ForkedVmError};
 pub use root::{RootVm, RootVmError};
 pub use traits::{ForkableVm, ParentVm};
 
+/// Exact comparison for the 4KB code images checked on SVM entries. The
+/// kernel's scalar memcmp branches once per word; combine eight word results
+/// before branching for the common unchanged-page case. Other lengths keep
+/// the ordinary slice comparison.
+#[inline(always)]
+fn equal_guest_bytes(actual: &[u8], expected: &[u8]) -> bool {
+    if actual.len() != 4096 || expected.len() != 4096 {
+        return actual == expected;
+    }
+    for offset in (0..4096).step_by(64) {
+        let mut difference = 0u64;
+        for word in 0..8 {
+            // SAFETY: both slices have 4096 bytes and the largest read ends
+            // at offset 4095. The pointers need not be u64-aligned.
+            unsafe {
+                let left = (actual.as_ptr().add(offset + word * 8) as *const u64).read_unaligned();
+                let right = (expected.as_ptr().add(offset + word * 8) as *const u64).read_unaligned();
+                difference |= left ^ right;
+            }
+        }
+        if difference != 0 {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -36,6 +63,21 @@ mod tests {
     use std::vec::Vec;
 
     const PAGE_SIZE: usize = 4096;
+
+    #[test]
+    fn equal_guest_bytes_checks_entire_page_and_short_slices() {
+        let mut actual = [0x5a; PAGE_SIZE];
+        let expected = actual;
+        assert!(super::equal_guest_bytes(&actual, &expected));
+        for index in [0, 7, 8, 63, 64, 2047, 4095] {
+            actual[index] ^= 1;
+            assert!(!super::equal_guest_bytes(&actual, &expected), "byte {index}");
+            actual[index] ^= 1;
+        }
+        assert!(super::equal_guest_bytes(&actual[1..10], &expected[1..10]));
+        actual[9] ^= 1;
+        assert!(!super::equal_guest_bytes(&actual[1..10], &expected[1..10]));
+    }
 
     /// Mock guest memory: contiguous virtual memory posing as physical pages.
     struct MockGuestMemory {

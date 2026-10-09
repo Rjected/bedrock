@@ -367,6 +367,25 @@ The NPT trusted-code lookup and deadline calculation each cost only about
 Linux run. These figures include temporary `RDTSC` instrumentation and the
 forked children; they are diagnostic attribution, not an uninstrumented
 root-runtime breakdown. The temporary instrumentation was not committed.
+A box-only trial deferred guest XSAVE until FPU-reservation rotation, guest
+XSETBV, or RUN completion. It passed the hardware suite and exact Linux replay,
+but six alternating same-box comparisons (12 roots per variant) had essentially
+equal medians: 2.398 seconds for the current code and 2.401 seconds with
+deferred saving. The added state-management complexity was discarded.
+A host-cycle diagnostic then identified repeated 4KB code-image comparisons in
+the hazard memo as a significant planning cost. Hardware `perf` sampling
+perturbed Bedrock's guest instruction counter, so it was used only to identify
+the hot function; all results below use uninstrumented runs. The root and fork
+memory backends now compare unchanged code images eight 64-bit words at a time,
+branching once per 64 bytes while still checking every byte. In a pinned,
+reversed-order same-box comparison of five Linux boot/two-fork replays per
+variant, the ten-root median fell from 2.367 to 2.297 seconds (about 3.0%).
+Median VM-entry preparation fell from 4.145 to 3.870 billion cycles, with about
+846,000 exits in both variants. Six further alternating unpinned comparisons
+also favored the change, though those timings were more variable. Every replay
+matched snapshot TSC `499445737` and RAM hash `dd6a53449a59f0aa`; the SVM
+hardware suite, byte-comparison unit tests, and the 38.659-billion-instruction
+memory workload passed. General near-native Linux execution remains unfinished.
 A narrower box-only upper-bound probe promoted just the recurrent Linux
 `memcpy`/`memset` page using three debug breakpoints and one address-mask MSR.
 Six nearby clean-branch runs had a 2.576-second median and about 843,000 exits;

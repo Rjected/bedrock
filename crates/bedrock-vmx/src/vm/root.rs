@@ -7,7 +7,7 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
-use super::{ForkableVm, ParentVm};
+use super::{equal_guest_bytes, ForkableVm, ParentVm};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const PAGE_SIZE: usize = 4096;
@@ -164,7 +164,7 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> V
         let actual = unsafe {
             core::slice::from_raw_parts(self.memory.as_ptr().add(offset), expected.len())
         };
-        Ok(actual == expected)
+        Ok(equal_guest_bytes(actual, expected))
     }
 
     fn write_guest_memory(&mut self, gpa: GuestPhysAddr, buf: &[u8]) -> Result<(), MemoryError> {
