@@ -281,7 +281,12 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, %dr3
 .Lsvm_skip_dr3_exit:
  mov 32(%rsp), %rax
+ /* VMEXIT disables host breakpoints. When the saved host DR7 was the
+  * already-disabled architectural value, no software restore is needed. */
+ cmp $0x400, %rax
+ je .Lsvm_host_dr7_restored
  mov %rax, %dr7
+.Lsvm_host_dr7_restored:
  stgi
  add $88, %rsp
  pop %rbx

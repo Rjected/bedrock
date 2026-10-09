@@ -215,7 +215,13 @@ work but does not address the repeated faults on hazardous code pages.
 Skipping the host DR7 disable write when DR7 is already `0x400` reduced a
 same-box five-run median from 2.862 to 2.805 seconds; a second modified pass
 was 2.837 seconds. Both used the selective DR0-DR3 swap and matched replay
-state. The host DR7 value is still restored after each entry.
+state.
+VMEXIT also disables host breakpoints, so an already-disabled saved DR7
+(`0x400`) needs no restore write; other host DR7 values are still restored.
+Against the preceding entry-only optimization, a same-box five-run Linux
+median fell from 2.854 to 2.800 seconds, then to 2.769 seconds in a second
+modified pass. Median VM runner cycles fell from 5.111 billion to 4.952 and
+4.911 billion. All runs matched the snapshot and RAM hash.
 A boxctl EPYC 4245P profile classified the first 350,000 nested-page faults
 in the Linux boot/fork run: 326,702 (93.3%) selected scalar execution on an
 untrusted code page, 18,464 released a page-table write guard, 3,587 trusted a
