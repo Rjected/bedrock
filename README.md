@@ -396,6 +396,14 @@ stayed near 845,000. Every replay matched snapshot TSC `499445737` and RAM
 hash `dd6a53449a59f0aa`; the SVM hardware suite and long memory workload
 also passed. This removes avoidable host work per exit but does not yet prove
 roughly 5% overhead for general Linux execution.
+The same walk now filters 4KB leaf mappings whose physical page is not among
+the selected code pages; upper-level large-page entries retain the original
+visitor path. Five paired, pinned Linux replays in each A/B order passed exact
+boot/fork checks. The ten-root medians changed from 2.142 to 2.114 seconds in
+one order and from 2.144 to 2.133 seconds in the reverse order. Median
+VM-entry preparation fell from 3.248 to 3.075 billion cycles and from 3.266
+to 3.155 billion cycles, respectively. The wall-time gain is small relative
+to run-to-run noise, but the measured preparation cost fell in both sets.
 A narrower box-only upper-bound probe promoted just the recurrent Linux
 `memcpy`/`memset` page using three debug breakpoints and one address-mask MSR.
 Six nearby clean-branch runs had a 2.576-second median and about 843,000 exits;

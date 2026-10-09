@@ -1748,6 +1748,15 @@ fn collect_page_breakpoints<C: VmContext>(
                 if entry & 1 == 0 || entry & (1 << 63) != 0 {
                     continue;
                 }
+                // At the 4KB leaf level, only mappings of selected code
+                // pages can contribute execution breakpoints. Large-page
+                // entries at upper levels still go through the visitor.
+                if walk.level == 1
+                    && !batch.pages[..batch.code_page_count]
+                        .contains(&(entry & 0x000f_ffff_ffff_f000))
+                {
+                    continue;
+                }
                 let slot = (offset / 8 + part as u64) as u16;
                 visit_alias_entry(ctx, batch, hazards, walk, slot, entry, &mut count)?;
             }
