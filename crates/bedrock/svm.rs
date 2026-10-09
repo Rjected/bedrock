@@ -50,6 +50,25 @@ pub(crate) fn supported() -> bool {
     supported
 }
 
+fn guest_xsaveopt_supported() -> bool {
+    use core::sync::atomic::{AtomicU8, Ordering};
+    static SUPPORT: AtomicU8 = AtomicU8::new(0);
+    match SUPPORT.load(Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    let features: u32;
+    unsafe {
+        asm!("push rbx", "cpuid", "pop rbx",
+            inout("eax") 0xdu32 => features,
+            inout("ecx") 1u32 => _, lateout("edx") _, options(nomem));
+    }
+    let supported = features & 1 != 0;
+    SUPPORT.store(if supported { 2 } else { 1 }, Ordering::Relaxed);
+    supported
+}
+
 pub(crate) struct Bitmaps {
     msr: *mut core::ffi::c_void,
     io: *mut core::ffi::c_void,
@@ -146,6 +165,7 @@ pub(crate) unsafe fn run(
     pa: u64,
     batch: Option<&super::vmx::InstructionBatch>,
 ) -> Result<u64, VmEntryError> {
+    ctx.svm_guest_xsaveopt = u64::from(guest_xsaveopt_supported());
     v.write(o::RAX, 8, ctx.guest_rax);
     v.write(o::CR2, 8, ctx.guest_cr2);
     let entry_rip = v.read(o::RIP, 8);

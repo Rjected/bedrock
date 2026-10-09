@@ -61,6 +61,10 @@ pub struct VmxContext {
 
     // CR2 is not in the VMCS, so it's swapped manually (offset 280).
     pub guest_cr2: u64,
+
+    // AMD SVM may use XSAVEOPT for the guest image it just loaded with XRSTOR
+    // (offset 288). The host image still requires a full XSAVE each entry.
+    pub svm_guest_xsaveopt: u64,
 }
 
 impl Default for VmxContext {
@@ -109,6 +113,7 @@ impl VmxContext {
             xcr0_mask: 0,
             host_xcr0: 0,
             guest_cr2: 0,
+            svm_guest_xsaveopt: 0,
         }
     }
 }

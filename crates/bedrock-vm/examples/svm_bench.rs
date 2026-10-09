@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Native instruction-throughput benchmark with an exact stop inside a block.
 use bedrock_vm::{
-    load_kernel, Cr3, Idtr, LinuxBootConfig, RdrandConfig, Regs, SegmentRegister, Vm, VmBuilder,
+    load_kernel, Cr3, Cr4, Idtr, LinuxBootConfig, RdrandConfig, Regs, SegmentRegister, Vm,
+    VmBuilder,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -80,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     test_repeat()?;
+    test_guest_xmm_across_entries()?;
     test_rep_cached_code_write()?;
     test_paged_stores()?;
     test_read_modify_write_stores()?;
@@ -144,6 +146,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("SVM_BENCH_PASS instructions={EXPECTED} seconds={seconds:.6} instructions_per_second={:.0}", EXPECTED as f64 / seconds);
         break;
     }
+    Ok(())
+}
+
+fn test_guest_xmm_across_entries() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4027u64), (0x4000, 0x5027), (0x5000, 0xe7)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    let code = [
+        0xb8, 0x78, 0x56, 0x34, 0x12, // mov eax,0x12345678
+        0x66, 0x0f, 0x6e, 0xc0, // movd xmm0,eax
+        0x90, // nop
+        0x31, 0xc0, // xor eax,eax
+        0x66, 0x0f, 0x7e, 0x07, // movd [rdi],xmm0
+        0x8b, 0x07, // mov eax,[rdi]
+        0x0f, 0x01, 0xd9, // vmcall
+    ];
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.control_regs.cr4 = Cr4::new((1 << 5) | (1 << 9));
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rdi = 0x7000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(2))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259);
+        assert_eq!(exit.emulated_tsc, 2);
+        assert_eq!(vm.get_regs()?.rip, 0x1009);
+        break;
+    }
+    vm.set_stop_at_tsc(None)?;
+    for _ in 0..2 {
+        let child = vm.fork()?;
+        child.set_stop_at_tsc(None)?;
+        loop {
+            let exit = child.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert!(matches!(exit.exit_reason, 18 | 258));
+            assert_eq!(child.get_regs()?.gprs.rax, 0x12345678);
+            break;
+        }
+    }
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert!(matches!(exit.exit_reason, 18 | 258));
+        assert_eq!(vm.get_regs()?.gprs.rax, 0x12345678);
+        assert_eq!(&vm.memory()?[0x7000..0x7004], &0x12345678u32.to_le_bytes());
+        break;
+    }
+    println!("SVM_GUEST_XMM_PERSISTENCE_PASS");
     Ok(())
 }
 

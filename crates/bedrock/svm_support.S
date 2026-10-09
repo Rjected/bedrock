@@ -58,6 +58,7 @@
 #define VMXCTX_XCR0_MASK	264
 #define VMXCTX_HOST_XCR0	272
 #define VMXCTX_GUEST_CR2	280
+#define VMXCTX_SVM_GUEST_XSAVEOPT 288
 
 /* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints, PMU mask,
  * guest VMCB virtual pointer. The final argument exposes hardware writes to
@@ -220,7 +221,13 @@ SYM_FUNC_START(svm_run_guest)
 	mov	%rax, %rdx
 	shr	$32, %rdx		/* EDX = high 32 bits of mask */
 	mov	VMXCTX_GUEST_XSAVE_PTR(%rdi), %rcx
+	cmpq	$0, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
+	je	.Lsvm_guest_xsave_full
+	xsaveopt64 (%rcx)
+	jmp	.Lsvm_guest_xsave_done
+.Lsvm_guest_xsave_full:
 	xsave64	(%rcx)
+.Lsvm_guest_xsave_done:
 
 	/* Restore host XCR0 before loading host FPU state */
 	mov	VMXCTX_HOST_XCR0(%rdi), %rax
