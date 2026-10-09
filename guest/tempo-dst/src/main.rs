@@ -5,6 +5,7 @@
 //! ```text
 //! tempo-dst start '<config json>'  # set up a branch; prints the assertion offset
 //! tempo-dst nemesis    # crash/restart the node per /bedrock/in/config.json
+//! tempo-dst redecide '<json>'  # replace the rest of a running branch's kill plan / load generations
 //! tempo-dst oracle     # online oracles (log scan, liveness, durability)
 //! tempo-dst finalize   # end-of-run oracles (graceful stop, re-execute)
 //! tempo-dst head       # print the node's head block number
@@ -41,7 +42,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some("nemesis") => nemesis::run(),
+        Some("nemesis") => nemesis::run(std::env::args().nth(2).as_deref() == Some("--resume")),
+        Some("redecide") => {
+            if let Err(e) = nemesis::redecide(&std::env::args().nth(2).unwrap_or_default()) {
+                eprintln!("redecide: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("oracle") => oracle::run(),
         Some("finalize") => finalize::run(),
         Some("deploy") => {
@@ -141,7 +148,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: tempo-dst <start|nemesis|oracle|finalize|head|reference-head|deploy|deploy-tip20|trie-spec|tip20-spec|chain-spec|chain-check|chain-watch>");
+            eprintln!("usage: tempo-dst <start|nemesis|redecide|oracle|finalize|head|reference-head|deploy|deploy-tip20|trie-spec|tip20-spec|chain-spec|chain-check|chain-watch>");
             std::process::exit(2);
         }
     }

@@ -240,7 +240,7 @@ pub fn meaning() -> BTreeMap<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn sample() -> Scenario {
