@@ -364,6 +364,13 @@ Linux `__x86_return_thunk` RET was the most frequent sampled site. The
 no-ROGPT functional suite passes with its PUSHF performance assertion replaced
 by a diagnostic: native PUSHF still exits once per iteration. Near-native AMD
 execution without ROGPT remains unfinished.
+On a fresh EPYC 4245P box, caching instruction-fetch translations only while
+the global gate protects the current guest page tables reduced two reference
+Linux runs from 18.99/19.04 seconds to 17.83/17.84 seconds on the same box;
+the final build with explicit guard-revocation checks took 17.64 seconds.
+The snapshot TSC and memory hash matched; VM-entry setup cycles fell by about
+9%. This improves the ROGPT path but does not address the unaccelerated
+no-ROGPT path or establish 5% overhead for Linux against native execution.
 On the EPYC 4244P box, the default `svm_bench` suite also fails its
 decoded-branch acceleration assertion: one case needs 40,131 exits with the global gate and
 20,029 without it, where the test requires fewer than 100. Its functional

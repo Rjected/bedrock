@@ -39,6 +39,36 @@ impl InstructionWindow {
             .read_natural(VmcsFieldNatural::GuestRip)?
             .wrapping_add(v.read_natural(VmcsFieldNatural::GuestCsBase)?);
         let physical = physical(ctx, linear)?;
+        Self::read_at(ctx, linear, physical)
+    }
+
+    /// Reuse a translation only while the global gate guards every reachable
+    /// guest page-table page. A table write revokes the gate before reentry.
+    pub(crate) fn read_cached<C: VmContext>(ctx: &mut C) -> Result<Self, ExitError> {
+        let v = &ctx.state().vmcs;
+        let root = v.read_natural(VmcsFieldNatural::GuestCr3)?
+            & 0x000f_ffff_ffff_f000;
+        if !ctx.state().svm_guard.gate_ready
+            || ctx.state().svm_guard.gate_dirty
+            || ctx.state().svm_guard.gate_root != root
+        {
+            return Self::read(ctx);
+        }
+        let linear = v
+            .read_natural(VmcsFieldNatural::GuestRip)?
+            .wrapping_add(v.read_natural(VmcsFieldNatural::GuestCsBase)?);
+        let page = linear & !4095;
+        let physical = super::svm_batch::cached_code_translation(ctx, page)
+            .map(|address| GuestPhysAddr::new(address | (linear & 4095)))
+            .ok_or(ExitError::Fatal("SVM instruction address is not mapped"))?;
+        Self::read_at(ctx, linear, physical)
+    }
+
+    fn read_at<C: VmContext>(
+        ctx: &C,
+        linear: u64,
+        physical: GuestPhysAddr,
+    ) -> Result<Self, ExitError> {
         let length = (4096 - (linear & 4095) as usize).min(256);
         let mut window = Self {
             linear,
@@ -272,7 +302,7 @@ pub(crate) fn prepare_instruction_exit<
     if super::svm_interrupts::pending_event(ctx, allocator)? {
         return Ok(true);
     }
-    *window = InstructionWindow::read(ctx).ok();
+    *window = InstructionWindow::read_cached(ctx).ok();
     if let Some(window) = window.as_ref() {
         super::svm_batch::remember_page(ctx, window.linear);
     }

@@ -659,8 +659,13 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
 
 /// The table proof covers every reachable frame, so A/D updates cannot change
 /// these mappings. Only call after collect_translation_tree validates CR3.
-fn cached_code_translation<C: VmContext>(ctx: &mut C, linear: u64) -> Option<u64> {
-    if ctx.state().svm_guard.valid {
+pub(super) fn cached_code_translation<C: VmContext>(ctx: &mut C, linear: u64) -> Option<u64> {
+    let gate_guarded = ctx.state().svm_guard.gate_ready
+        && !ctx.state().svm_guard.gate_dirty
+        && ctx.state().svm_guard.gate_root
+            == (ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
+                & 0x000f_ffff_ffff_f000);
+    if ctx.state().svm_guard.valid || gate_guarded {
         let cache = &ctx.state().svm_guard;
         if let Some(&(_, physical)) = cache.translations[..cache.translation_count]
             .iter()
@@ -671,7 +676,7 @@ fn cached_code_translation<C: VmContext>(ctx: &mut C, linear: u64) -> Option<u64
     }
     let physical = super::svm::physical(ctx, linear).ok()?.as_u64() & !4095;
     let cache = &mut ctx.state_mut().svm_guard;
-    if cache.valid {
+    if cache.valid || gate_guarded {
         let slot = if cache.translation_count < cache.translations.len() {
             let slot = cache.translation_count;
             cache.translation_count += 1;
@@ -2837,6 +2842,35 @@ mod tests {
         assert!(third.pages[..third.code_page_count].contains(&0xa000));
         assert_eq!(ctx.state().svm_guard.root, 0x2000);
         assert_eq!(ctx.state().svm_guard.translation_count, 1);
+    }
+
+    #[test]
+    fn global_gate_instruction_fetch_rewalks_after_guard_revocation() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        ctx.state_mut().svm_guard.gate_ready = true;
+        let first = super::super::svm::InstructionWindow::read_cached(&mut ctx).unwrap();
+        assert_eq!(first.physical.as_u64(), 0x1000);
+        assert_eq!(ctx.state().svm_guard.translation_count, 1);
+
+        // A trapped page-table write makes the cached translation unusable.
+        ctx.memory[0x6008..0x6010].copy_from_slice(&0x9007u64.to_le_bytes());
+        ctx.memory[0x9000] = 0xcc;
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        let second = super::super::svm::InstructionWindow::read_cached(&mut ctx).unwrap();
+        assert_eq!(second.physical.as_u64(), 0x9000);
+        assert_eq!(second.bytes[0], 0xcc);
+
+        // A CR3 switch must not reuse a translation from the previous root.
+        ctx.state_mut().svm_guard.gate_dirty = false;
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x2000);
+        ctx.memory[0x2000..0x2008].copy_from_slice(&0x4007u64.to_le_bytes());
+        ctx.memory[0x6008..0x6010].copy_from_slice(&0xa007u64.to_le_bytes());
+        ctx.memory[0xa000] = 0x90;
+        let third = super::super::svm::InstructionWindow::read_cached(&mut ctx).unwrap();
+        assert_eq!(third.physical.as_u64(), 0xa000);
+        assert_eq!(third.bytes[0], 0x90);
     }
 
     #[test]

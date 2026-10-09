@@ -523,7 +523,7 @@ where
                 .ok().is_some_and(|qual| qual & super::super::traits::InstructionBatch::PAGE_SCALAR_REPLAY != 0)
         {
             ctx.state_mut().svm_gate_scalar_page =
-                super::super::exits::InstructionWindow::read(ctx).ok()
+                super::super::exits::InstructionWindow::read_cached(ctx).ok()
                     .map(|window| window.physical.as_u64() & !4095);
             // The boundary represents an unretired intercepted instruction.
             // Execute it once without preparing another global gate.
