@@ -230,6 +230,16 @@ Samples of the scalar fetch faults clustered on Linux's `memcpy`/`memmove`
 page (`0x1ed1000`) and `insn_decode` page (`0x1ecc000`), with the global
 page-table gate ready. This points to repeated execution of pages containing
 instruction hazards, rather than gate refresh or COW, as the main fault source.
+A separate scalar-entry profile used the current instruction's translated
+physical page rather than the retained fault marker. Of its first 300,000
+scalar entries, about 148,000 executed from low page `0x1000`, 79,000 from
+`0x1253000` (`apply_returns`), and 22,000 from `0x1252000`
+(`apply_alternatives`) in this Linux image. At one sampled low-page entry,
+RIP was `0x100b` under CR3 `0x3000`; by the final snapshot that page held
+page-table data. Only about 19,000 of the first 300,000 scalar steps retained
+the same RIP. The bulk of this boot's scalar work is therefore early code
+execution and patching, not repeated REP iterations on the previously sampled
+`memcpy` page.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
