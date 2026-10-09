@@ -339,8 +339,8 @@ smoke, transition, and benchmark suites. A nine-sample 1,024-pass memory run
 took 4.030 ms guest versus 3.974 ms native (1.01x, about 12 exits). To isolate a likely
 feature dependency, a box-local diagnostic build disabled ROGPT in both the
 VMCB and planner. With that feature disabled, the same workload took 12.346 ms
-guest versus 3.087 ms native (4.00x, about 5,140 exits, nine samples). Translation-write
-and replay correctness checks passed in that diagnostic build, but its native
+guest versus 3.087 ms native (4.00x, about 5,140 exits, nine samples).
+Its translation-write and replay correctness checks passed, but its native
 PUSHF acceleration assertion still failed. This is a feature ablation on a
 4245P, not a measurement on a 4244P; it does not establish why the earlier
 4244P run was 6,000x slower or meet the 5% goal on hosts without ROGPT.
@@ -352,6 +352,17 @@ Linux. A different, newer Linux 6.18 guest kernel reached its snapshot but
 spent over two minutes in a `delay_tsc` loop during the first fork. Those
 kernel artifacts are different workloads and must not be compared as an A/B
 performance result.
+On a subsequent EPYC 4245P box, the reference Linux guest booted and replayed
+two forks in 18.49 seconds with ROGPT enabled (1.16 million exits). On that
+same box and guest artifacts, disabling ROGPT took 213.45 seconds and 122.55
+million exits with the previous fallback. Allowing verified read-modify-write
+stores and decoding MOVSXD reduced the no-ROGPT run to 205.72 seconds and
+117.35 million exits; both no-ROGPT runs reached the same snapshot TSC and
+memory hash. About 117 million exits were still single steps. An early-boot
+opcode sample found direct CALL and RET at nearly half of scalar entries. The
+no-ROGPT functional suite passes with its PUSHF performance assertion replaced
+by a diagnostic: native PUSHF still exits once per iteration. Near-native AMD
+execution without ROGPT remains unfinished.
 On the EPYC 4244P box, the default `svm_bench` suite also fails its
 decoded-branch acceleration assertion: one case needs 40,131 exits with the global gate and
 20,029 without it, where the test requires fewer than 100. Its functional

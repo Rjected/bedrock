@@ -41,6 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "stores" {
         return test_paged_stores();
     }
+    if args.len() == 2 && args[1] == "rmw-stores" {
+        return test_read_modify_write_stores();
+    }
     let repeat_checkpoint = args.len() == 5 && args[4] == "repeat";
     if args.len() == 3 || args.len() == 4 || repeat_checkpoint {
         let target = args
@@ -72,13 +75,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | control-flow | rep | rep-proof | stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
+            "Usage: svm_bench [native | native-branches | control-flow | rep | rep-proof | stores | rmw-stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
                 .into(),
         );
     }
     test_repeat()?;
     test_rep_cached_code_write()?;
     test_paged_stores()?;
+    test_read_modify_write_stores()?;
     test_self_modifying()?;
     test_guarded_code_and_translation_writes()?;
     test_page_rng_breakpoints()?;
@@ -1053,6 +1057,66 @@ fn test_paged_stores() -> Result<(), Box<dyn std::error::Error>> {
     hash.write(vm.memory()?);
     assert_eq!(hash.finish(), parent_hash);
     println!("SVM_PAGED_STORE_DEADLINE_FORK_PASS");
+    Ok(())
+}
+
+fn test_read_modify_write_stores() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    let code = [
+        0x48, 0xff, 0x07, // inc qword [rdi]
+        0x48, 0x83, 0x6f, 8, 1, // sub qword [rdi+8],1
+        0x0f, 0x94, 0x47, 16, // sete byte [rdi+16]
+        0x0f, 0xb6, 0x5f, 16, // movzx ebx,byte [rdi+16]
+        0x0f, 0x01, 0xd9, // vmmcall
+    ];
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    vm.memory_mut()?[0x7000..0x7008].copy_from_slice(&1u64.to_le_bytes());
+    vm.memory_mut()?[0x7008..0x7010].copy_from_slice(&1u64.to_le_bytes());
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rdi = 0x7000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(2))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!((exit.exit_reason, exit.emulated_tsc), (259, 2));
+        assert_eq!(vm.get_regs()?.rip, 0x1008);
+        break;
+    }
+    assert_eq!(u64::from_le_bytes(vm.memory()?[0x7000..0x7008].try_into()?), 2);
+    assert_eq!(u64::from_le_bytes(vm.memory()?[0x7008..0x7010].try_into()?), 0);
+    assert_eq!(vm.memory()?[0x7010], 0);
+    vm.set_stop_at_tsc(None)?;
+    let parent = vm.memory()?.to_vec();
+    let mut results = Vec::new();
+    for reference in [false, true] {
+        let child = vm.fork()?;
+        if reference {
+            child.set_single_step_range(2, 4)?;
+        }
+        loop {
+            let exit = child.run()?;
+            if exit.exit_reason == 256 {
+                continue;
+            }
+            assert_eq!((exit.exit_reason, exit.emulated_tsc), (258, 4));
+            let registers = child.get_regs()?;
+            assert_eq!(registers.gprs.rbx, 1);
+            results.push((registers.rip, registers.rflags));
+            break;
+        }
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(vm.memory()?, parent.as_slice());
+    println!("SVM_RMW_STORE_DEADLINE_FORK_PASS");
     Ok(())
 }
 

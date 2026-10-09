@@ -81,6 +81,7 @@ fn safe_len(bytes: &[u8], long: bool, default32: bool) -> Option<(usize, bool, b
         }
         0xa8 => immediate = 1,       // TEST AL, imm8 does not write memory.
         0xa9 => immediate = operand, // TEST AX/EAX/RAX, imm16/imm32.
+        0x63 if long => modrm = true, // MOVSXD writes only its register destination.
         0xb0..=0xb7 => immediate = 1,
         0xb8..=0xbf => immediate = if long && rex & 8 != 0 { 8 } else { operand },
         0x00..=0x3d if op & 7 <= 3 => modrm = true,
@@ -299,6 +300,7 @@ fn modified_gprs(bytes: &[u8], long: bool) -> u16 {
         0x88 | 0x89 | 0xc6 | 0xc7 | 0xc0 | 0xc1 | 0xd0..=0xd3 | 0xfe | 0xff => {
             destination(matches!(op, 0x88 | 0xc6 | 0xc0 | 0xd0 | 0xd2 | 0xfe)).unwrap_or(u16::MAX)
         }
+        0x63 if long => register(false).unwrap_or(u16::MAX),
         0x8a | 0x8b | 0x8d | 0x69 | 0x6b => register(op == 0x8a).unwrap_or(u16::MAX),
         0x00..=0x35 if op & 7 <= 3 => if op & 2 == 0 {
             destination(op & 1 == 0)
@@ -319,8 +321,8 @@ fn modified_gprs(bytes: &[u8], long: bool) -> u16 {
     }
 }
 
-/// Address of a MOV store or PUSH whose address registers retain their entry
-/// values. Other stores and address/FS/GS overrides terminate the batch.
+/// Address of a single-destination store whose address registers retain their
+/// entry values. Other stores and address/FS/GS overrides terminate the batch.
 fn store_range(bytes: &[u8], rip: u64, gprs: &[u64; 16], changed: u16) -> Option<(u64, u64)> {
     let (p, rex, word) = opcode_start(bytes, true)?;
     if bytes[..p].iter().any(|b| matches!(b, 0x64 | 0x65 | 0x67)) {
@@ -334,10 +336,19 @@ fn store_range(bytes: &[u8], rip: u64, gprs: &[u64; 16], changed: u16) -> Option
         let width = if word && rex & 8 == 0 { 2 } else { 8 };
         return Some((gprs[4].checked_sub(width)?, width));
     }
-    if !matches!(op, 0x88 | 0x89 | 0xc6 | 0xc7) {
-        return None;
-    }
-    let width = if matches!(op, 0x88 | 0xc6) {
+    // Arithmetic and bit operations on memory have the same single write
+    // destination as MOV. Their prior read is safe once validate_store proves
+    // that earlier stores cannot change this destination's translation.
+    let byte = matches!(op, 0x88 | 0xc6 | 0x80 | 0xc0 | 0xd0 | 0xd2 | 0xfe | 0xf6)
+        || op < 0x38 && op & 7 == 0;
+    let modrm_index = match op {
+        0x88 | 0x89 | 0xc6 | 0xc7 | 0x80 | 0x81 | 0x83 | 0xc0 | 0xc1
+        | 0xd0..=0xd3 | 0xfe | 0xff | 0xf6 | 0xf7 => p + 1,
+        0x00..=0x37 if op & 7 <= 1 => p + 1,
+        0x0f if matches!(bytes.get(p + 1), Some(0x90..=0x9f)) => p + 2,
+        _ => return None,
+    };
+    let width = if byte || op == 0x0f {
         1
     } else if rex & 8 != 0 {
         8
@@ -346,12 +357,12 @@ fn store_range(bytes: &[u8], rip: u64, gprs: &[u64; 16], changed: u16) -> Option
     } else {
         4
     };
-    let m = *bytes.get(p + 1)?;
+    let m = *bytes.get(modrm_index)?;
     let mode = m >> 6;
     if mode == 3 {
         return None;
     }
-    let mut cursor = p + 2;
+    let mut cursor = modrm_index + 1;
     let mut address = 0u64;
     let mut registers = 0u16;
     let mut no_base = false;
@@ -2843,6 +2854,43 @@ mod tests {
         assert!(planned(&ctx).is_none());
         let ctx = paged_context(&[0x48, 0x89, 0x07, 0x48, 0x89, 0x47, 8, 0x75, 0xf7]);
         assert!(!planned(&ctx).unwrap().uses_counter);
+    }
+
+    #[test]
+    fn paged_read_modify_write_stores_use_validated_destinations() {
+        let code = [
+            0x48, 0x83, 0x07, 1, // add qword [rdi],1
+            0x48, 0xff, 0x07, // inc qword [rdi]
+            0x0f, 0x94, 0x47, 8, // sete byte [rdi+8]
+            0x0f, 0x01, 0xd9,
+        ];
+        let mut ctx = paged_context(&code);
+        let batch = planned(&ctx).unwrap();
+        assert_eq!(batch.count, 3);
+        assert!(batch.validated_stores && batch.writes_memory);
+        for destination in [0x1000, 0x3000, 0x6000] {
+            ctx.state_mut().gprs.rdi = destination;
+            assert!(planned(&ctx).is_none());
+        }
+        assert_eq!(store_range(&[0x48, 0x87, 0x07], 0x1000, &[0; 16], 0), None);
+    }
+
+    #[test]
+    fn movsxd_tracks_its_register_write_before_a_store() {
+        let ctx = paged_context(&[
+            0x48, 0x63, 0x07, // movsxd rax,dword [rdi]
+            0x48, 0x89, 0x47, 8, // mov [rdi+8],rax
+            0x0f, 0x01, 0xd9,
+        ]);
+        let batch = planned(&ctx).unwrap();
+        assert_eq!(batch.count, 2);
+        assert!(batch.validated_stores);
+        let ctx = paged_context(&[
+            0x48, 0x63, 0x3f, // movsxd rdi,dword [rdi]
+            0x48, 0x89, 0x07, // mov [rdi],rax: address changed
+            0x0f, 0x01, 0xd9,
+        ]);
+        assert!(planned(&ctx).is_none());
     }
 
     #[test]
