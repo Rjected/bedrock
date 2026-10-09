@@ -307,9 +307,13 @@ VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
 This backend requires SVM and nested paging.
 
-The hardware examples exercise instruction deadlines, fork isolation,
-controlled RDRAND/RDSEED, prefixed system-call transitions, interrupt flags,
-page-fault recovery, and IRET stack restoration:
+For one-hour remote AMD bare-metal boxes, use the
+[boxctl setup and test guide](contrib/BOXCTL_AMD.md).
+
+The following hardware examples run on the test host after its module is
+loaded. They exercise instruction deadlines, fork isolation, controlled
+RDRAND/RDSEED, prefixed system-call transitions, interrupt flags, page-fault
+recovery, and IRET stack restoration:
 
 ```sh
 cargo build --release -p bedrock-vm --examples

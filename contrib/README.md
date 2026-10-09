@@ -14,19 +14,6 @@ build or run the hypervisor; they're convenience tooling.
 Each script is self-documenting — run with `--help` or read the module
 docstring for usage.
 
-For AMD hardware tests, use a one-hour `boxctl` bare-metal box. The helper
-installs matching HWE packages on the box, switches it to Linux 7.0 with
-`kexec` when the stock image boots 6.8, syncs the current worktree, and runs
-the short SVM suites there. It loads no module on the local machine:
-
-```sh
-boxctl create box --name bedrock-amd-test --keep-alive 1h \
-  --plan m4-metal-small --region FRA --disable-job-agent --wait
-contrib/run-boxctl-svm.sh bedrock-amd-test
-boxctl delete box bedrock-amd-test
-```
-
-Test output is saved under `target/boxctl-evidence/bedrock-amd-test/` before
-the box is deleted. The box's running kernel must be 7.0.0-38-generic;
-installed HWE headers alone do not make the 6.8 kernel compatible with this
-module. The script keeps the box on failure for inspection until its TTL ends.
+For the one-hour AMD bare-metal test workflow, see [BOXCTL_AMD.md](BOXCTL_AMD.md).
+It covers box creation, HWE setup, repeated short tests, Linux integration,
+log collection, and cleanup without loading a module on the local machine.

@@ -1,0 +1,100 @@
+# AMD SVM testing with boxctl
+
+All Bedrock module builds, loads, and hardware tests in this workflow run on a
+disposable AMD bare-metal box. The workstation uses `boxctl`, SSH, rsync, and
+scp to manage it; it never loads a Bedrock module. A box created with the
+command below expires after one hour unless deleted sooner.
+
+## One-time local setup
+
+Install the [Tempo boxctl CLI](https://github.com/tempoxyz/boxctl) as described
+in its `USERGUIDE.md`, join the Tempo tailnet, and confirm that you can run
+`boxctl get boxes` and SSH to your boxes. The helper needs `ssh`, `scp`, and
+`rsync` locally. Add the CLI's install directory (for example `~/.local/bin` or
+`~/go/bin`) to `PATH` if necessary.
+
+Run the following from the Bedrock worktree whose current files you want to
+test. An uncommitted source edit is synced to the box just like a committed
+one. Only one remote run should use a given box at a time, because the helper
+reloads its Bedrock module.
+
+## Create and prepare a box
+
+```sh
+BOX=$(boxctl create box --keep-alive 1h --plan m4-metal-small \
+  --region FRA --disable-job-agent --wait -o name)
+echo "$BOX"
+contrib/run-boxctl-svm.sh prepare "$BOX"
+```
+
+`prepare` installs the Linux 7.0.0-38 HWE image, matching headers and Rust
+libraries, `rustc-1.91`, and build tools **inside the box**. The current
+Ubuntu 24.04 box image boots Linux 6.8 despite having the HWE image installed;
+`prepare` switches it to 7.0 with `kexec` and waits for SSH to return. It also
+installs the userspace Rust toolchain and checks for AMD `svm`, `npt`, and
+`perfctr_core` CPU flags. A matching header package alone cannot make a
+module load into a different running kernel.
+
+## Fast edit–test loop
+
+```sh
+contrib/run-boxctl-svm.sh test "$BOX"
+# Edit source locally, then run the same command again.
+contrib/run-boxctl-svm.sh test "$BOX"
+```
+
+`test` syncs the current worktree, builds `bedrock.ko` against the box's
+running HWE kernel, releases `kvm_amd` and `kvm` on the box, loads Bedrock
+there, and runs the smoke, transition, default SVM, native-loop, and branched
+native-loop examples. It skips package installation and rebooting on every
+repeat. A fresh box can run both phases with
+`contrib/run-boxctl-svm.sh all "$BOX"` (or just
+`contrib/run-boxctl-svm.sh "$BOX"`).
+
+Logs are copied to `target/boxctl-evidence/$BOX/`. If a build or test fails,
+the script still attempts to copy its logs and leaves the box available for
+inspection. The box can also be inspected with `boxctl ssh "$BOX"`. Its disk
+and any unsaved logs disappear when it expires.
+
+The native-loop example runs nine paired measurements and reports their
+median. These short timings still vary between invocations; repeat a run
+before treating a percentage as a performance result.
+
+## Linux boot and replay checks
+
+The quick loop does not build a guest Linux kernel. For the integration example,
+build or fetch the `svmGuestKernel` `vmlinux` and `svmGuestInitrd` artifacts
+described in the [AMD section of the main README](../README.md). A Nix-equipped
+builder can run `nix build .#svmGuestKernel .#svmGuestInitrd --no-link` and use
+`nix path-info` to locate the outputs. Put copies of both files on the
+workstation and set `VMLINUX` and `INITRD` to their paths before starting the
+one-hour hardware lease. Copy the files to the box, run `svm_linux` there,
+and keep its output in `/tmp` for `collect`:
+
+```sh
+scp "$VMLINUX" "ubuntu@$BOX:/home/ubuntu/bedrock-vmlinux"
+scp "$INITRD" "ubuntu@$BOX:/home/ubuntu/bedrock-initrd"
+ssh "ubuntu@$BOX" 'set -o pipefail; cd /home/ubuntu/bedrock && \
+  /home/ubuntu/.cargo/bin/cargo build --release -p bedrock-vm --example svm_linux && \
+  sudo timeout 1200 target/release/examples/svm_linux \
+    /home/ubuntu/bedrock-vmlinux /home/ubuntu/bedrock-initrd \
+    | tee /tmp/bedrock-linux.log'
+contrib/run-boxctl-svm.sh collect "$BOX"
+```
+
+Use `svm_bench` with the same two files for a bounded instruction
+checkpoint; the main README lists its deadline and replay arguments. The
+native-loop percentages from the quick loop measure only those loop programs,
+not Linux boot overhead.
+
+## Collect and delete
+
+```sh
+contrib/run-boxctl-svm.sh collect "$BOX"
+boxctl delete box "$BOX" --wait
+```
+
+`collect` can be run at any point while the box is reachable. Delete the box
+after collecting the evidence you need; the one-hour lifetime also destroys
+it automatically. On the workstation, do not run the repository's local
+`just load`, `modprobe`, `insmod`, or hardware test recipes.
