@@ -43,7 +43,6 @@ records to its own `/bedrock/assertions/<writer>.jsonl` file. Records include a
 `timestamp_unix_nano` and a message of `<signature>: <detail>`. Guest init
 forwards complete lines to the serial log; at the end of each seed, the guest
 merges all files by timestamp for the host's `assertions.jsonl` and verdict.
-The old `/bedrock/assertions.jsonl` path maps to `legacy.jsonl` in the directory.
 Control events go to `/bedrock/events.jsonl` (`{source, kind, container,
 guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 

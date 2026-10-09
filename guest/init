@@ -128,12 +128,9 @@ podman system reset -f 2>&1 | systemd-cat -t init || true
 # Set up loopback
 ip link set lo up | systemd-cat -t init 
 
-# Each assertion writer gets a JSONL file in this directory. Keep the old
-# single-file path as a hard link so existing workload images remain visible.
-# Pre-create both mounts before any containers start.
+# Each assertion writer gets a JSONL file in this directory. Create it before
+# any containers start so podman can bind-mount it.
 mkdir -p /bedrock/assertions
-: > /bedrock/assertions/legacy.jsonl
-ln -f /bedrock/assertions/legacy.jsonl /bedrock/assertions.jsonl
 
 # Coverage dir: a host-namespace mount bind-mounted into every container (see
 # containers.conf volumes). Each instrumented process keeps its feedback bitmap

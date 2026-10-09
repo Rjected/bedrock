@@ -348,8 +348,7 @@ let
 
     # Bind-mount shared host-namespace paths into every container podman
     # creates, without touching any compose file:
-    #   - the assertion directory, with one JSONL file per writer, plus the
-    #     legacy single-file path used by older workload images; and
+    #   - the assertion directory, with one JSONL file per writer; and
     #   - the coverage dir, where each instrumented process keeps its feedback
     #     bitmap as a file (see guest/libfeedback.c), so the pages outlive the
     #     container that produced them; and
@@ -363,7 +362,6 @@ let
     # auto-created path in its place.
     volumes = [
       "/bedrock/assertions:/bedrock/assertions",
-      "/bedrock/assertions.jsonl:/bedrock/assertions.jsonl",
       "/bedrock/coverage:/bedrock/coverage",
       "${threadFuzz}/bin/thread-fuzz:/usr/local/bin/thread-fuzz:ro",
     ]
