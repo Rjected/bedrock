@@ -276,6 +276,14 @@ snapshot TSC changed from 499,445,737 to 499,419,858 and the RAM hash
 changed. That variant is incorrect and was reverted. It confirms that
 removing IRET replay needs a precise retirement correction, not just a faster
 control path.
+On an EPYC 4245P (family 1Ah, model 44h), a box-only probe also enabled a
+second virtualized PMC for retired far control transfers while temporarily
+allowing native IRET. The counter reported a baseline event on entries with
+no guest far transfer, and the Linux guest failed during early boot with an
+event-vector error when IRET interception was removed. The small IRET
+transition test passed, so it was insufficient to establish exact accounting
+for a full guest. This probe was reverted; the regular boxctl suite passed
+again with IRET interception restored.
 An isolated Linux nested-page diagnostic saw no selected scalar page among
 the first 300,000 execute faults. These faults occur as native execution
 reaches untrusted code, so retaining a scalar page across scalar steps would
