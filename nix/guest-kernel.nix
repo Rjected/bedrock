@@ -69,6 +69,11 @@ let
     ./scripts/config --disable KVM
     ./scripts/config --disable KVM_INTEL
 
+    # The in-memory guest has no suspend image or swap device. Keeping the
+    # defconfig's hibernation path also leaves unresolved swsusp symbols in
+    # this kernel build.
+    ./scripts/config --disable HIBERNATION
+
     # Don't treat warnings as errors
     ./scripts/config --disable WERROR
 
