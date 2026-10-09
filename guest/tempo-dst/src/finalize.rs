@@ -4,10 +4,9 @@
 //!
 //! - stops the nemesis, load, and online oracle so shutdown isn't judged as a
 //!   fault;
-//! - E4: stops the node gracefully and re-executes `[1, head]` from its datadir
-//!   in a fresh container, which checks receipts, gas, and changesets against
-//!   what the node persisted.
-//! - E7: stops the reference node (if any) gracefully first.
+//! - E4: stops the node gracefully, checks its trie, then re-executes
+//!   `[1, head]` from its datadir in a fresh container.
+//! - E7: stops and checks the reference node (if any) first.
 
 use std::path::Path;
 use std::process::Command;
@@ -34,6 +33,25 @@ fn tail(text: &str, lines: usize) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
+fn repair_trie(image: &str, volume: &str, chain: &str, signature: &str) -> serde_json::Value {
+    let cmd = format!(
+        "podman run --rm --network none -v {volume}:/data --entrypoint /usr/local/bin/tempo {image} \
+         db --chain {chain} --datadir /data repair-trie --dry-run 2>&1"
+    );
+    let (ok, out) = sh(&cmd);
+    // repair-trie reports findings but exits successfully in dry-run mode.
+    let clean = ok
+        && out.contains("Found 0 inconsistencies (dry run - no changes made)")
+        && !out.contains("Inconsistency found:");
+    common::assert_always(
+        Condition::Bool(clean),
+        "finalize",
+        signature,
+        &tail(&out, 40),
+    );
+    json!({"ok": ok, "clean": clean, "output_tail": tail(&out, 200)})
+}
+
 pub fn run() {
     common::emit_event("driver", "finalize_start", None, json!({}));
     sh("pkill -f 'tempo-dst nemesis'; pkill -f 'tempo-dst oracle'");
@@ -53,7 +71,8 @@ pub fn run() {
         "podman inspect {NODE_CONTAINER} --format '{{{{range .Mounts}}}}{{{{if eq .Destination \"/data\"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}'"
     ));
     let (image, volume) = (image.trim().to_string(), volume.trim().to_string());
-    if Config::load().reference {
+    let chain = std::env::var("TEMPO_DST_CHAIN").unwrap_or_else(|_| "dev".into());
+    let reference = if Config::load().reference {
         let (stopped, out) = sh(&format!("podman stop -t 120 {REFERENCE_CONTAINER}"));
         common::assert_always(
             Condition::Bool(stopped),
@@ -61,7 +80,19 @@ pub fn run() {
             "E7/reference-graceful-stop",
             &tail(&out, 5),
         );
-    }
+        let (_, reference_image) = sh(&format!(
+            "podman inspect {REFERENCE_CONTAINER} --format '{{{{.ImageName}}}}'"
+        ));
+        let (_, reference_volume) = sh(&format!(
+            "podman inspect {REFERENCE_CONTAINER} --format '{{{{range .Mounts}}}}{{{{if eq .Destination \"/data\"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}'"
+        ));
+        Some((
+            reference_image.trim().to_owned(),
+            reference_volume.trim().to_owned(),
+        ))
+    } else {
+        None
+    };
     let (stopped, stop_out) = sh(&format!("podman stop -t 120 {NODE_CONTAINER}"));
     common::assert_always(
         Condition::Bool(stopped),
@@ -70,7 +101,10 @@ pub fn run() {
         &tail(&stop_out, 5),
     );
 
-    let chain = std::env::var("TEMPO_DST_CHAIN").unwrap_or_else(|_| "dev".into());
+    let reference_repair_trie = reference.map_or(json!(null), |(image, volume)| {
+        repair_trie(&image, &volume, &chain, "E7/reference-repair-trie")
+    });
+    let trie_repair = repair_trie(&image, &volume, &chain, "E4/repair-trie");
     let mut reexec = json!(null);
     if let Some(head) = head.filter(|h| *h > 1) {
         let cmd = format!(
@@ -94,6 +128,8 @@ pub fn run() {
         "image": image,
         "volume": volume,
         "stopped": stopped,
+        "repair_trie": trie_repair,
+        "reference_repair_trie": reference_repair_trie,
         "re_execute": reexec,
     });
     let _ = std::fs::create_dir_all(common::OUT_DIR);

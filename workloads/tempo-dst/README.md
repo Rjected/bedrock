@@ -70,8 +70,8 @@ guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 | `E7/reference-stalled` | `--reference`: the reference's head stays more than 32 blocks behind the primary's for `liveness_secs` while the primary is up (clock restarts at each primary restart) |
 | `E7/block-hash-differs`, `E7/state-root-differs` | `--reference`: at the highest block both nodes have, they disagree for `liveness_secs` (a crash may rebuild unfinalized blocks; the reference must reorg onto them), named by whether the state roots differ too; or the same header hash comes with different `stateRoot`s |
 | `E7/proof-differs` | `--reference --load trie`: on blocks both nodes agree on (new ones, plus E5/E6's depth sweep), RawStorage's `eth_getProof` `storageHash` and proven values, `eth_getMultiProof` `storageHash`, and `eth_getStorageAt` values are equal on both |
-| `E7/reference-graceful-stop` | `--reference`: the reference stops cleanly at the end of the run |
-| `E4/graceful-stop`, `E4/re-execute` | At the end of the run, the node stops cleanly, and `tempo re-execute` over `[1, head]` from its datadir agrees |
+| `E7/reference-graceful-stop`, `E7/reference-repair-trie` | `--reference`: the reference stops cleanly and `tempo db repair-trie --dry-run` finds no trie inconsistencies in its datadir |
+| `E4/graceful-stop`, `E4/repair-trie`, `E4/re-execute` | At the end of the run, the node stops cleanly, `tempo db repair-trie --dry-run` finds no trie inconsistencies in its datadir, and `tempo re-execute` over `[1, head]` agrees |
 | `container <name> exit code is zero` | workload-monitor: no unexplained container death |
 | `D/guest-exited` | The guest VM stopped mid-run (kernel panic, shutdown) |
 | `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed`, `S/load-included`, `S/trie-checked`, `S/trie-all-slots-live`, `S/chain-appended`, `S/chain-survived-restart`, `S/chain-history-reread` | Coverage (Sometimes): the fault, crash-recovery unwind, recovery, and load paths actually ran |
@@ -454,7 +454,7 @@ draft PR that names it.
 - [x] **E1** Log scanner over `journalctl CONTAINER_NAME=tempo` (survives restarts)
 - [x] **E2** Liveness
 - [x] **E3** Durability of finalized blocks across crash/restart (the `Saved range` frontier is not durable: reth unwinds to its state-trie frontier)
-- [x] **E4** Graceful stop + `tempo re-execute`. Verify on host that `--chain dev` matches the dev node's chain spec (override with `TEMPO_DST_CHAIN`)
+- [x] **E4** Graceful stop + trie repair dry run + `tempo re-execute`. Verify on host that `--chain dev` matches the dev node's chain spec (override with `TEMPO_DST_CHAIN`)
 - [ ] **E4b** Independent state-root check: rebuild the trie from the final state, separate from the sparse trie
 - [x] **E7** Reference-node differential oracle (`--reference`): a vanilla-flags follower re-executes every block; logs, lag, header/state-root and proof answers compared (`guest/tempo-dst/src/reference.rs`)
 - [ ] **E7b** First campaign with `--reference`; then consider defaulting it on
