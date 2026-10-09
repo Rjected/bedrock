@@ -454,47 +454,6 @@ where
         if batch.is_some() && guard.is_none() {
             batch = None;
         }
-        #[cfg(not(feature = "cargo"))]
-        if Ctx::V::uses_nested_paging() {
-            use core::sync::atomic::{AtomicU64, Ordering};
-            static ENTRIES: AtomicU64 = AtomicU64::new(0);
-            static GLOBAL: AtomicU64 = AtomicU64::new(0);
-            static PAGE: AtomicU64 = AtomicU64::new(0);
-            static REGION: AtomicU64 = AtomicU64::new(0);
-            static SCALAR: AtomicU64 = AtomicU64::new(0);
-            static STALE_TRUSTED: AtomicU64 = AtomicU64::new(0);
-            static TRUSTED_SAME: AtomicU64 = AtomicU64::new(0);
-            static TRUSTED_OTHER: AtomicU64 = AtomicU64::new(0);
-            let n = ENTRIES.fetch_add(1, Ordering::Relaxed) + 1;
-            if batch.as_ref().is_some_and(|b| b.global_execution) {
-                GLOBAL.fetch_add(1, Ordering::Relaxed);
-            } else if batch.as_ref().is_some_and(|b| b.page_execution) {
-                PAGE.fetch_add(1, Ordering::Relaxed);
-            } else if batch.is_some() {
-                REGION.fetch_add(1, Ordering::Relaxed);
-            } else if !software_exit {
-                SCALAR.fetch_add(1, Ordering::Relaxed);
-            }
-            if scalar_page.is_some() && instruction_window.as_ref().is_some_and(|window| {
-                ctx.state().ept.npt_trusted_code_4k(allocator,
-                    GuestPhysAddr::new(window.physical.as_u64() & !4095))
-            }) {
-                STALE_TRUSTED.fetch_add(1, Ordering::Relaxed);
-                if instruction_window.as_ref().is_some_and(|window|
-                    Some(window.physical.as_u64() & !4095) == scalar_page) {
-                    TRUSTED_SAME.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    TRUSTED_OTHER.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            if n % 100_000 == 0 {
-                log_err!("SVM gate mode entries={} global={} page={} region={} scalar={} trusted={} same={} other={}", n,
-                    GLOBAL.load(Ordering::Relaxed), PAGE.load(Ordering::Relaxed),
-                    REGION.load(Ordering::Relaxed), SCALAR.load(Ordering::Relaxed),
-                    STALE_TRUSTED.load(Ordering::Relaxed), TRUSTED_SAME.load(Ordering::Relaxed),
-                    TRUSTED_OTHER.load(Ordering::Relaxed));
-            }
-        }
         if Ctx::V::uses_nested_paging() {
             super::super::exits::retain_translation_cache(
                 ctx,
