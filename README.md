@@ -252,9 +252,15 @@ first million global-gate planning attempts included about 537,000 successes;
 about 270,000 fallback bounded plans succeeded and cost roughly 1.56 billion
 host cycles to prepare. Temporarily allowing one recent hazardous page during
 otherwise trusted global batches passed replay checks but slowed the Linux
-five-run median from 2.93 to 3.14 seconds, so it was reverted. Keeping a page
-plan's tree-generation key stable while reusing an unchanged global table tree
-also passed checks but did not improve the median (2.902 versus 2.904 seconds);
+five-run median from 2.93 to 3.14 seconds, so it was reverted. Limiting this
+promotion to a short window after the page was last executed also failed: a
+one-entry window removed about 4,000 Linux exits without a clear speedup,
+while a four-entry window
+removed about 10,000 exits but raised VM-entry preparation by about 0.5 billion
+cycles and slowed the five-run median to 2.93 seconds. Both were reverted.
+Keeping a page plan's tree-generation key stable while reusing an unchanged
+global table tree also passed checks but did not improve the median (2.902
+versus 2.904 seconds);
 it was reverted. The next optimization needs to reduce the number or cost of
 bounded page plans without adding per-entry byte checks or breakpoint setup.
 A single-page plan reuse probe under the global table guard found only 307
