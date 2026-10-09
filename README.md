@@ -218,6 +218,18 @@ stepped reference required 10,004. Thus the tempting exit reduction is not a
 valid deterministic backend; both unsafe probes were reverted. A viable
 solution must trap or account for REP iterations at every executable alias
 and preserve mid-REP deadline behavior.
+A safe negative-cache experiment compared rejected code pages only every 256th
+visit, with immediate invalidation for host writes. It passed unit and hardware
+tests, including Linux replay, but its five-run median was 2.885 seconds,
+identical to the same-box baseline; it was reverted. On this Linux image, the
+hot `memcpy` page has four REP hazard-entry offsets (`0x5cc`, `0x7c1`, `0x7e8`,
+`0x8ff`). A guarded global batch can cover them with all four hardware
+breakpoints when its current translation tree exposes one executable alias,
+but those breakpoints are available only for that batch. Retaining the page's
+execute permission across other batches requires persistent hazard traps and
+coordination with their own breakpoint slots. The tested EPYC 4245P advertises
+[AMD's 32-bit instruction-breakpoint address-mask extension](https://docs.amd.com/api/khub/documents/sD1_QL~h4Afq2_tvzxqqSQ/content), but combining
+these four offset values into two masks would trap many additional positions.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.
