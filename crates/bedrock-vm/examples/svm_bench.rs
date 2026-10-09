@@ -1431,7 +1431,8 @@ fn test_decoded_branch_exits() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     if !reference {
-                        assert!(vm.get_exit_stats()?.total_exit_count() < 100);
+                        let exits = vm.get_exit_stats()?.total_exit_count();
+                        assert!(exits < 100, "control-flow acceleration used {exits} exits");
                     }
                 }
                 assert_eq!(results[0], results[1]);

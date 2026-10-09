@@ -56,9 +56,31 @@ the script still attempts to copy its logs and leaves the box available for
 inspection. The box can also be inspected with `boxctl ssh "$BOX"`. Its disk
 and any unsaved logs disappear when it expires.
 
+The current experimental global-gate branch has an outstanding decoded-branch
+performance assertion on the `m4-metal-small` box; see the AMD status in the
+[main README](../README.md). `test` returns nonzero for that failure while the
+box remains available for focused benchmarks and debugging.
+
 The native-loop example runs nine paired measurements and reports their
 median. These short timings still vary between invocations; repeat a run
 before treating a percentage as a performance result.
+
+For a memory-writing workload, build and run `svm_workload` on the box. It
+executes identical assembly natively and in a guest, and checks every output
+word. The 512-round run takes roughly ten seconds per guest sample on the
+current AMD branch:
+
+```sh
+ssh "ubuntu@$BOX" 'cd /home/ubuntu/bedrock && \
+  /home/ubuntu/.cargo/bin/cargo build --release -p bedrock-vm --example svm_workload && \
+  sudo timeout 90 taskset -c 1 target/release/examples/svm_workload 512 3 \
+    > /tmp/bedrock-workload.log 2>&1'
+contrib/run-boxctl-svm.sh collect "$BOX"
+```
+
+Its `instructions` and `seconds` fields give a measured instruction rate;
+CPU GHz and instructions per second are different units. The sample also
+reports VM exits and the native-to-guest slowdown.
 
 ## Linux boot and replay checks
 

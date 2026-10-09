@@ -315,6 +315,23 @@ exits, while the pre-gate branch took 17.48 and 17.49 seconds with about
 584,000 nested-page violations versus 8,500 before it. It is currently a
 Linux performance regression, despite near-native results for the narrow
 register-loop benchmark.
+The `svm_workload` example runs the exact same memory-writing integer routine
+natively and in a long-mode guest, checking the checksum and every output word.
+On the same box, 512 passes over 32 KiB retired 18.88 million guest instructions
+in 10.35 seconds, versus 1.71 ms natively: about 6,064 times slower. About
+4.196 million of its 4.203 million VM exits were single steps. That is 1.82
+million instructions per second in the guest versus 11.1 billion natively;
+these are instruction rates, not CPU clock frequencies. The pre-gate AMD branch
+took 9.59 seconds for the same guest work. The mode counter recorded no
+global-gate entries for this workload. It is still well outside the 5%
+native-overhead goal and exposes the unaccelerated path for memory-reading
+and writing loops. A 1,024-pass run gave 20.34 seconds guest versus
+3.35 ms native, a similar 6,076-fold slowdown.
+On this box, the default `svm_bench` suite also fails its decoded-branch
+acceleration assertion: one case needs 40,131 exits with the global gate and
+20,029 without it, where the test requires fewer than 100. Its functional
+branch result matched the stepped reference, but this host's acceleration
+failure remains unresolved.
 This backend requires SVM and nested paging.
 
 For one-hour remote AMD bare-metal boxes, use the
@@ -337,6 +354,8 @@ sudo timeout 15 target/release/examples/svm_bench control-flow
 sudo timeout 10 target/release/examples/svm_bench rep-proof
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native
 sudo timeout 15 taskset -c 1 target/release/examples/svm_bench native-branches
+cargo build --release -p bedrock-vm --example svm_workload
+sudo timeout 90 taskset -c 1 target/release/examples/svm_workload 512 3
 ```
 
 The `native` comparison runs the same register-only loop natively and in a
