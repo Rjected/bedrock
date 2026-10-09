@@ -39,7 +39,7 @@ pub use qualifications::{
 pub use reasons::ExitReason;
 pub(crate) use svm::prepare_instruction_exit;
 pub(crate) use svm_batch::prepare as prepare_instruction_batch;
-pub(crate) use svm_batch::{prepare_global, refresh_global_tree};
+pub(crate) use svm_batch::{bounded_repeat_entry, prepare_global, refresh_global_tree};
 pub(crate) use svm_batch::protect as protect_instruction_batch;
 pub use vmcall::{
     FB_ERR_BAD_ID_LEN, FB_ERR_BAD_SIZE, FB_ERR_BUFFER_NOT_RESIDENT, FB_ERR_ID_NOT_RESIDENT,

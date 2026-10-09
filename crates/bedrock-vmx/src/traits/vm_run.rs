@@ -484,12 +484,15 @@ where
             && ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
                 .ok().is_some_and(|qual| qual & super::super::traits::InstructionBatch::PAGE_SCALAR_REPLAY != 0)
         {
-            ctx.state_mut().svm_gate_scalar_page =
-                super::super::exits::InstructionWindow::read_cached(ctx).ok()
-                    .map(|window| window.physical.as_u64() & !4095);
-            // The boundary represents an unretired intercepted instruction.
-            // Execute it once without preparing another global gate.
-            force_single_step = true;
+            let window = super::super::exits::InstructionWindow::read_cached(ctx).ok();
+            ctx.state_mut().svm_gate_scalar_page = window.as_ref()
+                .map(|window| window.physical.as_u64() & !4095);
+            // A recognized REP can use its validated, deadline-bounded batch
+            // after the hazard breakpoint. Other intercepted instructions
+            // still replay once without preparing another global gate.
+            force_single_step = !window.as_ref().is_some_and(|window| {
+                super::super::exits::bounded_repeat_entry(&window.bytes)
+            });
         }
         if let Some(guard) = guard {
             if guard.restore(ctx, allocator) && run_result.is_ok() {

@@ -205,6 +205,10 @@ fn repeat_len(bytes: &[u8]) -> Option<usize> {
     }
 }
 
+pub(crate) fn bounded_repeat_entry(bytes: &[u8]) -> bool {
+    repeat_len(bytes).is_some()
+}
+
 fn relative_branch(bytes: &[u8], long: bool, default32: bool) -> Option<(usize, i64)> {
     // Linux return thunks commonly use CS:JMP (2e e9). The segment prefix
     // does not change a relative branch target in long mode.

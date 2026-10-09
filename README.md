@@ -96,6 +96,10 @@ REP entry points bypass whole-page execution, which would stop immediately at
 the string-instruction breakpoint and fall back to one scalar iteration. They
 instead use the validated, deadline-bounded native chunk directly. A 10,000-byte
 REP copy completes in seven exits on the validation host.
+When a global gate does stop at a REP hazard breakpoint, its unretired
+instruction can also enter that bounded chunk after the boundary instead of
+forcing one scalar iteration. If the chunk cannot be proved, scalar execution
+remains the fallback.
 Control-flow acceleration requires AMD PerfMonV2, PMC virtualization, virtual
 NMI, and IRPERF enabled by the host kernel; unavailable features or a failed
 perf counter reservation disable it. VMRUN saves and restores the host's
@@ -256,6 +260,16 @@ fewer). The snapshot count and RAM hash matched in every run, and a fresh
 two-root replay passed. Wall-time medians were 2.77 seconds in the three-run
 control and 2.80 seconds in the modified runs, so this change has not shown a
 Linux wall-time improvement despite reducing exits.
+The global-gate REP handoff then removed a further roughly 9,800 exits on the
+same box: the three-run control median was 853,322 exits, and six modified
+runs had a median of about 843,500. Three-run wall-time medians were 2.77
+seconds for the control and 2.71 and 2.75 seconds in two modified passes;
+these short timings remain noisy. An isolated diagnostic observed more than
+8,000 REP hazard handoffs in the Linux run and a validated chunk on nearly
+every one, mostly at `memcpy_fromio`. The snapshot count and RAM hash matched
+in every A/B run. The full suite, including the REP exact-deadline regression,
+passed; an earlier unsafe experiment that made whole REP pages executable
+failed that regression.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
