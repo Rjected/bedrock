@@ -6,6 +6,11 @@ own branch from a warm checkpoint, with different perturbations:
 
 - **Thread schedules**: the node runs under `thread-fuzz` (sched_ext
   concurrency-fuzz), so the schedule is drawn from Bedrock's getrandom stream.
+  A seccomp filter keeps every node thread in SCHED_EXT: reth's
+  `deprioritize_background_threads` asks for SCHED_IDLE and gets EPERM, since a
+  thread that left sched_ext would run in the fair class ahead of every other
+  node thread and could starve them all. Set `THREAD_FUZZ_SECCOMP=0` in the
+  node's environment to turn the filter off for debugging.
 - **Crash/restart**: `tempo-dst nemesis` SIGKILLs and restarts the node at
   seed-derived times.
 - **Load**: the pinned txgen image sends pathUSD transfers (fixed seed 99).
