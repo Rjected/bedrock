@@ -2488,6 +2488,10 @@ fn prepare_verified<C: VmContext>(
         }
     }
     let mut changed = 0u16;
+    // Consecutive PUSH instructions have a predictable stack destination
+    // even though each one changes RSP. Stop tracking after any other RSP
+    // write, so an unknown adjustment cannot enter the store proof.
+    let mut stack_push_bytes = Some(0u64);
     let mut stores = StorePlan::default();
     let mut offset = 0;
     let mut branch_targets = [0i64; 64];
@@ -2568,6 +2572,13 @@ fn prepare_verified<C: VmContext>(
         else {
             break;
         };
+        let instruction = &bytes[offset..offset + length];
+        let modified = modified_gprs(instruction, long);
+        let push = writes
+            && modified & (1 << 4) != 0
+            && opcode_start(instruction, long)
+                .is_some_and(|(prefix, _, _)| matches!(instruction[prefix], 0x50..=0x57));
+        let mut validated_push_width = None;
         if paged && batch.writes_memory && memory && !writes && !allow_guarded_stores {
             // A prior store may have rewritten this load's PTE. End the
             // batch and flush translations before executing the load.
@@ -2586,9 +2597,23 @@ fn prepare_verified<C: VmContext>(
                 if !long || (batch.uses_counter && !batch.counter_bounded) {
                     break;
                 }
-                let instruction = &bytes[offset..offset + length];
-                let Some((start, width)) =
-                    store_range(instruction, rip + offset as u64, &gprs, changed)
+                let stack_depth = if push { stack_push_bytes } else { None };
+                let store_changed = if stack_depth.is_some() {
+                    changed & !(1 << 4)
+                } else {
+                    changed
+                };
+                let Some((start, width)) = store_range(
+                    instruction,
+                    rip + offset as u64,
+                    &gprs,
+                    store_changed,
+                )
+                .and_then(|(start, width)| {
+                    start
+                        .checked_sub(stack_depth.unwrap_or(0))
+                        .map(|start| (start, width))
+                })
                 else {
                     break;
                 };
@@ -2596,10 +2621,18 @@ fn prepare_verified<C: VmContext>(
                 if validate_store(ctx, &batch, &mut stores, start, width).is_none() {
                     break;
                 }
+                if push {
+                    validated_push_width = Some(width);
+                }
                 batch.validated_stores = true;
             }
         }
-        changed |= modified_gprs(&bytes[offset..offset + length], long);
+        if modified & (1 << 4) != 0 {
+            stack_push_bytes = stack_push_bytes
+                .zip(validated_push_width)
+                .and_then(|(depth, width)| depth.checked_add(width));
+        }
+        changed |= modified;
         offset += length;
         batch.accesses_memory |= memory;
         batch.writes_memory |= writes;
@@ -2998,6 +3031,27 @@ mod tests {
     fn planned(ctx: &MockVmContext) -> Option<InstructionBatch> {
         let window = super::super::svm::InstructionWindow::read(ctx).unwrap();
         prepare_verified(ctx, true, false, false, &window)
+    }
+
+    #[test]
+    fn consecutive_pushes_use_the_updated_stack_destination() {
+        let code = [0x41, 0x55, 0x41, 0x54, 0x53, 0x0f, 0x01, 0xd9];
+        let ctx = paged_context(&code);
+        let batch = planned(&ctx).unwrap();
+        assert_eq!(batch.count, 3);
+        assert!(batch.validated_stores && !batch.uses_counter);
+        assert_eq!(batch.endpoint(), 0x1005);
+
+        // A stack write into the active translation tree cannot share this
+        // exact batch, even when later PUSH destinations are predictable.
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestRsp, 0x3010);
+        assert!(!planned(&ctx).is_some_and(|batch| batch.count >= 3));
+
+        let changed_rsp = paged_context(&[
+            0x53, 0x48, 0x83, 0xec, 0x10, 0x55, 0x0f, 0x01, 0xd9,
+        ]);
+        assert!(!planned(&changed_rsp).is_some_and(|batch| batch.count >= 3));
     }
 
     #[test]

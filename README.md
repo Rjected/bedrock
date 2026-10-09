@@ -230,26 +230,32 @@ Samples of the scalar fetch faults clustered on Linux's `memcpy`/`memmove`
 page (`0x1ed1000`) and `insn_decode` page (`0x1ecc000`), with the global
 page-table gate ready. This points to repeated execution of pages containing
 instruction hazards, rather than gate refresh or COW, as the main fault source.
-A separate scalar-entry profile used the current instruction's translated
-physical page rather than the retained fault marker. Of its first 300,000
-scalar entries, about 148,000 executed from low page `0x1000`, 79,000 from
-`0x1253000` (`apply_returns`), and 22,000 from `0x1252000`
-(`apply_alternatives`) in this Linux image. At one sampled low-page entry,
-RIP was `0x100b` under CR3 `0x3000`; by the final snapshot that page held
-page-table data. Only about 19,000 of the first 300,000 scalar steps retained
-the same RIP. The bulk of this boot's scalar work is therefore early code
-execution and patching, not repeated REP iterations on the previously sampled
-`memcpy` page.
-Follow-up traces on the same box found that the planner rejects low page
-`0x1000` because its full-page scan finds more than four hazardous entry
-offsets, exceeding the available hardware breakpoint slots. A sampled
-`apply_returns` run had `force_single_step` set on 49,972 of 50,000 scalar
-entries on page `0x1253000`. The low page changes contents during boot: a
-sampled `dec rcx; jnz` branches from `0x1005` back to `0x1000`, while other
-samples show different bytes at `0x1005`. A narrow counted-loop experiment
-that assumed a loop starting at `0x1005` did not match the live loop and did
-not reduce exits (about 883,000); it was reverted. Any fast path here needs
-to prove the actual branch target and account for the page's changing bytes.
+A previous scalar-entry profile was contaminated by the boxctl test suite,
+which ran before Linux without resetting module counters. Its roughly 148,000
+entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
+single-step window, not Linux boot. That page exceeded the four-breakpoint
+whole-page hazard capacity, but a counted-loop experiment there did not
+improve Linux exits and was reverted. The earlier low-page attribution and
+conclusion about Linux's scalar work were incorrect.
+An isolated Linux run after reloading the module sampled every 1,000th scalar
+entry: among 271 samples, 79 were on physical page `0x1253000` (including
+`apply_returns`), 30 on `0x129a000` (`note_page`), 23 on `0x1252000`
+(`text_poke_early`/`apply_alternatives`), 18 on `0x1545000`, and 17 on
+`0x143c000`; none were on `0x1000`. 139 samples had a forced step pending.
+On `0x1253000`, 49,968 of 50,000 scalar entries followed a global-gate
+replay boundary, versus three following a write guard. The most frequent RIP
+there was `iretq` in `apply_returns`; other repeated sites included `iretq`
+in early text patching and `REP MOVS` in `memcpy_fromio`. The temporary
+per-sample kernel logging slowed that diagnostic boot, so it is a hotspot
+profile rather than a wall-time benchmark.
+The bounded planner now validates consecutive `PUSH` destinations against
+the progressively decremented stack pointer. It still stops after any other
+RSP write. On the same EPYC 4245P box, the three-run control had a median
+880,928 Linux exits versus roughly 852,500 across nine modified runs (3.2%
+fewer). The snapshot count and RAM hash matched in every run, and a fresh
+two-root replay passed. Wall-time medians were 2.77 seconds in the three-run
+control and 2.80 seconds in the modified runs, so this change has not shown a
+Linux wall-time improvement despite reducing exits.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.

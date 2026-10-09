@@ -124,6 +124,19 @@ checkpoint; the main README lists its deadline and replay arguments. The
 native-loop percentages from the quick loop measure only those loop programs,
 not Linux boot overhead.
 
+For isolated kernel-module diagnostic counters, reload the module **inside
+the box** after the quick suite and before the Linux run:
+
+```sh
+ssh "ubuntu@$BOX" 'cd /home/ubuntu/bedrock && \
+  sudo rmmod bedrock && sudo insmod crates/bedrock/bedrock.ko && sudo dmesg -C'
+```
+
+The quick suite includes deliberate single-step windows. Its module counters
+persist into a later Linux run unless the module is reloaded, and old `dmesg`
+lines persist unless the log is cleared. Neither operation runs on the
+workstation.
+
 ## Collect and delete
 
 ```sh
