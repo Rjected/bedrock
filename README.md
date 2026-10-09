@@ -168,11 +168,18 @@ remains valid; revoking that proof or changing CR3 rebuilds the cache.
 Code-page hazard scans can survive proof invalidation through an exact-byte
 cache. All 4KB are compared before reusing a scan; changed bytes are rescanned.
 The 64-page byte cache adds approximately 256KB to each VM's heap workspace.
-Page execution requires more than 512 instructions before the next deadline.
+Page execution requires more than 256 instructions before the next deadline.
 The largest observed PMC overflow lag was 135 retired instructions in a
 200-million-TSC checkpoint and a complete boot on the validation host. The
 margin is not a calibrated bound for every AMD processor; a late exit fails
 closed rather than returning an incorrect instruction count.
+On a boxctl EPYC 4245P, reducing the margin from 512 to 256 cut pinned Linux
+boot-and-fork replay's five-run median from 3.40 to 2.85 seconds, with the same
+snapshot instruction count and RAM hash. Sixteen further full runs and fresh
+replays matched. Also, 256 accelerated forks matched an instruction-stepped
+reference at ten checkpoints
+from 8.00 to 8.10 million instructions and 64 forks at ten checkpoints from
+100.00 to 100.10 million instructions.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.

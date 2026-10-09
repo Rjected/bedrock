@@ -256,7 +256,7 @@ impl InstructionBatch {
     // delivery before an exact deadline, then fail closed if one arrives late.
     // The validation host's largest observed lag was 135 retired instructions
     // over a 200M-TSC checkpoint and a complete Linux boot.
-    pub const COUNTER_DEADLINE_MARGIN: u64 = 512;
+    pub const COUNTER_DEADLINE_MARGIN: u64 = 256;
 
     pub fn counter_period(&self) -> u64 {
         if self.counter_bounded {
