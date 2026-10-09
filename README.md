@@ -300,6 +300,18 @@ because the page also contains these hazardous instructions. The diagnostic
 boot preserved the expected snapshot TSC and RAM hash; its counters were
 removed after profiling. Faster handling of protected page-table writes
 alone cannot remove the dominant exit source on this guest image.
+An exact-breakpoint trial also let the `memcpy` page execute during counted
+global regions, guarded its bytes, and armed breakpoints for every hazardous
+alias. The boxctl suite and Linux replay passed, and one Linux run had about
+22,000 fewer exits, but VM-entry preparation rose from roughly 4.8 to 6.2
+billion cycles and wall time from roughly 2.8 to 3.24 seconds. It was reverted.
+Separate temporary entry-stage counters found batch planning to be the largest
+measured preparation stage. A per-code-page revision cache for bounded plans
+passed the suite and Linux replay, but nine same-box Linux runs had medians
+of 2.732 seconds with the change and 2.755 seconds without it, with heavily
+overlapping runs. The added proof state and logic were discarded. The hot
+faulting pages and the expensive bounded-plan pages were different; reducing
+faults or planner work in isolation has not yet delivered the general target.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
