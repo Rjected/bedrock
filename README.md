@@ -198,13 +198,15 @@ guest-visible XCR0 semantics and were reverted. They bound the benefit of
 FPU-switch optimization on this workload; reducing VM exits remains necessary.
 On an EPYC 4245P box, using XSAVEOPT only for the guest image immediately
 following XRSTOR of that same image reduced a five-run Linux boot/fork median
-from 2.98 to 2.87 seconds in one same-box A/B run (an earlier comparison was
-2.89 versus 2.85 seconds). The host image still uses full XSAVE, and CPUs
+from 2.885 to 2.867 seconds in a fresh same-box A/B run, saving about 49
+million VM runner cycles (0.6% wall time). Earlier comparisons showed larger
+but variable gains. Extending XSAVEOPT to the host image passed the FPU test
+but did not improve this workload, so the host image still uses full XSAVE. CPUs
 without XSAVEOPT keep the original guest save. Each guest image receives a
 full XSAVE before XSAVEOPT, repeated after guest XCR0 changes. A hardware test
-preserves an XMM value across a VM exit and two forks; the Linux snapshot and
-RAM hash matched in all measured runs. This is a modest entry-cost improvement, not a
-solution to the repeated execute faults.
+preserves a guest XMM value and a host x87 value across VM exits and two forks;
+the Linux snapshot and RAM hash matched in all measured runs. This is a modest
+entry-cost improvement, not a solution to the repeated execute faults.
 A boxctl EPYC 4245P profile classified the first 350,000 nested-page faults
 in the Linux boot/fork run: 326,702 (93.3%) selected scalar execution on an
 untrusted code page, 18,464 released a page-table write guard, 3,587 trusted a

@@ -172,6 +172,9 @@ fn test_guest_xmm_across_entries() -> Result<(), Box<dyn std::error::Error>> {
     regs.gprs.rdi = 0x7000;
     vm.set_regs(&regs)?;
     vm.set_stop_at_tsc(Some(2))?;
+    // x87 is not used by the Rust run path. Keep a host value live across
+    // repeated ioctls while the guest changes its own XMM state.
+    unsafe { core::arch::asm!("fninit", "fld1") };
     loop {
         let exit = vm.run()?;
         if exit.exit_reason == 256 {
@@ -206,6 +209,11 @@ fn test_guest_xmm_across_entries() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(&vm.memory()?[0x7000..0x7004], &0x12345678u32.to_le_bytes());
         break;
     }
+    let mut host_x87 = 0f64;
+    unsafe {
+        core::arch::asm!("fstp qword ptr [{out}]", out = in(reg) &mut host_x87);
+    }
+    assert_eq!(host_x87, 1.0);
     println!("SVM_GUEST_XMM_PERSISTENCE_PASS");
     Ok(())
 }
