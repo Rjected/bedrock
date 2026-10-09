@@ -275,6 +275,14 @@ is a roughly 4.5% improvement to Linux runtime, while the broader near-native
 goal remains unmet. As with the existing globally trusted code path, direct
 userspace writes through a RAM mapping must occur between RUN calls; writes
 performed by Bedrock while RUN is active invalidate the cached proof.
+Revisiting the masked-breakpoint hot-page probe with these guarded scans still
+failed to improve Linux runtime. Promoting both pages from trusted entries
+made about 699,000 exits but a six-run median of 2.82 seconds, with entry
+preparation rising to roughly 5.4-5.9 billion cycles. Restricting promotion
+to starts on either hot page made about 771,000 exits and a 2.66-second
+median, effectively equal to the guarded-cache baseline. Both hardcoded
+probes were reverted. The remaining cost lies in arming and protecting the
+promoted pages on each entry, not only in revalidating their bytes.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
