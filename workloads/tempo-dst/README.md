@@ -17,7 +17,9 @@ own branch from a warm checkpoint, with different perturbations:
   boot when any seed would use it.
 
 Every branch is a pure function of its seed, so a failure replays exactly:
-`bedrock-dst replay <out>/seed-N`. Each seed's swarm record
+`bedrock-dst replay <out>/seed-N`. Each seed also records its inputs and
+decisions, so it replays without re-deriving anything from the seed (see
+[Trace replay](#trace-replay)). Each seed's swarm record
 (`{"preempt": {"period", "seed"}, "load", "reference", "nemesis"}`) is under
 `"swarm"` in its `config.json`, `verdict.json` and `summary.json` entry, so
 failures can be grouped by feature (`regressions/hunt.sh` prints that table).
@@ -196,6 +198,95 @@ bedrock-dst replay dst-out/seed-3
 
 Results: `dst-out/summary.json`, plus a `verdict.json` per seed.
 
+## Trace replay
+
+A seed is a compressed run: a numeric seed only reproduces a run while the
+code that turns seeds into inputs stays the same. Each seed directory
+therefore also keeps what the run actually consumed and decided, in two
+complementary forms (the rr/Hypothesis/Jepsen split: an exact input tape,
+plus a human-readable decision file):
+
+| File | Holds | Replays with |
+|---|---|---|
+| `tape.bin` | every randomness value Bedrock served the branch (RDRAND, RDSEED, getrandom, with the requesting pid) and every host action (`tempo-dst start/finalize`, artifact fetches) with its virtual time | `bedrock-dst replay --tape <out>/seed-N` |
+| `scenario.json` | every harness decision by value: swarm record (preemption period and seed, load, reference, nemesis), nemesis kill plan, per-load-generation `txgen_seed`/`spec_seed`, run parameters, and what the guest reported (`observed`: plan event, per-generation spec keccak256 and trie slots). A `meaning` map documents each field | `bedrock-dst replay --scenario <out>/seed-N` |
+| `manifest.json` | what the tape is tied to: sha256 of vmlinux, initrd, images.tar and compose file, image tags/config digests/labels from images.tar, `bedrock.ko` srcversion and file sha256 (`$BEDROCK_KO` or `modinfo`), TSC frequency, boot seed, warm-checkpoint and branch-end virtual time, campaign args, `--build-info KEY=VALUE` pairs (e.g. Tempo/reth revisions), tape sha256 and per-consumer draw counts | checked by `replay --tape` |
+
+**Tape format** (`bedrock_lab::Tape`, version 1, little-endian): magic
+`BDRKTAPE`, version, flags, body length, body, FNV-1a checksum. The body is
+the TSC frequency, start/end virtual time, then the randomness inputs
+(`at`, source, pid, bytes) and the I/O inputs (`at`, target, command,
+record_output). Readers reject other magics, newer versions, truncation and
+checksum mismatches. `InputRecording`, `Tape` and friends also derive serde
+(bedrock-lab feature `serde`) for JSON dumps.
+
+Branches get the seed's RNG stream from the driver (`bedrock_lab::SeededSource`:
+the hypervisor's xorshift64 values and getrandom fill, byte for byte), so
+every draw exits to userspace, exactly as it does when a tape replays. Serving
+it in-kernel (`Branch::reseed_rng`, `--kernel-rng`, what older campaigns
+did) can be recorded too (`Branch::set_record_inputs`: the hypervisor emits a
+`Randomness` record in seeded mode as well), but does not replay exactly: the
+in-kernel path completes a VMCALL/RDRAND in one exit, the userspace path
+re-executes it, so an interrupt pending at that exit lands on the other side
+of the draw. Seen live: a `--kernel-rng` tape diverged at input #95 of 537
+(same bytes, 563 instructions later); the default replayed identically. The
+extra exits are cheap (~540 draws per 90 s run; thread-fuzz draws through BPF
+prandom, not getrandom). `--no-tape` skips writing the tape.
+
+`run.sh` regenerates `initrd.gz` on every invocation and the result is not
+byte-reproducible, so a tape is tied to the `RUN_DIR` initrd it was recorded
+with (`replay --tape` names the mismatch if it was rebuilt).
+
+**`replay --tape`** (validated live: a `--decisions explicit --load trie` seed with preemption, two nemesis kills and three load generations replays identically) re-checks the manifest against the current files and
+module (refusing on any mismatch unless `--force`), boots, checks the warm
+checkpoint lands at the recorded virtual time, then branches it with a
+`RecordedInputSource`: randomness comes from the tape (the in-VM PRNG is not
+used), and the lab queues each recorded host action at its recorded virtual
+time. The driver re-issues its usual commands and each must equal the next
+recorded one. A replay that asks for randomness the tape does not have (or
+of another channel or length) stops with an error naming the input index; it
+never invents bytes. At the end the replay's own recording must equal the
+tape, and the artifacts must be byte-identical.
+
+**`replay --scenario`** boots like the campaign, reseeds the RNG with
+`rng_seed`, applies `swarm.preempt`, and delivers the recorded decisions in
+`config.json` (`nemesis_plan`, `load.generations`; the guest uses explicit
+values and derives only what is absent). It never calls the driver's swarm
+draw, nemesis planner or seed derivations. Whether it is byte-identical
+depends on who made the decisions in the original run:
+
+- `--decisions explicit` campaigns: the driver derives the kill plan and load
+  seeds from the seed before the run and delivers them, so the replay
+  delivers the same config and must match byte for byte. This changes which
+  kill plan each seed gets (drawn by the driver, not from guest getrandom),
+  so it is opt-in.
+- `--decisions guest` (default, and all older campaigns): the nemesis draws
+  its plan in the guest; the driver reads it back from the `plan` event. The
+  replay has to add it to the config, which shifts guest timing, so it
+  checks only that the same decisions were made (plan, per-generation seeds
+  and spec keccak) and reports artifact differences as a note.
+
+Either way the replay fails if the guest made other decisions (e.g. the trie
+slot or spec generator changed). `BEDROCK_DST_DERIVATION_SALT=<n>` perturbs
+the driver's derivations, to check that a scenario replay does not depend on
+them.
+
+`--spec-seeds-from-getrandom` moves each generated load's spec seed onto
+Bedrock's controlled stream: the guest draws it from getrandom when the
+generation starts (attributed to its pid on the tape, logged in the `load`
+event, copied into `scenario.json`). It changes every seed's load and makes
+scenario replays decision-identical rather than byte-identical, so it is
+opt-in.
+
+**What covers what.** The tape covers everything that reaches the guest,
+including thread-fuzz schedules and Tempo's and the kernel's own randomness,
+but only for the binaries in the manifest. The scenario survives changes to
+how decisions are derived from seeds, but not to randomness inside the guest
+that is not a harness decision (thread-fuzz, Tempo's RNG): it reproduces that
+only through `rng_seed`, i.e. while the binaries stay the same. Restarting a
+run part-way is by re-execution from the warm checkpoint (a tape prefix),
+not disk snapshots.
+
 ## Task board
 
 Ticked items exist in code and have unit tests. Claim a task by opening a
@@ -212,6 +303,8 @@ draft PR that names it.
 - [x] **A4** `replay <out>/seed-N` compares assertions, events, finalize and verdict byte-for-byte
 - [ ] **A4b** Also compare exit-record streams (reuse `compare-traces.py`) for divergence localization
 - [ ] **A5** Parallel seeds. A `Branch` is single-driver: shard seeds across processes, each booting its own prefix, or add multi-branch driving. Watch fork memory (oss-garage/bedrock#28)
+- [x] **A6** Trace replay: per-seed `tape.bin` + `manifest.json` (`replay --tape`) and `scenario.json` (`replay --scenario`); `--decisions explicit`
+- [ ] **A6b** Validate `replay --tape`/`--scenario` across loads and many seeds (one trie seed done); tape prefix branching (restart at a recorded vt, mutate the rest)
 
 ### B: Crash faults
 - [ ] **B1** Verify on host that the `tempo-data` volume survives `podman kill` + `start`

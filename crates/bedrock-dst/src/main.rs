@@ -15,12 +15,20 @@
 //! <out>/seed-<n>/assertions.jsonl, events.jsonl, finalize.json, *.log
 //! <out>/seed-<n>/console.log     guest serial output for the branch
 //! <out>/seed-<n>/verdict.json
+//! <out>/seed-<n>/scenario.json   every harness decision, by value (scenario.rs)
+//! <out>/seed-<n>/tape.bin        every input the branch consumed (bedrock_lab::Tape)
+//! <out>/seed-<n>/manifest.json   what the tape is tied to (manifest.rs)
 //! <out>/summary.json
 //! ```
 //!
-//! `replay <out>/seed-<n>` reruns one seed from scratch and checks the
-//! collected artifacts are byte-identical.
+//! `replay <out>/seed-<n>` reruns one seed from scratch (re-deriving it from
+//! the seed) and checks the collected artifacts are byte-identical.
+//! `replay --scenario` reruns the recorded decisions instead of the seed's;
+//! `replay --tape` serves the recorded inputs (randomness and host actions at
+//! their recorded virtual times) and refuses to run against other binaries.
 
+mod manifest;
+mod scenario;
 mod verdict;
 
 use std::collections::BTreeMap;
@@ -32,13 +40,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bedrock_lab::{
-    BashTarget, Branch, Checkpoint, Event, EventSink, LabError, LabOpts, RngMode, RunOutcome,
-    VirtDuration, VirtTime,
+    BashOutput, BashTarget, Branch, Checkpoint, Event, EventSink, InputRecording, IoInput,
+    LabError, LabOpts, RecordedInputSource, RngMode, RunOutcome, SeededSource, Tape, VirtDuration,
+    VirtTime,
 };
 use bedrock_vm::{
     load_kernel, LinuxBootConfig, PreemptConfig, VmBuilder, VmError, DEFAULT_TSC_FREQUENCY,
 };
 use clap::{Args as ClapArgs, Parser, Subcommand};
+use manifest::{Environment, Manifest, TapeSummary};
+use scenario::{Decisions, Generation, Kill, LoadScenario, NemesisScenario, Observed, Scenario};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -72,6 +83,44 @@ const REPLAY_COMPARE: &[&str] = &[
 const PREEMPT_PERIODS: &[u64] = &[0, 200_000, 2_000_000, 20_000_000];
 /// Salt separating the preemption draw from the seed's other uses.
 const PREEMPT_SALT: u64 = 0x7072_6565_6d70_7431; // "preempt1"
+/// Salt of the driver-side nemesis plan (`--decisions explicit`).
+const NEMESIS_SALT: u64 = 0x6e65_6d65_7369_7331; // "nemesis1"
+/// Per-seed files next to the collected artifacts.
+const SCENARIO_FILE: &str = "scenario.json";
+const TAPE_FILE: &str = "tape.bin";
+const MANIFEST_FILE: &str = "manifest.json";
+
+/// How harness decisions are derived from a seed. Everything that derives a
+/// decision takes one, so a test can change the derivation and check that a
+/// recorded scenario does not care.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Derivation {
+    preempt_salt: u64,
+    nemesis_salt: u64,
+}
+
+impl Derivation {
+    const CURRENT: Self = Self {
+        preempt_salt: PREEMPT_SALT,
+        nemesis_salt: NEMESIS_SALT,
+    };
+
+    /// Test hook: `BEDROCK_DST_DERIVATION_SALT=<u64>` perturbs every salt,
+    /// simulating a change to how decisions are derived from a seed (seeds
+    /// then mean other runs; `replay --scenario` must be unaffected).
+    fn from_env() -> Self {
+        match std::env::var("BEDROCK_DST_DERIVATION_SALT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(x) => Self {
+                preempt_salt: PREEMPT_SALT ^ x,
+                nemesis_salt: NEMESIS_SALT ^ x,
+            },
+            None => Self::CURRENT,
+        }
+    }
+}
 
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -82,11 +131,16 @@ fn splitmix64(mut x: u64) -> u64 {
 
 /// Per-seed forced preemption `(period, seed)`. `(0, 0)` when disabled by
 /// `--no-preempt`. Part of [`swarm_for`].
+#[cfg(test)]
 fn preempt_for(args: &CampaignArgs, seed: u64) -> (u64, u64) {
+    preempt_for_with(args, seed, &Derivation::CURRENT)
+}
+
+fn preempt_for_with(args: &CampaignArgs, seed: u64, d: &Derivation) -> (u64, u64) {
     if args.no_preempt {
         return (0, 0);
     }
-    let r = splitmix64(seed ^ PREEMPT_SALT);
+    let r = splitmix64(seed ^ d.preempt_salt);
     let period = PREEMPT_PERIODS[(r % PREEMPT_PERIODS.len() as u64) as usize];
     if period == 0 {
         return (0, 0);
@@ -97,7 +151,7 @@ fn preempt_for(args: &CampaignArgs, seed: u64) -> (u64, u64) {
 /// One seed's swarm record: every feature that shapes the run, so verdicts
 /// can be grouped by feature. Recorded as `"swarm"` in the per-seed
 /// `config.json` and `verdict.json` (both compared by `replay`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct Swarm {
     /// Drawn per seed: forced-preemption period (guest instructions; 0 =
     /// off) and its jitter seed, applied by the driver (`Branch::set_preempt`).
@@ -108,7 +162,7 @@ struct Swarm {
     nemesis: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct Preempt {
     period: u64,
     seed: u64,
@@ -119,7 +173,11 @@ struct Preempt {
 /// `replay` re-derives them. In-guest load generators (trie, TIP-20, chain
 /// specs) key off the same seed via the delivered config.
 fn swarm_for(args: &CampaignArgs, seed: u64) -> Swarm {
-    let (period, preempt_seed) = preempt_for(args, seed);
+    swarm_for_with(args, seed, &Derivation::CURRENT)
+}
+
+fn swarm_for_with(args: &CampaignArgs, seed: u64, d: &Derivation) -> Swarm {
+    let (period, preempt_seed) = preempt_for_with(args, seed, d);
     Swarm {
         preempt: Preempt {
             period,
@@ -188,7 +246,26 @@ enum Cmd {
     /// Run seeds `[seed_start, seed_start + seeds)`.
     Campaign(Box<CampaignArgs>),
     /// Rerun one seed of a finished campaign and compare its artifacts.
-    Replay { run_dir: PathBuf },
+    Replay(ReplayArgs),
+}
+
+#[derive(ClapArgs)]
+struct ReplayArgs {
+    /// A campaign's `seed-<n>` directory.
+    run_dir: PathBuf,
+    /// Serve the recorded input tape (randomness and host actions at their
+    /// recorded virtual times) instead of the seed's RNG stream. Requires the
+    /// binaries in manifest.json.
+    #[arg(long, conflicts_with = "scenario")]
+    tape: bool,
+    /// Rerun the recorded decisions (scenario.json) instead of re-deriving
+    /// them from the seed.
+    #[arg(long)]
+    scenario: bool,
+    /// With --tape: replay even if manifest.json does not match the current
+    /// binaries or the warm checkpoint time.
+    #[arg(long, requires = "tape")]
+    force: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,9 +290,12 @@ const CHAIN_IMAGE: &str = "bedrock/tempo-dst-chain:latest";
 /// ChainOfBlocks deployed by chain/deploy.yaml during warmup: dev account 9's
 /// first transaction.
 const CHAIN_CONTRACT: &str = "0x700b6a60ce7eaaea56f065753d8dcb9653dbad35";
-/// Nemesis warmup before the first kill (guest `nemesis::WARMUP_SECS`) plus
-/// its longest downtime (`MAX_DOWN_SECS`).
-const NEMESIS_SLACK_SECS: u64 = 5 + 3;
+/// Guest `nemesis::WARMUP_SECS`: no kill before this.
+const NEMESIS_WARMUP_SECS: u64 = 5;
+/// Guest `nemesis::MAX_DOWN_SECS`: longest downtime.
+const NEMESIS_MAX_DOWN_SECS: u64 = 3;
+/// Nemesis warmup before the first kill plus its longest downtime.
+const NEMESIS_SLACK_SECS: u64 = NEMESIS_WARMUP_SECS + NEMESIS_MAX_DOWN_SECS;
 
 #[derive(ClapArgs, Clone, Serialize, Deserialize)]
 struct CampaignArgs {
@@ -295,8 +375,64 @@ struct CampaignArgs {
     #[arg(long)]
     #[serde(default)]
     reference: bool,
+    /// Who makes the nemesis plan and per-generation load seeds: `guest`
+    /// (drawn in the guest, read back into scenario.json) or `explicit`
+    /// (derived by the driver from the seed and delivered in config.json, so
+    /// `replay --scenario` is byte-identical). `explicit` gives seeds other
+    /// kill plans than `guest`.
+    #[arg(long, value_enum, default_value_t = Decisions::Guest)]
+    #[serde(default)]
+    decisions: Decisions,
+    /// Draw each generated load's spec seed from getrandom in the guest
+    /// (Bedrock-controlled, on the tape) instead of using the run seed.
+    /// Changes every seed's load; `replay --scenario` then delivers the drawn
+    /// seeds, so it replays the load but not byte-for-byte.
+    #[arg(long)]
+    #[serde(default)]
+    spec_seeds_from_getrandom: bool,
+    /// Serve the seed's RNG stream in-kernel (`Branch::reseed_rng`, as
+    /// before trace replay) instead of from the driver (`SeededSource`: the
+    /// same values, but each draw exits to userspace like a tape replay
+    /// does). In-kernel serving is not exactly replayable from a tape: an
+    /// interrupt pending at a randomness exit lands on the other side of the
+    /// draw. Campaigns from before trace replay used it.
+    #[arg(long)]
+    #[serde(default = "yes")]
+    kernel_rng: bool,
+    /// Do not record seed-<n>/tape.bin (input capture costs one event per
+    /// RDRAND/getrandom served).
+    #[arg(long)]
+    #[serde(default)]
+    no_tape: bool,
+    /// `KEY=VALUE` recorded in every manifest.json (e.g. `tempo=<rev>`).
+    #[arg(long = "build-info")]
+    #[serde(default)]
+    build_info: Vec<String>,
     #[arg(long, default_value = "dst-out")]
     out: PathBuf,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl CampaignArgs {
+    /// These arguments with the run parameters `s` recorded, so a scenario
+    /// replay judges coverage like its original.
+    fn with_scenario(&self, s: &Scenario) -> CampaignArgs {
+        let mut a = self.clone();
+        a.run_secs = s.run_secs;
+        a.liveness_secs = s.liveness_secs;
+        a.load = s.load.kind;
+        a.reference = s.swarm.reference;
+        a.no_nemesis = !s.nemesis.enabled;
+        a.max_kills = s.nemesis.max_kills;
+        a.min_gap_secs = s.nemesis.min_gap_secs;
+        if s.load.kind == Load::Transfers {
+            a.txgen_count = s.load.count;
+        }
+        a
+    }
 }
 
 /// Writes guest serial lines to the current run's console.log.
@@ -331,20 +467,31 @@ fn secs(s: u64) -> VirtDuration {
     VirtDuration::from_secs(s, DEFAULT_TSC_FREQUENCY)
 }
 
-fn host_bash(branch: &mut Branch, cmd: &str) -> Result<(i32, String)> {
-    let out = branch.bash(BashTarget::host(), cmd, true)?;
+/// Runs host commands in the guest: a live branch, or a tape replay.
+trait Host {
+    fn bash(&mut self, cmd: &str) -> Result<BashOutput>;
+}
+
+impl Host for Branch {
+    fn bash(&mut self, cmd: &str) -> Result<BashOutput> {
+        Ok(Branch::bash(self, BashTarget::host(), cmd, true)?)
+    }
+}
+
+fn host_bash(host: &mut impl Host, cmd: &str) -> Result<(i32, String)> {
+    let out = host.bash(cmd)?;
     Ok((out.exit_code, out.output_lossy().into_owned()))
 }
 
 /// Reads a guest file from `offset` in chunks that fit the I/O output buffer.
-fn fetch(branch: &mut Branch, path: &str, offset: usize) -> Result<Vec<u8>> {
+fn fetch(host: &mut impl Host, path: &str, offset: usize) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     loop {
         let cmd = format!(
             "tail -c +{} {path} 2>/dev/null | head -c {CHUNK}",
             offset + data.len() + 1
         );
-        let out = branch.bash(BashTarget::host(), &cmd, true)?;
+        let out = host.bash(&cmd)?;
         let n = out.output.len();
         data.extend_from_slice(&out.output);
         if n < CHUNK {
@@ -356,9 +503,11 @@ fn fetch(branch: &mut Branch, path: &str, offset: usize) -> Result<Vec<u8>> {
 /// Blocks the reference may trail the primary at the warm checkpoint.
 const REFERENCE_SYNC_SLACK: u64 = 2;
 
-fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>) -> Result<Checkpoint> {
+/// Boots and warms the shared prefix. `probe_preempt`: some branch will use
+/// forced preemption, so check the ioctl exists before the long boot.
+fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Result<Checkpoint> {
     let mut vm = VmBuilder::new().memory_mb(args.memory_mb).build()?;
-    if any_preempt(args) {
+    if probe_preempt {
         // Probe for the ioctl before the long boot. Disabled is a fresh VM's
         // state, so this leaves the guest untouched.
         vm.set_preempt_config(&PreemptConfig::disabled())
@@ -471,56 +620,144 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>) -> Result<Checkpoint> {
     Ok(cp)
 }
 
-fn guest_config(args: &CampaignArgs, seed: u64) -> serde_json::Value {
-    json!({
-        "seed": seed,
-        "workload_seed": args.workload_seed,
-        "run_secs": args.run_secs,
-        "liveness_secs": args.liveness_secs,
+/// The guest nemesis planner (`tempo-dst`'s `nemesis::plan`), run by the
+/// driver for `--decisions explicit`: kills at least `min_gap_secs` apart
+/// after a warmup, each leaving a full gap for recovery before `run_secs`,
+/// drawn from a host PRNG of the seed instead of guest randomness.
+fn nemesis_plan_for(args: &CampaignArgs, seed: u64, d: &Derivation) -> Vec<Kill> {
+    let mut kills = Vec::new();
+    if args.no_nemesis {
+        return kills;
+    }
+    let mut state = splitmix64(seed ^ d.nemesis_salt);
+    let mut draw = |lo: u64, hi: u64| {
+        state = splitmix64(state);
+        lo + state % (hi - lo + 1)
+    };
+    let gap = u64::from(args.min_gap_secs.max(1));
+    let mut t = NEMESIS_WARMUP_SECS;
+    for _ in 0..args.max_kills {
+        let at = t + draw(0, gap);
+        let down = draw(0, NEMESIS_MAX_DOWN_SECS);
+        if at + down + gap > args.run_secs {
+            break;
+        }
+        kills.push(Kill {
+            at_secs: at,
+            down_secs: down,
+        });
+        t = at + down + gap;
+    }
+    kills
+}
+
+/// `(count, tps, image)` of the campaign's load.
+fn load_params(args: &CampaignArgs) -> (u64, u64, Option<&'static str>) {
+    // Generated loads get enough steps to outlast the run.
+    let steps = |tps| (args.run_secs + 60) * tps;
+    match args.load {
+        Load::Transfers => (args.txgen_count, args.txgen_tps, None),
+        Load::Trie => (steps(args.trie_tps), args.trie_tps, Some(TRIE_IMAGE)),
+        Load::Tip20 => (steps(args.tip20_tps), args.tip20_tps, Some(TIP20_IMAGE)),
+        Load::Chain => (steps(args.chain_tps), args.chain_tps, Some(CHAIN_IMAGE)),
+    }
+}
+
+/// Every decision of `seed`'s run, derived from the campaign arguments and
+/// the seed. With `--decisions guest` the nemesis plan and load seeds are
+/// left to the guest (filled in from its events after the run).
+fn scenario_for(args: &CampaignArgs, seed: u64, d: &Derivation) -> Scenario {
+    let (count, tps, image) = load_params(args);
+    let explicit = args.decisions == Decisions::Explicit;
+    let plan = explicit.then(|| nemesis_plan_for(args, seed, d));
+    // One generation at start plus one per restart, each as the guest would
+    // derive it (so explicit decisions do not change the load).
+    let generations = match &plan {
+        Some(plan) if !args.spec_seeds_from_getrandom => (0..=plan.len() as u64)
+            .map(|g| Generation {
+                txgen_seed: args.workload_seed + g,
+                spec_seed: seed,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Scenario {
+        version: scenario::SCENARIO_VERSION,
+        decisions: args.decisions,
+        seed,
+        rng_seed: seed,
+        swarm: swarm_for_with(args, seed, d),
+        run_secs: args.run_secs,
+        liveness_secs: args.liveness_secs,
+        nemesis: NemesisScenario {
+            enabled: !args.no_nemesis,
+            max_kills: args.max_kills,
+            min_gap_secs: args.min_gap_secs,
+            plan,
+        },
+        load: LoadScenario {
+            kind: args.load,
+            count,
+            tps,
+            image: image.map(Into::into),
+            workload_seed: args.workload_seed,
+            draw_spec_seeds: args.spec_seeds_from_getrandom,
+            generations,
+        },
+        observed: Observed::default(),
+        meaning: scenario::meaning(),
+    }
+}
+
+/// The guest's `/bedrock/in/config.json` for scenario `s`. `deliver`: pass
+/// the nemesis plan and per-generation load inputs explicitly (driver-made
+/// decisions, scenario replays); otherwise the guest derives them.
+fn guest_config(s: &Scenario, deliver: bool) -> serde_json::Value {
+    let mut load = json!({
+        "seed": s.load.workload_seed,
+        "count": s.load.count,
+        "tps": s.load.tps,
+    });
+    if let Some(image) = &s.load.image {
+        load["image"] = json!(image);
+    }
+    if s.load.draw_spec_seeds {
+        load["draw_spec_seeds"] = json!(true);
+    }
+    if deliver && !s.load.generations.is_empty() {
+        load["generations"] = json!(s.load.generations);
+    }
+    let kind = s.load.kind;
+    let mut config = json!({
+        "seed": s.seed,
+        "workload_seed": s.load.workload_seed,
+        "run_secs": s.run_secs,
+        "liveness_secs": s.liveness_secs,
         "nemesis": {
-            "enabled": !args.no_nemesis,
-            "max_kills": args.max_kills,
-            "min_gap_secs": args.min_gap_secs,
+            "enabled": s.nemesis.enabled,
+            "max_kills": s.nemesis.max_kills,
+            "min_gap_secs": s.nemesis.min_gap_secs,
         },
-        "load": match args.load {
-            Load::Transfers => json!({
-                "seed": args.workload_seed,
-                "count": args.txgen_count,
-                "tps": args.txgen_tps,
-            }),
-            Load::Trie => json!({
-                "seed": args.workload_seed,
-                // Enough steps to outlast the run.
-                "count": (args.run_secs + 60) * args.trie_tps,
-                "tps": args.trie_tps,
-                "image": TRIE_IMAGE,
-            }),
-            Load::Tip20 => json!({
-                "seed": args.workload_seed,
-                "count": (args.run_secs + 60) * args.tip20_tps,
-                "tps": args.tip20_tps,
-                "image": TIP20_IMAGE,
-            }),
-            Load::Chain => json!({
-                "seed": args.workload_seed,
-                "count": (args.run_secs + 60) * args.chain_tps,
-                "tps": args.chain_tps,
-                "image": CHAIN_IMAGE,
-            }),
-        },
-        "trie": (args.load == Load::Trie).then(|| json!({
+        "load": load,
+        "trie": (kind == Load::Trie).then(|| json!({
             "address": TRIE_CONTRACT,
         })),
-        "tip20": args.load == Load::Tip20,
-        "cob": (args.load == Load::Chain).then(|| json!({
+        "tip20": kind == Load::Tip20,
+        "cob": (kind == Load::Chain).then(|| json!({
             "address": CHAIN_CONTRACT,
         })),
-        "reference": args.reference,
+        "reference": s.swarm.reference,
         // Driver-side choices (e.g. preemption, applied by
         // `Branch::set_preempt`), recorded so the run is self-describing and
         // `replay` compares them. The guest ignores this key.
-        "swarm": swarm_for(args, seed),
-    })
+        "swarm": s.swarm,
+    });
+    if deliver {
+        if let Some(plan) = &s.nemesis.plan {
+            config["nemesis_plan"] = json!(plan);
+        }
+    }
+    config
 }
 
 /// Whether every seed's nemesis plan has at least one kill and its restart:
@@ -570,68 +807,255 @@ fn required(args: &CampaignArgs) -> Vec<&'static str> {
     required
 }
 
+/// A branch being driven: live (inputs from the seeded RNG and the driver's
+/// own host commands) or a tape replay (inputs from a recorded tape, whose
+/// host actions the lab queues at their recorded virtual times; the driver's
+/// commands must match them one for one).
+struct Driver {
+    b: Branch,
+    tape: Option<TapeCursor>,
+}
+
+struct TapeCursor {
+    io: Vec<IoInput>,
+    pos: usize,
+    /// Responses must arrive before this (the tape's end plus slack).
+    deadline: VirtTime,
+    recording: InputRecording,
+}
+
+impl Driver {
+    fn exhausted(&self, at: VirtTime) -> Box<dyn Error> {
+        let why = self
+            .b
+            .input_exhaustion()
+            .unwrap_or_else(|| "the input source returned no randomness".into());
+        format!("tape replay failed at vt {:.6}s: {why}", at.as_secs_f64()).into()
+    }
+
+    /// Runs to `end`; `Some(kind)` if the guest stopped under us.
+    fn run_until(&mut self, end: VirtTime) -> Result<Option<String>> {
+        while self.b.current_time() < end {
+            let (at, outcome) = self.b.run_until(end)?;
+            match outcome {
+                RunOutcome::ReachedTime => break,
+                RunOutcome::Ready => {}
+                RunOutcome::ActionResponse { .. } if self.tape.is_some() => {
+                    return Err(format!(
+                        "tape replay: unexpected host-action response at vt {:.6}s",
+                        at.as_secs_f64()
+                    )
+                    .into())
+                }
+                RunOutcome::ActionResponse { .. } => {}
+                RunOutcome::RngExhausted if self.tape.is_some() => return Err(self.exhausted(at)),
+                RunOutcome::RngExhausted => return Err("seed source exhausted".into()),
+                RunOutcome::Yielded { kind } => return Ok(Some(format!("{kind:?}"))),
+            }
+        }
+        Ok(None)
+    }
+
+    /// After a tape replay: the inputs consumed must be exactly the tape's.
+    fn check_tape_consumed(&self) -> Result<()> {
+        let Some(t) = &self.tape else {
+            return Ok(());
+        };
+        if t.pos != t.io.len() {
+            return Err(format!(
+                "tape replay: the driver issued {} of the tape's {} host actions",
+                t.pos,
+                t.io.len()
+            )
+            .into());
+        }
+        let (want, got) = (
+            t.recording.random_inputs(),
+            self.b.input_recording().random_inputs(),
+        );
+        if let Some(i) = (0..want.len().min(got.len())).find(|&i| want[i] != got[i]) {
+            return Err(format!(
+                "tape replay diverged at randomness input #{i}: tape {:?}, replay {:?}",
+                want[i], got[i]
+            )
+            .into());
+        }
+        if want.len() != got.len() {
+            return Err(format!(
+                "tape replay consumed {} randomness inputs; the tape holds {}",
+                got.len(),
+                want.len()
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
+impl Host for Driver {
+    fn bash(&mut self, cmd: &str) -> Result<BashOutput> {
+        let Some(t) = self.tape.as_mut() else {
+            return Host::bash(&mut self.b, cmd);
+        };
+        let Some(expected) = t.io.get(t.pos) else {
+            return Err(format!(
+                "tape replay: the driver issued {cmd:?} after the tape's last host action"
+            )
+            .into());
+        };
+        if expected.command != cmd || expected.target != BashTarget::Host || !expected.record_output
+        {
+            return Err(format!(
+                "tape replay diverged at host action #{}: the driver issued {cmd:?}, the tape \
+                 recorded {:?}",
+                t.pos, expected.command
+            )
+            .into());
+        }
+        t.pos += 1;
+        let deadline = t.deadline;
+        // The lab queues the action itself once the branch reaches its
+        // recorded time; run until its response.
+        loop {
+            let (at, outcome) = self.b.run_until(deadline)?;
+            match outcome {
+                RunOutcome::ActionResponse { output } => return Ok(output),
+                RunOutcome::Ready => {}
+                RunOutcome::ReachedTime => {
+                    return Err(format!(
+                        "tape replay: no response to {cmd:?} by vt {:.6}s",
+                        at.as_secs_f64()
+                    )
+                    .into())
+                }
+                RunOutcome::RngExhausted => return Err(self.exhausted(at)),
+                RunOutcome::Yielded { kind } => {
+                    return Err(
+                        format!("tape replay: guest stopped ({kind:?}) during {cmd:?}").into(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// How a seed's branch gets its inputs.
+enum Inputs {
+    /// Bedrock's in-VM PRNG reseeded with the scenario's `rng_seed`;
+    /// `record`: capture a tape.
+    Seeded { record: bool },
+    /// A recorded tape.
+    Tape(Tape),
+}
+
+/// One finished seed.
+struct SeedRun {
+    verdict: verdict::Verdict,
+    scenario: Scenario,
+    start: VirtTime,
+    end: VirtTime,
+    recording: Option<InputRecording>,
+}
+
+/// Runs scenario `s` on a branch of `warm` and collects its artifacts into
+/// `dir`. `config`: the exact config to deliver (a tape replay passes the
+/// recorded one); `None` builds it from `s` (delivering decisions when
+/// `deliver`).
+#[allow(clippy::too_many_arguments)]
 fn run_seed(
     args: &CampaignArgs,
     warm: &Checkpoint,
     sink: &ConsoleSink,
-    seed: u64,
+    s: &Scenario,
+    deliver: bool,
+    config: Option<String>,
+    inputs: Inputs,
     dir: &Path,
-) -> Result<verdict::Verdict> {
+) -> Result<SeedRun> {
     fs::create_dir_all(dir)?;
     sink.open(&dir.join("console.log"))?;
-    // Per-seed randomness: RDRAND and guest getrandom() come from the
-    // hypervisor's in-VM PRNG, reseeded per branch.
-    let mut b = warm.branch()?;
-    b.reseed_rng(seed)?;
+    let seed = s.seed;
+    let mut record_tape = false;
+    let (b, tape) = match inputs {
+        // Per-seed randomness: RDRAND and guest getrandom() come from the
+        // hypervisor's xorshift stream seeded per branch, served in-kernel
+        // or (the same values) from the driver.
+        Inputs::Seeded { record } if args.kernel_rng => {
+            let mut b = warm.branch()?;
+            b.reseed_rng(s.rng_seed)?;
+            if record {
+                b.set_record_inputs(true)?;
+                record_tape = true;
+            }
+            (b, None)
+        }
+        Inputs::Seeded { record } => {
+            // A source branch records its inputs anyway.
+            record_tape = record;
+            let b = warm.branch_with_input_source(SeededSource::new(s.rng_seed))?;
+            (b, None)
+        }
+        Inputs::Tape(tape) => {
+            if tape.start != warm.time() {
+                return Err(format!(
+                    "tape starts at {} instructions but the warm checkpoint is at {}",
+                    tape.start.instructions(),
+                    warm.time().instructions()
+                )
+                .into());
+            }
+            let cursor = TapeCursor {
+                io: tape.recording.io_inputs().to_vec(),
+                pos: 0,
+                deadline: tape.end + secs(60),
+                recording: tape.recording.clone(),
+            };
+            let b = warm.branch_with_input_source(RecordedInputSource::new(tape.recording))?;
+            (b, Some(cursor))
+        }
+    };
+    let mut d = Driver { b, tape };
     // Per-seed forced preemption, scoped to this branch; it is driver-side,
     // so it applies to every load and with --reference.
-    let swarm = swarm_for(args, seed);
-    apply_preempt(&mut b, swarm.preempt)?;
+    apply_preempt(&mut d.b, s.swarm.preempt)?;
     println!(
         "seed {seed}: branch forked at vt {:.1}s (preempt period {})",
-        b.current_time().as_secs_f64(),
-        swarm.preempt.period
+        d.b.current_time().as_secs_f64(),
+        s.swarm.preempt.period
     );
-    let start = b.current_time();
+    let start = d.b.current_time();
 
-    let config = serde_json::to_string(&guest_config(args, seed))?;
+    let config = match config {
+        Some(c) => c,
+        None => serde_json::to_string(&guest_config(s, deliver))?,
+    };
     fs::write(dir.join("config.json"), &config)?;
     // JSON from guest_config never contains a single quote.
-    let (code, out) = host_bash(&mut b, &format!("tempo-dst start '{config}'"))?;
+    let (code, out) = host_bash(&mut d, &format!("tempo-dst start '{config}'"))?;
     println!(
         "seed {seed}: started at vt {:.1}s",
-        b.current_time().as_secs_f64()
+        d.b.current_time().as_secs_f64()
     );
     let offset: usize = out
         .trim()
         .parse()
         .map_err(|_| format!("tempo-dst start failed ({code}): {out}"))?;
 
-    let end = start + secs(args.run_secs);
-    let mut guest_exit = None;
-    while b.current_time() < end {
-        match b.run_until(end)?.1 {
-            RunOutcome::ReachedTime => break,
-            RunOutcome::Ready | RunOutcome::ActionResponse { .. } => {}
-            RunOutcome::RngExhausted => return Err("seed source exhausted".into()),
-            RunOutcome::Yielded { kind } => {
-                guest_exit = Some(format!("{kind:?}"));
-                break;
-            }
-        }
-    }
+    let end = start + secs(s.run_secs);
+    let guest_exit = d.run_until(end)?;
 
     let mut assertions = Vec::new();
     if guest_exit.is_none() {
-        host_bash(&mut b, "tempo-dst finalize")?;
-        assertions = fetch(&mut b, "/bedrock/assertions.jsonl", offset)?;
+        host_bash(&mut d, "tempo-dst finalize")?;
+        assertions = fetch(&mut d, "/bedrock/assertions.jsonl", offset)?;
         for f in COLLECT {
-            let data = fetch(&mut b, &format!("/bedrock/{f}"), 0)?;
+            let data = fetch(&mut d, &format!("/bedrock/{f}"), 0)?;
             fs::write(dir.join(Path::new(f).file_name().unwrap()), data)?;
         }
-        let (_, mem) = host_bash(&mut b, MEM_REPORT)?;
+        let (_, mem) = host_bash(&mut d, MEM_REPORT)?;
         fs::write(dir.join("guest-mem.txt"), mem)?;
     }
+    d.check_tape_consumed()?;
     if let Some(kind) = &guest_exit {
         // The guest stopped under us (e.g. kernel panic or shutdown): a failure
         // in its own right; the guest can no longer report anything.
@@ -641,10 +1065,84 @@ fn run_seed(
         assertions.extend_from_slice(format!("{rec}\n").as_bytes());
     }
     fs::write(dir.join("assertions.jsonl"), &assertions)?;
-    let mut v = verdict::aggregate(&String::from_utf8_lossy(&assertions), &required(args));
-    v.swarm = serde_json::to_value(swarm)?;
+    let required = required(&args.with_scenario(s));
+    let mut v = verdict::aggregate(&String::from_utf8_lossy(&assertions), &required);
+    v.swarm = serde_json::to_value(s.swarm)?;
     fs::write(dir.join("verdict.json"), serde_json::to_vec_pretty(&v)?)?;
-    Ok(v)
+
+    let mut scenario = s.clone();
+    let events = fs::read_to_string(dir.join("events.jsonl")).unwrap_or_default();
+    scenario.record_observed(Observed::from_events(&events));
+    fs::write(
+        dir.join(SCENARIO_FILE),
+        serde_json::to_vec_pretty(&scenario)?,
+    )?;
+    let recording = record_tape.then(|| d.b.input_recording().clone());
+    Ok(SeedRun {
+        verdict: v,
+        scenario,
+        start,
+        end: d.b.current_time(),
+        recording,
+    })
+}
+
+/// Writes a live seed's tape and manifest.
+fn write_trace(args: &CampaignArgs, env: &Environment, run: &SeedRun, dir: &Path) -> Result<()> {
+    let tape = run.recording.as_ref().map(|rec| {
+        let bytes = Tape {
+            tsc_frequency: DEFAULT_TSC_FREQUENCY,
+            start: run.start,
+            end: run.end,
+            recording: rec.clone(),
+        }
+        .to_bytes();
+        (bytes, rec)
+    });
+    let summary = match &tape {
+        Some((bytes, rec)) => {
+            fs::write(dir.join(TAPE_FILE), bytes)?;
+            Some(TapeSummary {
+                file: TAPE_FILE.into(),
+                sha256: manifest::sha256_bytes(bytes),
+                random_inputs: rec.random_inputs().len() as u64,
+                random_bytes: rec
+                    .random_inputs()
+                    .iter()
+                    .map(|r| r.bytes.len() as u64)
+                    .sum(),
+                io_inputs: rec.io_inputs().len() as u64,
+                consumers: manifest::consumers(rec),
+            })
+        }
+        None => None,
+    };
+    let m = Manifest {
+        version: manifest::MANIFEST_VERSION,
+        seed: run.scenario.seed,
+        bedrock_dst: manifest::bedrock_dst_identity(),
+        environment: env.clone(),
+        campaign: serde_json::to_value(args)?,
+        warm_checkpoint_instructions: run.start.instructions(),
+        branch_end_instructions: run.end.instructions(),
+        rng_seed: run.scenario.rng_seed,
+        preempt: serde_json::to_value(run.scenario.swarm.preempt)?,
+        tape: summary,
+    };
+    fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec_pretty(&m)?)?;
+    Ok(())
+}
+
+fn probe_environment(args: &CampaignArgs) -> Result<Environment> {
+    Ok(Environment::probe(
+        &args.vmlinux,
+        &args.initrd,
+        &args.images,
+        &args.compose,
+        &args.build_info,
+        DEFAULT_TSC_FREQUENCY,
+        args.boot_seed,
+    )?)
 }
 
 fn campaign(args: CampaignArgs) -> Result<()> {
@@ -653,20 +1151,31 @@ fn campaign(args: CampaignArgs) -> Result<()> {
         args.out.join("campaign.json"),
         serde_json::to_vec_pretty(&args)?,
     )?;
+    let env = probe_environment(&args)?;
+    let derivation = Derivation::from_env();
     let sink = Arc::new(ConsoleSink::default());
     sink.open(&args.out.join("boot-console.log"))?;
     let wall = Instant::now();
-    let warm = boot(&args, sink.clone())?;
+    let warm = boot(&args, sink.clone(), any_preempt(&args))?;
     let mut summary = BTreeMap::new();
     for seed in args.seed_start..args.seed_start + args.seeds {
         let t = Instant::now();
-        let v = run_seed(
+        let dir = args.out.join(format!("seed-{seed}"));
+        let s = scenario_for(&args, seed, &derivation);
+        let run = run_seed(
             &args,
             &warm,
             &sink,
-            seed,
-            &args.out.join(format!("seed-{seed}")),
+            &s,
+            args.decisions == Decisions::Explicit,
+            None,
+            Inputs::Seeded {
+                record: !args.no_tape,
+            },
+            &dir,
         )?;
+        write_trace(&args, &env, &run, &dir)?;
+        let v = run.verdict;
         println!(
             "seed {seed}: {} ({:.0}s wall) {:?}",
             if v.pass { "PASS" } else { "FAIL" },
@@ -697,46 +1206,192 @@ fn campaign(args: CampaignArgs) -> Result<()> {
     Ok(())
 }
 
-fn replay(run_dir: &Path) -> Result<()> {
-    let out = run_dir.parent().ok_or("run dir has no parent")?;
-    let mut args: CampaignArgs = serde_json::from_slice(&fs::read(out.join("campaign.json"))?)?;
-    let seed: u64 = run_dir
+/// `<dir>`'s seed, from its `seed-<n>` name.
+fn seed_of(run_dir: &Path) -> Result<u64> {
+    Ok(run_dir
         .file_name()
         .and_then(|n| n.to_str())
         .and_then(|n| n.strip_prefix("seed-"))
         .and_then(|n| n.parse().ok())
-        .ok_or("run dir must be named seed-<n>")?;
-    let replay_out = run_dir.join("replay");
+        .ok_or("run dir must be named seed-<n>")?)
+}
+
+/// `REPLAY_COMPARE` artifacts that differ between two seed directories.
+fn diverged_artifacts(a: &Path, b: &Path) -> Vec<&'static str> {
+    REPLAY_COMPARE
+        .iter()
+        .copied()
+        .filter(|f| {
+            fs::read(a.join(f)).unwrap_or_default() != fs::read(b.join(f)).unwrap_or_default()
+        })
+        .collect()
+}
+
+fn replay(r: &ReplayArgs) -> Result<()> {
+    let run_dir = r.run_dir.as_path();
+    let out = run_dir.parent().ok_or("run dir has no parent")?;
+    let mut args: CampaignArgs = serde_json::from_slice(&fs::read(out.join("campaign.json"))?)?;
+    let seed = seed_of(run_dir)?;
+    if !r.tape && !r.scenario {
+        // Re-derive the seed from the campaign arguments.
+        let replay_out = run_dir.join("replay");
+        args.out = replay_out.clone();
+        args.seed_start = seed;
+        args.seeds = 1;
+        campaign(args)?;
+        let diverged = diverged_artifacts(run_dir, &replay_out.join(format!("seed-{seed}")));
+        return if diverged.is_empty() {
+            println!("replay of seed {seed}: identical");
+            Ok(())
+        } else {
+            Err(format!("replay of seed {seed} diverged in {diverged:?}").into())
+        };
+    }
+
+    let recorded: Scenario = serde_json::from_slice(&fs::read(run_dir.join(SCENARIO_FILE))?)
+        .map_err(|e| format!("{}: {e}", run_dir.join(SCENARIO_FILE).display()))?;
+    let mode = if r.tape { "tape" } else { "scenario" };
+    let replay_out = run_dir.join(format!("replay-{mode}"));
+    fs::create_dir_all(&replay_out)?;
     args.out = replay_out.clone();
-    args.seed_start = seed;
-    args.seeds = 1;
-    campaign(args)?;
-    let mut diverged = Vec::new();
-    for f in REPLAY_COMPARE {
-        let a = fs::read(run_dir.join(f)).unwrap_or_default();
-        let b = fs::read(replay_out.join(format!("seed-{seed}")).join(f)).unwrap_or_default();
-        if a != b {
-            diverged.push(*f);
+    let mut tape = None;
+    let mut warm_instructions = None;
+    if r.tape {
+        let m: Manifest = serde_json::from_slice(&fs::read(run_dir.join(MANIFEST_FILE))?)?;
+        // The binaries are the ones the tape was recorded with, wherever the
+        // manifest says they were.
+        args = serde_json::from_value(m.campaign.clone())?;
+        args.out = replay_out.clone();
+        let now = probe_environment(&args)?;
+        let diff = m.environment.diff(&now);
+        if !diff.is_empty() {
+            let msg = format!(
+                "the tape was recorded against other binaries:\n  {}",
+                diff.join("\n  ")
+            );
+            if !r.force {
+                return Err(format!("{msg}\n(--force replays anyway)").into());
+            }
+            eprintln!("warning: {msg}");
+        }
+        let summary = m
+            .tape
+            .as_ref()
+            .ok_or("the run recorded no tape (--no-tape)")?;
+        let bytes = fs::read(run_dir.join(&summary.file))?;
+        if manifest::sha256_bytes(&bytes) != summary.sha256 {
+            return Err(format!("{} does not match its manifest sha256", summary.file).into());
+        }
+        let t = Tape::from_bytes(&bytes)?;
+        if t.tsc_frequency != DEFAULT_TSC_FREQUENCY {
+            return Err(format!(
+                "tape TSC frequency {} != {DEFAULT_TSC_FREQUENCY}",
+                t.tsc_frequency
+            )
+            .into());
+        }
+        warm_instructions = Some(m.warm_checkpoint_instructions);
+        tape = Some(t);
+    }
+    fs::write(
+        replay_out.join("campaign.json"),
+        serde_json::to_vec_pretty(&args)?,
+    )?;
+    let sink = Arc::new(ConsoleSink::default());
+    sink.open(&replay_out.join("boot-console.log"))?;
+    let warm = boot(&args, sink.clone(), recorded.swarm.preempt.period != 0)?;
+    if let Some(w) = warm_instructions {
+        if warm.time().instructions() != w {
+            let msg = format!(
+                "warm checkpoint at {} instructions, recorded at {w}: the boot prefix differs",
+                warm.time().instructions()
+            );
+            if !r.force {
+                return Err(format!("{msg} (--force replays anyway)").into());
+            }
+            eprintln!("warning: {msg}");
         }
     }
-    if diverged.is_empty() {
-        println!("replay of seed {seed}: identical");
-        Ok(())
-    } else {
-        Err(format!("replay of seed {seed} diverged in {diverged:?}").into())
+    let dir = replay_out.join(format!("seed-{seed}"));
+    let run = match tape {
+        Some(t) => {
+            // The exact config the original delivered (it is also in the
+            // tape's first host action, which the driver must match).
+            let config = fs::read_to_string(run_dir.join("config.json"))?;
+            run_seed(
+                &args,
+                &warm,
+                &sink,
+                &recorded,
+                true,
+                Some(config),
+                Inputs::Tape(t),
+                &dir,
+            )?
+        }
+        None => run_seed(
+            &args,
+            &warm,
+            &sink,
+            &recorded,
+            true,
+            None,
+            Inputs::Seeded { record: true },
+            &dir,
+        )?,
+    };
+    if !r.tape {
+        let env = probe_environment(&args)?;
+        write_trace(&args, &env, &run, &dir)?;
+    }
+
+    let decisions = recorded.decision_diff(&run.scenario);
+    let diverged = diverged_artifacts(run_dir, &dir);
+    let exact = r.tape || recorded.replays_exactly();
+    if !decisions.is_empty() {
+        return Err(format!(
+            "{mode} replay of seed {seed} made other decisions:\n  {}",
+            decisions.join("\n  ")
+        )
+        .into());
+    }
+    match (diverged.is_empty(), exact) {
+        (true, _) => {
+            println!("{mode} replay of seed {seed}: identical");
+            Ok(())
+        }
+        (false, true) => {
+            Err(format!("{mode} replay of seed {seed} diverged in {diverged:?}").into())
+        }
+        (false, false) => {
+            println!(
+                "{mode} replay of seed {seed}: same decisions; artifacts differ in {diverged:?} \
+                 (decisions were made in the guest, so the replay delivered a different config; \
+                 use --decisions explicit campaigns or replay --tape for exact replays)"
+            );
+            Ok(())
+        }
     }
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Campaign(args) => campaign(*args),
-        Cmd::Replay { run_dir } => replay(&run_dir),
+        Cmd::Replay(r) => replay(&r),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The config a campaign delivers for `seed`.
+    fn cfg(args: &CampaignArgs, seed: u64) -> serde_json::Value {
+        guest_config(
+            &scenario_for(args, seed, &Derivation::CURRENT),
+            args.decisions == Decisions::Explicit,
+        )
+    }
 
     #[test]
     fn guest_config_round_trips_into_shell_quoting() {
@@ -757,7 +1412,7 @@ mod tests {
         else {
             unreachable!()
         };
-        let c = guest_config(&args, 7);
+        let c = cfg(&args, 7);
         assert_eq!(c["seed"], 7);
         assert_eq!(c["workload_seed"], 99);
         assert_eq!(c["nemesis"]["enabled"], false);
@@ -786,7 +1441,7 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(guest_config(&args, 1)["reference"], true);
+        assert_eq!(cfg(&args, 1)["reference"], true);
         assert_eq!(
             required(&args),
             [
@@ -797,7 +1452,7 @@ mod tests {
         );
     }
 
-    fn campaign_args(extra: &[&str]) -> CampaignArgs {
+    pub(crate) fn campaign_args(extra: &[&str]) -> CampaignArgs {
         let base = [
             "x",
             "campaign",
@@ -842,14 +1497,14 @@ mod tests {
         }
 
         // Recorded in the delivered config's swarm record.
-        let c = guest_config(&args, 5);
+        let c = cfg(&args, 5);
         assert_eq!(c["swarm"]["preempt"]["period"], draws[5].0);
         assert_eq!(c["swarm"]["preempt"]["seed"], draws[5].1);
 
         // --no-preempt turns it off for every seed.
         let off = campaign_args(&["--no-preempt"]);
         assert!((0..64).all(|s| preempt_for(&off, s) == (0, 0)));
-        assert_eq!(guest_config(&off, 5)["swarm"]["preempt"]["period"], 0);
+        assert_eq!(cfg(&off, 5)["swarm"]["preempt"]["period"], 0);
         assert!(!any_preempt(&off));
         assert!(any_preempt(&campaign_args(&["--seeds", "8"])));
     }
@@ -870,13 +1525,13 @@ mod tests {
                     let (period, pseed) = preempt_for(&campaign_args(&[]), seed);
                     assert_eq!((s.preempt.period, s.preempt.seed), (period, pseed));
                     assert_eq!(s.reference, reference);
-                    let c = guest_config(&args, seed);
+                    let c = cfg(&args, seed);
                     assert_eq!(c["swarm"], serde_json::to_value(s).unwrap());
                     assert_eq!(c["swarm"]["load"], load);
                 }
             }
         }
-        let c = guest_config(&campaign_args(&["--no-nemesis"]), 0);
+        let c = cfg(&campaign_args(&["--no-nemesis"]), 0);
         assert_eq!(c["swarm"]["nemesis"], false);
     }
 
@@ -918,7 +1573,7 @@ mod tests {
         else {
             unreachable!()
         };
-        let c = guest_config(&args, 3);
+        let c = cfg(&args, 3);
         assert_eq!(c["load"]["image"], "bedrock/tempo-dst-trie:latest");
         assert_eq!(c["load"]["tps"], 5);
         // Slots and the write stream are generated in the guest from the seed.
@@ -929,7 +1584,7 @@ mod tests {
     #[test]
     fn tip20_load_configures_image_oracle_and_coverage() {
         let args = campaign_args(&["--load", "tip20"]);
-        let c = guest_config(&args, 3);
+        let c = cfg(&args, 3);
         assert_eq!(c["load"]["image"], "bedrock/tempo-dst-tip20:latest");
         assert_eq!(c["load"]["tps"], 50);
         assert_eq!(c["tip20"], true);
@@ -944,7 +1599,7 @@ mod tests {
     #[test]
     fn chain_load_configures_image_oracle_and_coverage() {
         let args = campaign_args(&["--load", "chain"]);
-        let c = guest_config(&args, 3);
+        let c = cfg(&args, 3);
         assert_eq!(c["load"]["image"], "bedrock/tempo-dst-chain:latest");
         assert_eq!(c["load"]["tps"], 10);
         assert_eq!(c["cob"]["address"], CHAIN_CONTRACT);
@@ -956,5 +1611,144 @@ mod tests {
             let args = campaign_args(&[&["--load", "chain"][..], extra].concat());
             assert_eq!(required(&args), ["S/load-included", "S/chain-appended"]);
         }
+    }
+
+    #[test]
+    fn guest_decisions_keep_the_config_derivable_in_the_guest() {
+        // The default leaves the plan and load seeds to the guest, as before
+        // --decisions existed.
+        let args = campaign_args(&["--load", "tip20"]);
+        assert_eq!(args.decisions, Decisions::Guest);
+        let c = cfg(&args, 4);
+        assert!(c.get("nemesis_plan").is_none());
+        assert!(c["load"].get("generations").is_none());
+        assert!(c["load"].get("draw_spec_seeds").is_none());
+        let s = scenario_for(&args, 4, &Derivation::CURRENT);
+        assert_eq!(s.nemesis.plan, None);
+        assert!(s.load.generations.is_empty());
+        assert!(!s.replays_exactly());
+        // A campaign.json from before trace replay still loads, as guest.
+        let mut v = serde_json::to_value(campaign_args(&[])).unwrap();
+        for k in [
+            "decisions",
+            "spec_seeds_from_getrandom",
+            "no_tape",
+            "build_info",
+            "kernel_rng",
+        ] {
+            v.as_object_mut().unwrap().remove(k);
+        }
+        let old: CampaignArgs = serde_json::from_value(v).unwrap();
+        assert_eq!(old.decisions, Decisions::Guest);
+        assert!(!old.no_tape);
+        // ...with the RNG served in-kernel, as it was; new campaigns serve it
+        // from the driver so their tapes replay exactly.
+        assert!(old.kernel_rng);
+        assert!(!campaign_args(&[]).kernel_rng);
+    }
+
+    #[test]
+    fn explicit_decisions_are_delivered_and_follow_the_guest_planner() {
+        let args = campaign_args(&["--decisions", "explicit", "--load", "trie"]);
+        for seed in 0..32 {
+            let s = scenario_for(&args, seed, &Derivation::CURRENT);
+            let plan = s.nemesis.plan.clone().unwrap();
+            // tempo-dst's nemesis::plan constraints.
+            assert!(!plan.is_empty() && plan.len() <= 3, "{plan:?}");
+            let gap = u64::from(args.min_gap_secs);
+            assert!(plan[0].at_secs >= NEMESIS_WARMUP_SECS);
+            for w in plan.windows(2) {
+                assert!(w[1].at_secs >= w[0].at_secs + w[0].down_secs + gap);
+            }
+            for k in &plan {
+                assert!(k.down_secs <= NEMESIS_MAX_DOWN_SECS);
+                assert!(k.at_secs + k.down_secs + gap <= args.run_secs);
+            }
+            // One load generation per restart plus the first, each as the
+            // guest derives it.
+            assert_eq!(s.load.generations.len(), plan.len() + 1);
+            assert_eq!(s.load.generations[1].txgen_seed, args.workload_seed + 1);
+            assert!(s.load.generations.iter().all(|g| g.spec_seed == seed));
+            let c = cfg(&args, seed);
+            assert_eq!(c["nemesis_plan"], serde_json::to_value(&plan).unwrap());
+            assert_eq!(
+                c["load"]["generations"],
+                serde_json::to_value(&s.load.generations).unwrap()
+            );
+            assert!(!c.to_string().contains('\''));
+            assert!(s.replays_exactly());
+        }
+        // Pinned, so a change to the derivation is noticed.
+        let p = nemesis_plan_for(&args, 0, &Derivation::CURRENT);
+        assert_eq!(
+            p.iter()
+                .map(|k| (k.at_secs, k.down_secs))
+                .collect::<Vec<_>>(),
+            [(28, 3), (86, 0), (146, 3)]
+        );
+        assert!(nemesis_plan_for(
+            &campaign_args(&["--decisions", "explicit", "--no-nemesis"]),
+            0,
+            &Derivation::CURRENT
+        )
+        .is_empty());
+        // Drawing spec seeds in the guest leaves them out of the config.
+        let drawn = campaign_args(&["--decisions", "explicit", "--spec-seeds-from-getrandom"]);
+        let s = scenario_for(&drawn, 1, &Derivation::CURRENT);
+        assert!(s.load.generations.is_empty());
+        assert!(!s.replays_exactly());
+        assert_eq!(cfg(&drawn, 1)["load"]["draw_spec_seeds"], true);
+    }
+
+    #[test]
+    fn scenario_replay_ignores_a_changed_derivation() {
+        let args = campaign_args(&["--decisions", "explicit", "--load", "chain"]);
+        let seed = 6;
+        // The original run: decisions derived, delivered, written out.
+        let original = scenario_for(&args, seed, &Derivation::CURRENT);
+        let delivered = serde_json::to_string(&guest_config(&original, true)).unwrap();
+        let file = serde_json::to_vec_pretty(&original).unwrap();
+
+        // Later, the seed-to-decision derivation changes: re-deriving the
+        // seed gives another run...
+        let changed = Derivation {
+            preempt_salt: PREEMPT_SALT ^ 0xdead,
+            nemesis_salt: NEMESIS_SALT ^ 0xbeef,
+        };
+        let rederived = scenario_for(&args, seed, &changed);
+        assert_ne!(rederived.nemesis.plan, original.nemesis.plan);
+        assert_ne!(
+            serde_json::to_string(&guest_config(&rederived, true)).unwrap(),
+            delivered
+        );
+        // ...but replay --scenario reads the recorded decisions and delivers
+        // exactly the original config, without deriving anything.
+        let recorded: Scenario = serde_json::from_slice(&file).unwrap();
+        assert_eq!(
+            serde_json::to_string(&guest_config(&recorded, true)).unwrap(),
+            delivered
+        );
+        assert_eq!(recorded.swarm.preempt, original.swarm.preempt);
+
+        // A guest-made scenario replays its observed plan explicitly.
+        let guest_args = campaign_args(&["--load", "chain"]);
+        let mut guest = scenario_for(&guest_args, seed, &Derivation::CURRENT);
+        let events = r#"{"source":"nemesis","kind":"plan","container":"tempo","guest_time_ns":1,"detail":{"kills":[{"at_secs":20,"down_secs":1}]}}"#;
+        guest.record_observed(Observed::from_events(events));
+        let c = guest_config(&guest, true);
+        assert_eq!(c["nemesis_plan"][0]["at_secs"], 20);
+        // ...while the original run was delivered without it.
+        assert!(cfg(&guest_args, seed).get("nemesis_plan").is_none());
+    }
+
+    #[test]
+    fn scenario_args_override_the_campaign_for_coverage() {
+        let args = campaign_args(&["--load", "chain"]);
+        let mut s = scenario_for(&args, 1, &Derivation::CURRENT);
+        s.nemesis.enabled = false;
+        s.run_secs = 60;
+        let a = args.with_scenario(&s);
+        assert!(a.no_nemesis);
+        assert_eq!(required(&a), ["S/load-included", "S/chain-appended"]);
     }
 }

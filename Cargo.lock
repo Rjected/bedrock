@@ -492,6 +492,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -517,7 +518,9 @@ name = "bedrock-lab"
 version = "0.1.0"
 dependencies = [
  "bedrock-vm",
+ "bedrock-vmx",
  "clap",
+ "serde",
  "serde_json",
 ]
 

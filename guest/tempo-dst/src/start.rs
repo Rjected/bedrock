@@ -34,6 +34,9 @@ fn spawn_detached(sub: &str) -> io::Result<()> {
 pub fn run(config_json: &str) -> io::Result<()> {
     let config: Config = serde_json::from_str(config_json)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    config
+        .validate()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     fs::create_dir_all(Path::new(CONFIG_PATH).parent().unwrap())?;
     fs::create_dir_all(OUT_DIR)?;
     fs::write(CONFIG_PATH, config_json)?;
@@ -47,12 +50,39 @@ pub fn run(config_json: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// The generated load spec of `generation` with spec seed `seed`, as
+/// `(kind, text)`; `None` for a load that runs `load.spec` as is.
+pub fn generated_spec(
+    config: &Config,
+    generation: u64,
+    seed: u64,
+) -> Option<(&'static str, String)> {
+    let steps = usize::try_from(config.load.count).unwrap_or(usize::MAX);
+    if let Some(trie) = config
+        .trie
+        .as_ref()
+        .filter(|t| t.generated())
+        .and(config.trie())
+    {
+        Some(("trie", trie_gen::spec(seed, generation, &trie.slots, steps)))
+    } else if config.tip20 {
+        Some(("tip20", tip20::spec(seed, generation, steps)))
+    } else if config.cob.is_some() {
+        Some(("chain", cob_gen::spec(seed, generation, steps)))
+    } else {
+        None
+    }
+}
+
 /// Starts the txgen load as container `txgen`. Generation `n` (0 at branch
-/// start, then one per node restart) draws its transactions from workload seed
-/// `load.seed + n`; a generated trie load also gets a fresh write stream
-/// (`trie_gen::spec`) over the run's slots, the TIP-20 load a fresh transfer
-/// stream (`tip20::spec`), and a chain-of-blocks load fresh payloads
-/// (`cob_gen::spec`).
+/// start, then one per node restart) takes its inputs from
+/// [`Config::load_generation`]: by default it draws its transactions from
+/// workload seed `load.seed + n`; a generated trie load also gets a fresh
+/// write stream (`trie_gen::spec`) over the run's slots, the TIP-20 load a
+/// fresh transfer stream (`tip20::spec`), and a chain-of-blocks load fresh
+/// payloads (`cob_gen::spec`). Each generation is logged as a `load`
+/// `generation` event with its inputs and the spec's keccak, which the
+/// driver copies into the run's scenario.
 ///
 /// Load only: failures (e.g. while the node is down) are not oracles. The
 /// oracle's S/load-included shows the load actually landed.
@@ -61,24 +91,32 @@ pub fn start_load(config: &Config, generation: u64) -> io::Result<()> {
     if load.count == 0 {
         return Ok(());
     }
-    let steps = usize::try_from(load.count).unwrap_or(usize::MAX);
-    let generated = if let Some(trie) = config
-        .trie
-        .as_ref()
-        .filter(|t| t.generated())
-        .and(config.trie())
-    {
-        Some((
-            "trie",
-            trie_gen::spec(config.seed, generation, &trie.slots, steps),
-        ))
-    } else if config.tip20 {
-        Some(("tip20", tip20::spec(config.seed, generation, steps)))
-    } else if config.cob.is_some() {
-        Some(("chain", cob_gen::spec(config.seed, generation, steps)))
-    } else {
-        None
-    };
+    let inputs = config.draw_load_generation(generation);
+    let generated = generated_spec(config, generation, inputs.spec_seed);
+    common::emit_event(
+        "load",
+        "generation",
+        Some("txgen"),
+        json!({
+            "generation": generation,
+            "txgen_seed": inputs.txgen_seed,
+            "spec_seed": inputs.spec_seed,
+            "steps": load.count,
+            "kind": generated.as_ref().map(|g| g.0),
+            "spec_keccak": generated
+                .as_ref()
+                .map(|g| alloy_primitives::keccak256(g.1.as_bytes()).to_string()),
+            // Trie slots are derived in the guest; recorded so a scenario can
+            // pin them.
+            "slots": generated
+                .as_ref()
+                .filter(|g| g.0 == "trie")
+                .and_then(|_| config.trie())
+                .map(|t| t.slots),
+            // The consumer of any getrandom draw above, for the input tape.
+            "pid": std::process::id(),
+        }),
+    );
     let mut spec = load.spec.clone();
     let mut mount = Vec::new();
     if let Some((kind, text)) = generated {
@@ -96,7 +134,7 @@ pub fn start_load(config: &Config, generation: u64) -> io::Result<()> {
     let status = Command::new("podman")
         .args(["run", "-d", "--name", "txgen", "--network", "host"])
         .args(["-e", "BEDROCK=0"])
-        .args(["-e", &format!("TXGEN_SEED={}", load.seed + generation)])
+        .args(["-e", &format!("TXGEN_SEED={}", inputs.txgen_seed)])
         .args(["-e", &format!("TXGEN_COUNT={}", load.count)])
         .args(["-e", &format!("TXGEN_TPS={}", load.tps)])
         .args(["-e", &format!("TXGEN_SPEC={spec}")])
@@ -196,4 +234,145 @@ pub fn deploy_tip20(image: &str) -> io::Result<()> {
             Ok(chain.ledger(block.hash).ok() == Some(Ledger::initial()))
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::{LoadGeneration, PlannedKill};
+    use crate::nemesis;
+
+    fn config(json: &str) -> Config {
+        let c: Config = serde_json::from_str(json).unwrap();
+        c.validate().unwrap();
+        c
+    }
+
+    #[test]
+    fn explicit_nemesis_plan_wins_but_still_draws() {
+        let c = config(
+            r#"{"seed": 3, "run_secs": 300,
+                "nemesis": {"enabled": true, "max_kills": 3, "min_gap_secs": 20},
+                "nemesis_plan": [{"at_secs": 11, "down_secs": 2}, {"at_secs": 40, "down_secs": 0}]}"#,
+        );
+        let mut draws = 0;
+        let kills = nemesis::kills_for(&c, |lo, _| {
+            draws += 1;
+            lo
+        });
+        assert_eq!(
+            kills
+                .iter()
+                .map(|k| (k.at_secs, k.down_secs))
+                .collect::<Vec<_>>(),
+            [(11, 2), (40, 0)]
+        );
+        // The same randomness is consumed as without a plan.
+        let derived = Config {
+            nemesis_plan: None,
+            ..c.clone()
+        };
+        let mut plain_draws = 0;
+        let drawn = nemesis::kills_for(&derived, |lo, _| {
+            plain_draws += 1;
+            lo
+        });
+        assert_eq!(draws, plain_draws);
+        assert_ne!(drawn, kills);
+        // An empty explicit plan means no kills.
+        let none = Config {
+            nemesis_plan: Some(vec![]),
+            ..c
+        };
+        assert!(nemesis::kills_for(&none, |lo, _| lo).is_empty());
+    }
+
+    #[test]
+    fn overlapping_explicit_plans_are_rejected() {
+        let kill = |at_secs, down_secs| PlannedKill { at_secs, down_secs };
+        let mut c = Config {
+            nemesis_plan: Some(vec![kill(30, 3), kill(32, 1)]),
+            ..Config::default()
+        };
+        assert!(c.validate().unwrap_err().contains("nemesis_plan[1]"));
+        c.nemesis_plan.as_mut().unwrap()[1].at_secs = 33;
+        assert!(c.validate().is_ok());
+        assert!(run(
+            r#"{"nemesis_plan": [{"at_secs": 9, "down_secs": 3}, {"at_secs": 10, "down_secs": 0}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn explicit_load_generations_drive_seeds_and_specs() {
+        let c = config(
+            r#"{"seed": 3, "tip20": true,
+                "load": {"seed": 99, "count": 20, "tps": 5,
+                         "generations": [{"txgen_seed": 7, "spec_seed": 1234}]}}"#,
+        );
+        assert_eq!(
+            c.load_generation(0),
+            LoadGeneration {
+                txgen_seed: 7,
+                spec_seed: 1234
+            }
+        );
+        // Past the explicit ones: derived as before.
+        assert_eq!(
+            c.load_generation(2),
+            LoadGeneration {
+                txgen_seed: 101,
+                spec_seed: 3
+            }
+        );
+        let (kind, text) = generated_spec(&c, 0, c.load_generation(0).spec_seed).unwrap();
+        assert_eq!(kind, "tip20");
+        assert_eq!(text, tip20::spec(1234, 0, 20));
+        assert_eq!(
+            generated_spec(&c, 2, c.load_generation(2).spec_seed)
+                .unwrap()
+                .1,
+            tip20::spec(3, 2, 20)
+        );
+
+        let chain = config(
+            r#"{"seed": 3, "cob": {"address": "0x0"},
+                "load": {"count": 4, "generations": [{"txgen_seed": 1, "spec_seed": 9}]}}"#,
+        );
+        assert_eq!(
+            generated_spec(&chain, 0, 9).unwrap().1,
+            cob_gen::spec(9, 0, 4)
+        );
+    }
+
+    #[test]
+    fn explicit_trie_slots_still_generate_the_spec() {
+        // A scenario's recorded slots with `generated`: the spec is
+        // trie_gen's over exactly those slots, not the seed's.
+        let c = config(
+            r#"{"seed": 3, "trie": {"address": "0x0", "slots": [5, 6, 70000], "generated": true},
+                "load": {"count": 10, "generations": [{"txgen_seed": 1, "spec_seed": 3}]}}"#,
+        );
+        assert_eq!(c.trie().unwrap().slots, [5, 6, 70000]);
+        let (kind, text) = generated_spec(&c, 0, c.load_generation(0).spec_seed).unwrap();
+        assert_eq!(kind, "trie");
+        assert_eq!(text, trie_gen::spec(3, 0, &[5, 6, 70000], 10));
+        // Without slots they come from the seed, as before.
+        let derived = config(r#"{"seed": 3, "trie": {"address": "0x0"}, "load": {"count": 10}}"#);
+        assert_eq!(derived.trie().unwrap().slots, trie_gen::slots(3));
+        // Hand-written slots without `generated` keep the image's spec.
+        let manual = config(
+            r#"{"seed": 3, "trie": {"address": "0x0", "slots": [1]}, "load": {"count": 10}}"#,
+        );
+        assert!(generated_spec(&manual, 0, 3).is_none());
+    }
+
+    #[test]
+    fn derived_configs_serialize_without_explicit_fields() {
+        let c = config(r#"{"seed": 3, "trie": {"address": "0x0"}, "load": {"count": 10}}"#);
+        let s = serde_json::to_string(&c).unwrap();
+        for key in ["nemesis_plan", "generations", "generated"] {
+            assert!(!s.contains(key), "{key} in {s}");
+        }
+    }
 }

@@ -873,6 +873,7 @@ mod tests {
         Oracle::new(60, 0).with_trie(Some(TrieConfig {
             address: TRIE_ADDRESS.into(),
             slots: TRIE_SLOTS.to_vec(),
+            generated: false,
         }))
     }
 

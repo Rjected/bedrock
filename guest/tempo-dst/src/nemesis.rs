@@ -61,11 +61,26 @@ fn podman(args: &[&str]) -> bool {
     }
 }
 
+/// The run's kills: `nemesis.plan` from the config when given (driver-made
+/// decisions, `replay --scenario`), else [`plan`]. Draws either way, so the
+/// guest consumes the same Bedrock randomness with or without a plan.
+pub fn kills_for(cfg: &Config, draw: impl FnMut(u64, u64) -> u64) -> Vec<Kill> {
+    let drawn = plan(&cfg.nemesis, cfg.run_secs, draw);
+    match &cfg.nemesis_plan {
+        Some(explicit) => explicit
+            .iter()
+            .map(|k| Kill {
+                at_secs: k.at_secs,
+                down_secs: k.down_secs,
+            })
+            .collect(),
+        None => drawn,
+    }
+}
+
 pub fn run() {
     let cfg = Config::load();
-    let kills = plan(&cfg.nemesis, cfg.run_secs, |lo, hi| {
-        rand::random_range(lo..=hi)
-    });
+    let kills = kills_for(&cfg, |lo, hi| rand::random_range(lo..=hi));
     common::emit_event(
         "nemesis",
         "plan",

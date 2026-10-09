@@ -573,6 +573,7 @@ mod tests {
         Reference::new(10).with_trie(Some(TrieConfig {
             address: ADDR.into(),
             slots: SLOTS.to_vec(),
+            generated: false,
         }))
     }
 

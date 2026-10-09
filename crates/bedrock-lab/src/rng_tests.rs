@@ -136,11 +136,63 @@ fn get_random_events_become_random_inputs() {
         ]
     );
 
-    // Replays in order via next_random, zero-extending past the recording.
+    // Replays in order via next_random, and fails (never zero-fills) past the
+    // recording.
     let mut src = RecordedInputSource::new(rec);
-    assert_eq!(src.next_random(4, 42), vec![1, 2, 3, 4]);
-    assert_eq!(src.next_random(16, 7), vec![0xAA; 16]);
-    assert_eq!(src.next_random(3, 0), vec![0, 0, 0]);
+    assert_eq!(src.next_random(4, 42), Some(vec![1, 2, 3, 4]));
+    assert_eq!(src.next_random(16, 7), Some(vec![0xAA; 16]));
+    assert_eq!(src.exhaustion(), None);
+    assert_eq!(src.next_random(3, 0), None);
+    let why = src.exhaustion().unwrap();
+    assert!(why.contains("exhausted"), "{why}");
+    assert!(why.contains("holds only 2"), "{why}");
+    assert_eq!(src.random_consumed(), 2);
+}
+
+#[test]
+fn recorded_source_fails_on_exhaustion_and_divergence() {
+    let mut buf = Vec::new();
+    get_random_record(&mut buf, 0, 1_000, 42, &[1, 2, 3, 4]);
+    random_record(&mut buf, 1, 2_000, 0xAB);
+    let rec = recording_from(&buf);
+
+    // A GET_RANDOM of another length than recorded diverged: no bytes, and
+    // the cursor stays put.
+    let mut src = RecordedInputSource::new(rec.clone());
+    assert_eq!(src.next_random(8, 42), None);
+    let why = src.exhaustion().unwrap();
+    assert!(why.contains("diverged at randomness input #0"), "{why}");
+    assert!(why.contains("GetRandom of 8 bytes"), "{why}");
+    assert_eq!(src.random_consumed(), 0);
+    // Once failed, it keeps failing (InputSource contract).
+    assert_eq!(src.next_random(4, 42), None);
+    assert_eq!(src.next_rng_u64(), None);
+
+    // An RDRAND where the tape has GET_RANDOM diverged too.
+    let mut src = RecordedInputSource::new(rec.clone());
+    assert_eq!(src.next_rng_u64(), None);
+    assert!(src.exhaustion().unwrap().contains("RDRAND"));
+
+    // In order it serves everything, then reports exhaustion.
+    let mut src = RecordedInputSource::new(rec);
+    assert_eq!(src.next_random(4, 42), Some(vec![1, 2, 3, 4]));
+    assert_eq!(src.next_rng_u64(), Some(0xAB));
+    assert_eq!(src.next_rng_u64(), None);
+    assert!(src.exhaustion().unwrap().contains("input tape exhausted"));
+}
+
+#[test]
+fn default_next_random_fails_when_the_source_runs_dry() {
+    let mut left = 1u32;
+    let mut src = move || {
+        left = left.checked_sub(1)?;
+        Some(0x0102_0304_0506_0708_u64)
+    };
+    assert_eq!(
+        src.next_random(8, 0),
+        Some(0x0102_0304_0506_0708_u64.to_le_bytes().to_vec())
+    );
+    assert_eq!(src.next_random(1, 0), None);
 }
 
 #[test]
@@ -156,7 +208,7 @@ fn rdrand_and_get_random_share_one_ordered_stream() {
 
     let mut src = RecordedInputSource::new(rec);
     assert_eq!(src.next_rng_u64(), Some(0xAB));
-    assert_eq!(src.next_random(4, 9), vec![7, 7, 7, 7]);
+    assert_eq!(src.next_random(4, 9), Some(vec![7, 7, 7, 7]));
     assert_eq!(src.next_rng_u64(), Some(0xCD));
     assert_eq!(src.next_rng_u64(), None);
 }
@@ -263,4 +315,27 @@ fn recording_round_trips_through_replay_source() {
     assert_eq!(second.command, "second");
     assert!(second.record_output);
     assert!(source.next_io_input().is_none());
+}
+
+#[test]
+fn seeded_source_serves_the_kernel_stream() {
+    use bedrock_vmx::devices::RandomState;
+    for seed in [0u64, 1, 7, 0xbed0_7e3b] {
+        let mut kernel = RandomState::seeded_rng(seed);
+        let mut src = super::SeededSource::new(seed);
+        // RDRAND: one stream value each.
+        for _ in 0..4 {
+            assert_eq!(src.next_rng_u64(), Some(kernel.next_seeded_u64()));
+        }
+        // GET_RANDOM: the in-kernel fill (vmcall.rs) takes one value per 8
+        // bytes and truncates the last.
+        for len in [8usize, 12, 1, 256] {
+            let mut want = Vec::new();
+            while want.len() < len {
+                let n = (len - want.len()).min(8);
+                want.extend_from_slice(&kernel.next_seeded_u64().to_le_bytes()[..n]);
+            }
+            assert_eq!(src.next_random(len, 0), Some(want));
+        }
+    }
 }
