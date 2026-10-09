@@ -5,3 +5,4 @@ dst-out/
 ready/libvmcall.h
 ready/ready.c
 initrd.gz
+gcroot-*
