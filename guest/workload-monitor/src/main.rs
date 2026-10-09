@@ -134,6 +134,9 @@ impl Event {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("forward-assertions") {
+        bedrock_assertions::files::forward();
+    }
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1);

@@ -34,8 +34,8 @@ failures can be grouped by feature (`regressions/hunt.sh` prints that table).
 | Piece | Where | Role |
 |---|---|---|
 | `bedrock-dst` | `crates/bedrock-dst` | Host driver: boot, warm checkpoint, branch per seed, collect, verdict, replay |
-| `tempo-dst` | `guest/tempo-dst` | In-guest nemesis and oracles, installed in the podman initrd |
-| `workload-monitor` | `guest/workload-monitor` | Excuses container SIGKILL deaths that the nemesis logged |
+| `tempo-dst` | `guest/tempo-dst` | In-guest nemesis and oracles, fetched into the guest at boot |
+| `workload-monitor` | `guest/workload-monitor` | Forwards assertions and excuses container SIGKILL deaths that the nemesis logged |
 | compose / run | `workloads/tempo-dst` | Node config, variants, campaign entry point |
 
 Guest contract: each writer appends serialized `bedrock_assertions::Assertion`
@@ -218,7 +218,7 @@ plus a human-readable decision file):
 |---|---|---|
 | `tape.bin` | every randomness value Bedrock served the branch (RDRAND, RDSEED, getrandom, with the requesting pid) and every host action (`tempo-dst start/finalize`, artifact fetches) with its virtual time | `bedrock-dst replay --tape <out>/seed-N` |
 | `scenario.json` | every harness decision by value: swarm record (preemption period and seed, load, reference, nemesis), nemesis kill plan, per-load-generation `txgen_seed`/`spec_seed`, run parameters, and what the guest reported (`observed`: plan event, per-generation spec keccak256 and trie slots). A `meaning` map documents each field | `bedrock-dst replay --scenario <out>/seed-N` |
-| `manifest.json` | what the tape is tied to: sha256 of vmlinux, initrd, images.tar and compose file, image tags/config digests/labels from images.tar, `bedrock.ko` srcversion and file sha256 (`$BEDROCK_KO` or `modinfo`), TSC frequency, boot seed, warm-checkpoint and branch-end virtual time, campaign args, `--build-info KEY=VALUE` pairs (e.g. Tempo/reth revisions), tape sha256 and per-consumer draw counts | checked by `replay --tape` |
+| `manifest.json` | what the tape is tied to: sha256 of vmlinux, initrd, images.tar, compose file and fetched tempo-dst binary, image tags/config digests/labels from images.tar, `bedrock.ko` srcversion and file sha256 (`$BEDROCK_KO` or `modinfo`), TSC frequency, boot seed, warm-checkpoint and branch-end virtual time, campaign args, `--build-info KEY=VALUE` pairs (e.g. Tempo/reth revisions), tape sha256 and per-consumer draw counts | checked by `replay --tape` |
 
 **Tape format** (`bedrock_lab::Tape`, version 1, little-endian): magic
 `BDRKTAPE`, version, flags, body length, body, FNV-1a checksum. The body is
@@ -241,9 +241,10 @@ of the draw. Seen live: a `--kernel-rng` tape diverged at input #95 of 537
 extra exits are cheap (~540 draws per 90 s run; thread-fuzz draws through BPF
 prandom, not getrandom). `--no-tape` skips writing the tape.
 
-`run.sh` regenerates `initrd.gz` on every invocation and the result is not
-byte-reproducible, so a tape is tied to the `RUN_DIR` initrd it was recorded
-with (`replay --tape` names the mismatch if it was rebuilt).
+`run.sh` builds `tempoInitrd` and the static `tempo-dst` binary through Nix.
+The prepared initrd is cached in the store and reused across invocations;
+the binary is served through the file-fetch channel at boot. The tape manifest
+pins both files by sha256.
 
 **`replay --tape`** (validated live: a `--decisions explicit --load trie` seed with preemption, two nemesis kills and three load generations replays identically) re-checks the manifest against the current files and
 module (refusing on any mismatch unless `--force`), boots, checks the warm

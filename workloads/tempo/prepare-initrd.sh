@@ -6,7 +6,7 @@ output=${2:-$PWD/initrd.gz}
 task_stage=$(mktemp -d)
 trap 'chmod -R u+w "$task_stage"; find "$task_stage" -depth -delete' EXIT
 cd "$task_stage"
-gzip -dc "$source_initrd" | cpio -id --quiet
+gzip -dc "$source_initrd" | cpio -idm --quiet
 chmod u+w init
 python3 - <<'PY'
 from pathlib import Path
@@ -20,7 +20,7 @@ s = s.replace(line + '\n', '')
 s = s.replace('bedrock-pebs-register |', line + '\necho "Tempo guest: reported CPUs=$(nproc)"\nbedrock-pebs-register |', 1)
 p.write_text(s)
 PY
-# Write then rename, so a campaign reading the previous file never sees a
-# partial one.
-find . -print0 | cpio --null --owner=0:0 --quiet -o -H newc | gzip -1 > "$output.tmp.$$"
+# Stable metadata and entry order make the cached initrd reproducible.
+find . -exec touch -h -d @1 {} +
+LC_ALL=C find . -print0 | sort -z | cpio --null --reproducible --owner=0:0 --quiet -o -H newc | gzip -n -1 > "$output.tmp.$$"
 mv "$output.tmp.$$" "$output"

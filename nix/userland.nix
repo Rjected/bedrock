@@ -44,4 +44,14 @@ in
     doCheck = false;
     meta.mainProgram = "bedrock-dst";
   };
+
+  tempo-dst = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+    pname = "tempo-dst";
+    version = "0.1.0";
+    inherit src;
+    cargoLock.lockFile = ../Cargo.lock;
+    cargoBuildFlags = [ "-p" "tempo-dst" ];
+    doCheck = false;
+    meta.mainProgram = "tempo-dst";
+  };
 }

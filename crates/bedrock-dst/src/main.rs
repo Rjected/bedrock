@@ -358,6 +358,9 @@ struct CampaignArgs {
     /// Image archive served to the guest as images.tar.
     #[arg(long)]
     images: PathBuf,
+    /// Static in-guest harness binary served over the file-fetch channel.
+    #[arg(long)]
+    tempo_dst: PathBuf,
     #[arg(
         long,
         default_value = "console=hvc0 nopti nokaslr mitigations=off break audit=0 bedrock_ncpus=5"
@@ -587,6 +590,7 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
             files: vec![
                 ("compose.yaml".into(), path(&args.compose)),
                 ("images.tar".into(), path(&args.images)),
+                ("tempo-dst".into(), path(&args.tempo_dst)),
             ],
             ..Default::default()
         },
@@ -1258,6 +1262,7 @@ fn probe_environment(args: &CampaignArgs) -> Result<Environment> {
         &args.initrd,
         &args.images,
         &args.compose,
+        &args.tempo_dst,
         &args.build_info,
         DEFAULT_TSC_FREQUENCY,
         args.boot_seed,
@@ -1900,6 +1905,8 @@ mod tests {
             "c",
             "--images",
             "t",
+            "--tempo-dst",
+            "d",
             "--no-nemesis",
         ])
         .cmd
@@ -1929,6 +1936,8 @@ mod tests {
             "c",
             "--images",
             "t",
+            "--tempo-dst",
+            "d",
             "--reference",
         ])
         .cmd
@@ -1958,6 +1967,8 @@ mod tests {
             "c",
             "--images",
             "t",
+            "--tempo-dst",
+            "d",
         ];
         let Cmd::Campaign(args) = Cli::parse_from(base.iter().chain(extra)).cmd else {
             unreachable!()
@@ -2060,6 +2071,8 @@ mod tests {
             "c",
             "--images",
             "t",
+            "--tempo-dst",
+            "d",
             "--load",
             "trie",
         ])
@@ -2298,6 +2311,11 @@ mod tests {
             },
             compose: manifest::InputFile {
                 path: "c".into(),
+                sha256: "0".into(),
+                bytes: 0,
+            },
+            tempo_dst: manifest::InputFile {
+                path: "d".into(),
                 sha256: "0".into(),
                 bytes: 0,
             },

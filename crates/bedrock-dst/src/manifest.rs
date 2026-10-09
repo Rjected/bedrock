@@ -3,8 +3,8 @@
 //! `seed-N/manifest.json`: what an input tape is tied to.
 //!
 //! A tape replays only against the binaries it was recorded with: the guest
-//! kernel, initrd, image archive and compose file (sha256 each), the loaded
-//! `bedrock.ko`, the TSC frequency and the boot seed, and it must start at
+//! kernel, initrd, image archive, compose file and guest harness (sha256 each),
+//! the loaded `bedrock.ko`, the TSC frequency and the boot seed, and it must start at
 //! the same warm-checkpoint virtual time. `replay --tape` re-checks all of
 //! these and refuses on a mismatch unless `--force`.
 
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -150,6 +150,7 @@ pub struct Environment {
     pub initrd: InputFile,
     pub images: InputFile,
     pub compose: InputFile,
+    pub tempo_dst: InputFile,
     /// Images in the archive: tags, config digest and labels (e.g.
     /// `org.opencontainers.image.revision` when the build sets it).
     pub image_metadata: Vec<Value>,
@@ -166,6 +167,7 @@ impl Environment {
         initrd: &Path,
         images: &Path,
         compose: &Path,
+        tempo_dst: &Path,
         build_info: &[String],
         tsc_frequency: u64,
         boot_seed: u64,
@@ -175,6 +177,7 @@ impl Environment {
             initrd: InputFile::of(initrd)?,
             images: InputFile::of(images)?,
             compose: InputFile::of(compose)?,
+            tempo_dst: InputFile::of(tempo_dst)?,
             image_metadata: image_metadata(images).unwrap_or_else(|e| {
                 eprintln!("warning: cannot read image metadata from {images:?}: {e}");
                 Vec::new()
@@ -201,6 +204,7 @@ impl Environment {
             ("initrd", &self.initrd, &now.initrd),
             ("images", &self.images, &now.images),
             ("compose", &self.compose, &now.compose),
+            ("tempo-dst", &self.tempo_dst, &now.tempo_dst),
         ] {
             if a.sha256 != b.sha256 {
                 out.push(format!(
@@ -414,6 +418,7 @@ mod tests {
             initrd: file("b"),
             images: file("c"),
             compose: file("d"),
+            tempo_dst: file("e"),
             image_metadata: vec![],
             bedrock_ko: ModuleIdentity {
                 srcversion: Some("S1".into()),
@@ -427,11 +432,13 @@ mod tests {
         assert!(env.diff(&env.clone()).is_empty());
         let mut now = env.clone();
         now.initrd.sha256 = "B".into();
+        now.tempo_dst.sha256 = "E".into();
         now.bedrock_ko.srcversion = Some("S2".into());
         now.boot_seed = 2;
         let d = env.diff(&now);
-        assert_eq!(d.len(), 3, "{d:?}");
+        assert_eq!(d.len(), 4, "{d:?}");
         assert!(d[0].starts_with("initrd"));
+        assert!(d[1].starts_with("tempo-dst"));
         // Unknown on either side is not a mismatch.
         now = env.clone();
         now.bedrock_ko.srcversion = None;

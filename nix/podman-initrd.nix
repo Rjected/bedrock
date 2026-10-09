@@ -19,8 +19,7 @@
 # images in one archive is fine — `podman load` reads the embedded manifest to
 # recover each one's name+tag).
 #
-# Anything else workload-specific — helper binaries, driver scripts, configs —
-# must be baked into one of the images. The initrd ships only the generic podman
+# Workload-specific helpers can also be fetched at boot. The initrd ships only the generic podman
 # / journald / kernel-module infrastructure plus `bedrock-pebs-register` (run at
 # boot to enable precise EPT-friendly PEBS exits) and `bedrock-file-fetch` (run
 # at boot to download the workload files).
@@ -260,29 +259,6 @@ let
     meta.mainProgram = "workload-monitor";
   };
 
-  # Tempo DST harness (Rust): crash nemesis plus online and end-of-run oracles,
-  # started per branch by the host driver (see workloads/tempo-dst). Built like
-  # workload-monitor.
-  tempoDst = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
-    pname = "tempo-dst";
-    version = "0.1.0";
-    src = pkgs.lib.cleanSourceWith {
-      src = ./..;
-      filter = path: type:
-        let baseName = builtins.baseNameOf path; in
-        !(baseName == "target" ||
-          baseName == ".git" ||
-          baseName == ".claude" ||
-          baseName == "nix" ||
-          (type == "directory" && baseName == "bedrock" &&
-           builtins.match ".*/crates/bedrock$" path != null));
-    };
-    cargoLock.lockFile = ../Cargo.lock;
-    cargoBuildFlags = [ "-p" "tempo-dst" ];
-    doCheck = false;
-    meta.mainProgram = "tempo-dst";
-  };
-
   # All runtime packages needed in the guest rootfs
   runtimePackages = [
     pkgs.podman
@@ -485,8 +461,6 @@ pkgs.stdenv.mkDerivation {
     # container from the host namespace.
     install -m 0755 ${workloadMonitor}/bin/workload-monitor \
         rootfs/usr/local/bin/workload-monitor
-
-    install -m 0755 ${tempoDst}/bin/tempo-dst rootfs/usr/local/bin/tempo-dst
 
     # Guest kernel module for the deterministic I/O channel. Placed at a
     # stable path so the init script can insmod it without depending on

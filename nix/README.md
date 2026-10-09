@@ -20,6 +20,8 @@ nix run .#integration-tests     # bedrock-lab integration suite (set BEDROCK_INI
 | `guestKernel` | Linux 6.18 with determinism patches (TLB flush) + `vmlinux` |
 | `guestInitrd` | Trivial initramfs (boots, VMCALL shutdown) |
 | `podmanInitrd` | Generic podman initramfs (downloads its workload at boot) |
+| `tempoInitrd` | Cached Podman initramfs with Tempo's boot tuning |
+| `tempo-dst` | Static DST helper, served to the guest at boot |
 | `bedrock-cli` | CLI for loading and running guest VMs |
 | `bedrock-determinism` | Determinism checker (multi-run comparison) |
 
@@ -118,8 +120,8 @@ The initrd is generic, common to every workload. At boot, `bedrock-file-fetch`
 downloads the workload's `compose.yaml` and `images.tar` from the host over the
 file-transmission hypercall (`HYPERCALL_FILE_FETCH`): it registers a 1 MB
 feedback buffer as the transport and pulls each file in chunks, the host
-serving the bytes directly into that buffer. Anything else workload-specific
-(helper binaries, driver scripts, configs) gets baked into one of the images.
+serving the bytes directly into that buffer. DST campaigns also serve the
+static `tempo-dst` helper through the same channel; other workloads omit it.
 Produce `images.tar` with whatever toolchain you like (`docker build` +
 `docker save` outside Nix, or `dockerTools.buildLayeredImage` inside Nix).
 

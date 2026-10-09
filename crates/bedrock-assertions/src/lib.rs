@@ -11,6 +11,7 @@
 mod macros;
 mod assertion;
 mod condition;
+pub mod files;
 
 pub use assertion::{Assertion, AssertionData, Location};
 pub use condition::Condition;

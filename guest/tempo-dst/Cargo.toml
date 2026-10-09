@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "In-guest nemesis and oracles for Tempo deterministic simulation runs"
 
-# Installed into the guest rootfs at /usr/local/bin/tempo-dst. Runs in the guest
-# host namespace (where podman is) and is started per branch by the host driver.
+# Fetched into the guest at /usr/local/bin/tempo-dst. Runs in the guest host
+# namespace (where podman is) and is started per branch by the host driver.
 # Built as a static musl binary, like workload-monitor.
 [[bin]]
 name = "tempo-dst"
