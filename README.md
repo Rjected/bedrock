@@ -276,6 +276,17 @@ snapshot TSC changed from 499,445,737 to 499,419,858 and the RAM hash
 changed. That variant is incorrect and was reverted. It confirms that
 removing IRET replay needs a precise retirement correction, not just a faster
 control path.
+An isolated Linux nested-page diagnostic saw no selected scalar page among
+the first 300,000 execute faults. These faults occur as native execution
+reaches untrusted code, so retaining a scalar page across scalar steps would
+not remove them. Trying bounded page batches before the global gate cut one
+run from about 382,000 to 208,000 nested-page faults and from about 843,000
+to 666,000 total exits, but wall time rose from roughly 2.7 to 4.16 seconds:
+VM-entry preparation grew from about 4.6 to 8.65 billion cycles. That broad
+ordering change was reverted. A narrower cached-plan-first trial did not
+complete the transition suite: the box stopped answering SSH during that
+test, so the change was discarded without a performance claim. A fresh box
+passed the unchanged suite.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
