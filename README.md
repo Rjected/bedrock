@@ -298,6 +298,15 @@ On an EPYC 4245P boxctl box running HWE `7.0.0-38`, a clean-build
 The same box's Linux boot and two-fork replay took 2.733 seconds with 847,994
 root VM exits and the expected snapshot TSC and RAM hash. The memory-loop
 result therefore does not establish near-native Linux performance.
+A later leaf-table refresh shortcut rearmed only released leaf NPT guards
+instead of rebuilding the complete guarded tree. Its nearby six-run control
+median was 2.682 seconds and the eight-run shortcut median was 2.618 seconds,
+but correctness stress exposed a rare one-instruction difference: two of 36
+shortcut Linux boots reached snapshot TSC `499445738` rather than
+`499445737`, changing the guest time report, while 60 same-box control boots
+all reached `499445737`. The shortcut was reverted. This is a correctness
+regression candidate, not a usable speedup; the source of the extra tick
+remains to be identified before any similar tree-refresh optimization.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
