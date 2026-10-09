@@ -107,6 +107,7 @@ pub(crate) struct SvmRegionProof {
 #[derive(Clone, Copy)]
 pub(crate) struct SvmAliasProof {
     pub valid: bool,
+    pub root: u64,
     pub pages: [u64; SVM_CODE_PAGE_CAPACITY],
     pub offsets: [[u16; 4]; SVM_CODE_PAGE_CAPACITY],
     pub counts: [usize; SVM_CODE_PAGE_CAPACITY],

@@ -465,9 +465,11 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     }
     let scratch = &mut ctx.state_mut().svm_guard;
     scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
-    scratch.alias_proof.valid = false;
-    for proof in &mut scratch.alias_proofs {
-        proof.valid = false;
+    if !scratch.gate_ready || scratch.gate_dirty || scratch.gate_root != root {
+        scratch.alias_proof.valid = false;
+        for proof in &mut scratch.alias_proofs {
+            proof.valid = false;
+        }
     }
     scratch.valid = false;
     scratch.translation_count = 0;
@@ -1031,9 +1033,21 @@ struct PageHazards {
 fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHazards> {
     if !ctx.state().svm_guard.valid {
         ctx.state_mut().svm_guard.code_count = 0;
-        ctx.state_mut().svm_guard.alias_proof.valid = false;
-        for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
-            proof.valid = false;
+        let root = ctx
+            .state()
+            .vmcs
+            .read_natural(VmcsFieldNatural::GuestCr3)
+            .ok()
+            .map(|root| root & 0x000f_ffff_ffff_f000);
+        let gate_guarded = root.is_some_and(|root| {
+            let guard = &ctx.state().svm_guard;
+            guard.gate_ready && !guard.gate_dirty && guard.gate_root == root
+        });
+        if !gate_guarded {
+            ctx.state_mut().svm_guard.alias_proof.valid = false;
+            for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
+                proof.valid = false;
+            }
         }
     }
     let cache = &ctx.state().svm_guard;
@@ -1314,9 +1328,19 @@ fn collect_page_breakpoints<C: VmContext>(
         .iter()
         .filter(|h| h.count != 0)
         .count();
+    let root = ctx
+        .state()
+        .vmcs
+        .read_natural(VmcsFieldNatural::GuestCr3)
+        .ok()?
+        & 0x000f_ffff_ffff_f000;
+    let guard = &ctx.state().svm_guard;
+    let tree_guarded = (guard.valid && guard.root == root)
+        || (guard.gate_ready && !guard.gate_dirty && guard.gate_root == root);
     let cached = ctx.state().svm_guard.alias_proofs.iter().find(|proof| {
-        ctx.state().svm_guard.valid
+        tree_guarded
             && proof.valid
+            && proof.root == root
             && proof.page_count == hazard_pages
             && hazards[..batch.code_page_count]
                 .iter()
@@ -1343,12 +1367,7 @@ fn collect_page_breakpoints<C: VmContext>(
     // path to enumerate every executable alias, with a bounded heap workspace.
     use super::super::vm_state::SvmAliasWalk;
     ctx.state_mut().svm_guard.aliases[0] = SvmAliasWalk {
-        table: ctx
-            .state()
-            .vmcs
-            .read_natural(VmcsFieldNatural::GuestCr3)
-            .ok()?
-            & 0x000f_ffff_ffff_f000,
+        table: root,
         base: 0,
         level: 4,
     };
@@ -1413,6 +1432,7 @@ fn collect_page_breakpoints<C: VmContext>(
     }
     let proof = &mut ctx.state_mut().svm_guard.alias_proof;
     proof.valid = true;
+    proof.root = root;
     proof.page_count = hazard_pages;
     let mut slot = 0;
     for (i, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
@@ -3756,6 +3776,45 @@ mod tests {
             &[0x1100]
         );
         assert_eq!(ctx.state().svm_guard.aliases[0].table, 0);
+    }
+
+    #[test]
+    fn alias_proofs_survive_bounded_guard_expiry_only_while_global_gate_holds() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(&first.page_breakpoints[..first.page_breakpoint_count], &[0x1100]);
+
+        let root = ctx.state().svm_guard.root;
+        ctx.state_mut().svm_guard.gate_root = root;
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.valid = false;
+        collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
+        assert!(ctx.state().svm_guard.alias_proofs[0].valid);
+
+        let hazard = cached_page_hazards(&mut ctx, 0x1000).unwrap();
+        let cursor = ctx.state().svm_guard.alias_cursor;
+        ctx.state_mut().svm_guard.aliases[0].table = 0;
+        let mut reused = first;
+        collect_page_breakpoints(&mut ctx, &mut reused, &[hazard]).unwrap();
+        assert_eq!(ctx.state().svm_guard.alias_cursor, cursor);
+        assert_eq!(ctx.state().svm_guard.aliases[0].table, 0);
+
+        // Releasing a table write invalidates the alias proof; the new
+        // executable mapping must be enumerated before another page batch.
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
+        ctx.state_mut().svm_guard.valid = false;
+        collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
+        assert!(!ctx.state().svm_guard.alias_proofs[0].valid);
+        let hazard = cached_page_hazards(&mut ctx, 0x1000).unwrap();
+        let mut rebuilt = first;
+        collect_page_breakpoints(&mut ctx, &mut rebuilt, &[hazard]).unwrap();
+        assert_eq!(
+            &rebuilt.page_breakpoints[..rebuilt.page_breakpoint_count],
+            &[0x1100, 0x9100]
+        );
     }
 
     #[test]
