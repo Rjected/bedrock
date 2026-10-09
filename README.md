@@ -347,6 +347,16 @@ isolation check, two fresh Linux boots, and a 38.659-billion-instruction memory
 workload passed. The memory workload remained near native speed: 3.158 seconds
 guest versus 3.153 seconds native. General near-native AMD execution remains
 unfinished because most Linux time still comes from VM exits and batch planning.
+The same FPU reservation now also keeps guest register state live across SVM
+entries, skipping guest XRSTOR after the first entry in each group. Guest XSAVE
+still updates the memory image on every exit. A reservation rotation, RUN
+boundary, or guest XSETBV invalidates the live-register shortcut. In a
+same-box ten-run comparison against host-only FPU batching, Linux median time
+fell from 2.465 to 2.417 seconds (about 2.0%) and median SVM runner cycles
+from 4.40 to 4.15 billion (about 5.7%); exits stayed near 843,000. The SVM
+hardware suite, guest XMM/host x87 rotation check, 24 further exact Linux
+boot/fork replays, two fresh Linux boots, and the long memory workload passed.
+That workload remained near native at 3.157 seconds guest versus 3.152 native.
 A box-only stage profile of the same Linux boot and two forks attributed about
 2.73–2.84 billion cycles over roughly 1.05 million entries to batch planning,
 versus 0.43–0.48 billion each for global-tree refresh, instruction-window

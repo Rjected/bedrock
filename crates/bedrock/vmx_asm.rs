@@ -98,6 +98,7 @@ impl VmRunner for RealVmRunner {
     }
 
     fn begin_run(&mut self, ctx: &mut VmxContext) {
+        ctx.svm_guest_fpu_resident = 0;
         if super::svm::supported() && ctx.xcr0_mask != 0 && unsafe { irq_fpu_usable() } {
             // Begin and end with interrupts enabled so the kernel's FPU API
             // balances its softirq lock. The outer VM_RUN pins this CPU.
@@ -109,7 +110,7 @@ impl VmRunner for RealVmRunner {
         }
     }
 
-    fn host_irq_window(&mut self, _ctx: &mut VmxContext, host_tsc: u64) {
+    fn host_irq_window(&mut self, ctx: &mut VmxContext, host_tsc: u64) {
         if self.svm_fpu_active {
             self.svm_fpu_entries += 1;
         }
@@ -121,6 +122,7 @@ impl VmRunner for RealVmRunner {
         {
             // Guest state is already saved and host XCR0/MSRs are restored.
             // Briefly release the reservation so pending softirqs can run.
+            ctx.svm_guest_fpu_resident = 0;
             unsafe { kernel_fpu_end() };
             unsafe { kernel_fpu_begin_mask(2) };
             self.svm_fpu_entries = 0;
@@ -131,6 +133,7 @@ impl VmRunner for RealVmRunner {
     fn finish_run(&mut self, ctx: &mut VmxContext) {
         if self.svm_fpu_active {
             ctx.svm_host_fpu_reserved = 0;
+            ctx.svm_guest_fpu_resident = 0;
             unsafe { kernel_fpu_end() };
             self.svm_fpu_active = false;
             self.svm_fpu_entries = 0;

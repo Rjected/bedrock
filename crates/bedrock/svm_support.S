@@ -60,6 +60,7 @@
 #define VMXCTX_GUEST_CR2	280
 #define VMXCTX_SVM_GUEST_XSAVEOPT 288
 #define VMXCTX_SVM_HOST_FPU_RESERVED 296
+#define VMXCTX_SVM_GUEST_FPU_RESIDENT 304
 
 /* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints, PMU mask,
  * guest VMCB virtual pointer. The final argument exposes hardware writes to
@@ -157,11 +158,14 @@ SYM_FUNC_START(svm_run_guest)
 	pop	%rdi			/* Restore ctx pointer */
 
 	/* Load guest FPU/SSE state from guest_xsave_ptr */
+	cmpq	$0, VMXCTX_SVM_GUEST_FPU_RESIDENT(%rdi)
+	jne	.Lsvm_skip_guest_xrstor_entry
 	mov	VMXCTX_XCR0_MASK(%rdi), %rax
 	mov	%rax, %rdx
 	shr	$32, %rdx
 	mov	VMXCTX_GUEST_XSAVE_PTR(%rdi), %rcx
 	xrstor64 (%rcx)
+.Lsvm_skip_guest_xrstor_entry:
 
 .Lsvm_skip_xsave_entry:
  /* Preserve host counter enables; only our perf-owned GuestOnly event runs
@@ -248,6 +252,15 @@ SYM_FUNC_START(svm_run_guest)
 	jne	.Lsvm_guest_xsave_done
 	movq	$2, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
 .Lsvm_guest_xsave_done:
+	/* XSAVE updated the guest image. Its registers also remain live while
+	 * the kernel FPU reservation prevents host use of those registers. */
+	cmpq	$0, VMXCTX_SVM_HOST_FPU_RESERVED(%rdi)
+	je	.Lsvm_guest_not_resident
+	movq	$1, VMXCTX_SVM_GUEST_FPU_RESIDENT(%rdi)
+	jmp	.Lsvm_guest_resident_done
+.Lsvm_guest_not_resident:
+	movq	$0, VMXCTX_SVM_GUEST_FPU_RESIDENT(%rdi)
+.Lsvm_guest_resident_done:
 
 	/* Restore host XCR0 before loading host FPU state */
 	mov	VMXCTX_HOST_XCR0(%rdi), %rax

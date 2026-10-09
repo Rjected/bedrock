@@ -69,9 +69,14 @@ pub struct VmxContext {
     // A kernel FPU reservation protects host state across a short SVM run
     // group, allowing assembly to omit its per-entry host XSAVE/XRSTOR.
     pub svm_host_fpu_reserved: u64,
+
+    // Guest registers remain resident until the reservation rotates. Guest
+    // XSAVE still updates the memory image after every VM exit.
+    pub svm_guest_fpu_resident: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
+const _: () = assert!(core::mem::offset_of!(VmxContext, svm_guest_fpu_resident) == 304);
 
 impl Default for VmxContext {
     fn default() -> Self {
@@ -121,6 +126,7 @@ impl VmxContext {
             guest_cr2: 0,
             svm_guest_xsaveopt: 0,
             svm_host_fpu_reserved: 0,
+            svm_guest_fpu_resident: 0,
         }
     }
 }

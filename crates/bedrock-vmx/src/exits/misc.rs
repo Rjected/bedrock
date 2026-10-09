@@ -307,6 +307,7 @@ pub fn handle_xsetbv<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
     // Used for the host's XSAVE/XRSTOR of guest state.
     ctx.state_mut().xcr0_mask = value;
     ctx.state_mut().vmx_ctx.svm_guest_xsaveopt = 0;
+    ctx.state_mut().vmx_ctx.svm_guest_fpu_resident = 0;
 
     log_debug!("XSETBV: setting XCR0 to {:#x}", value);
 
