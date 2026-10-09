@@ -44,6 +44,16 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
     if C::V::uses_nested_paging() {
         let page = guest_phys & !4095;
         if qual.execute {
+            if ctx.state().svm_guard.gate_disabled_no_rogpt
+                && ctx
+                    .state_mut()
+                    .ept
+                    .permit_npt_execute_4k(allocator, GuestPhysAddr::new(page))
+                    .is_some()
+            {
+                ctx.state_mut().svm_gate_scalar_page = None;
+                return ExitHandlerResult::Continue;
+            }
             let gate = &ctx.state().svm_guard;
             let may_trust = gate.gate_ready
                 && !gate.gate_dirty

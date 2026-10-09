@@ -518,7 +518,33 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
 pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &A,
+    can_guard_page_tables: bool,
 ) {
+    if !can_guard_page_tables {
+        ctx.state_mut().svm_guard.gate_disabled_no_rogpt = true;
+        if !ctx.state().svm_guard.gate_ready
+            && !ctx.state().svm_guard.gate_dirty
+            && ctx.state().svm_guard.gate_count == 0
+        {
+            return;
+        }
+        // Without ROGPT, protecting page tables turns ordinary hardware page
+        // walks into nested-page faults. Keep the global gate off; validated
+        // bounded batches still protect their own code and store ranges.
+        let count = ctx.state().svm_guard.gate_count;
+        for index in 0..count {
+            let saved = ctx.state().svm_guard.gate_guards[index];
+            if saved.valid {
+                saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
+                ctx.state_mut().svm_guard.gate_guards[index].valid = false;
+            }
+        }
+        ctx.state_mut().svm_guard.gate_count = 0;
+        ctx.state_mut().svm_guard.gate_ready = false;
+        ctx.state_mut().svm_guard.gate_dirty = false;
+        return;
+    }
+    ctx.state_mut().svm_guard.gate_disabled_no_rogpt = false;
     if ctx.state().svm_gate_scalar_page.is_some() {
         return;
     }
@@ -1608,9 +1634,40 @@ fn hazard_boundary_safe(left: &PageHazards, right: &PageHazards) -> bool {
     !(distance + leading <= 14 && matches!((right.edge >> 8) as u8, 0xa4..=0xa7 | 0xaa..=0xaf))
 }
 
+// These flag-independent operations cannot observe the temporarily clamped
+// loop counter or change the pointer used by the range proof. Memory reads
+// are limited to [RDI], so the counter cannot redirect their address either.
+fn counted_store_payload(bytes: &[u8], counter: u8) -> bool {
+    let Some((p, rex, _)) = opcode_start(bytes, true) else {
+        return false;
+    };
+    if bytes[..p].iter().any(|b| matches!(b, 0x64 | 0x65 | 0x67)) {
+        return false;
+    }
+    let op = bytes[p];
+    if op == 0x90 {
+        return rex & 1 == 0 && p + 1 == bytes.len();
+    }
+    let Some(&modrm) = bytes.get(p + 1) else {
+        return false;
+    };
+    let mode = modrm >> 6;
+    let reg = ((modrm >> 3) & 7) | ((rex & 4) << 1);
+    let rm = (modrm & 7) | ((rex & 1) << 3);
+    let payload = |register| register != 7 && register != counter;
+    match op {
+        0x8b if mode == 0 => rm == 7 && payload(reg),
+        0x8b | 0x31 | 0x33 if mode == 3 => payload(reg) && payload(rm),
+        0x81 | 0x83 | 0xc1 if mode == 3 => {
+            rex & 4 == 0 && modrm >> 3 & 7 == 0 && payload(rm)
+        }
+        _ => false,
+    }
+}
+
 // A counted MOV-store loop can use entry-time range validation when RDI
-// advances once per iteration and RCX decreases once before JNZ. Other writes
-// or control transfers require the ordinary conservative planner.
+// advances once per iteration and RCX/RDX decreases once before JNZ. Other
+// writes or control transfers require the ordinary conservative planner.
 fn counted_store_loop<C: VmContext>(
     ctx: &C,
     linear: u64,
@@ -1662,6 +1719,14 @@ fn counted_store_loop<C: VmContext>(
             && stride.is_none()
         {
             stride = Some(u64::from(instruction[3]));
+        } else if instruction.len() == 4
+            && instruction[..3] == [0x48, 0x83, 0xc7]
+            && instruction[3] > 0
+            && instruction[3] < 128
+            && stride.is_none()
+            && decrement.is_none()
+        {
+            stride = Some(u64::from(instruction[3]));
         } else if writes && stride.is_none() {
             let (p, rex, _) = opcode_start(instruction, true)?;
             if !matches!(instruction[p], 0x88 | 0x89 | 0xc6 | 0xc7)
@@ -1683,6 +1748,14 @@ fn counted_store_loop<C: VmContext>(
             let displacement = address.checked_sub(gprs[7])?;
             first = first.min(displacement);
             last = last.max(displacement.checked_add(width)?);
+        } else if !writes
+            && stride.is_none()
+            && decrement.is_none()
+            && counted_store_payload(instruction, 1)
+            && counted_store_payload(instruction, 2)
+        {
+            // The eventual loop counter may be RCX or RDX. Until DEC is
+            // decoded, exclude both from payload operands.
         } else {
             return None;
         }
@@ -2216,7 +2289,10 @@ fn prepare_verified<C: VmContext>(
     let mut stores = StorePlan::default();
     let mut offset = 0;
     let mut branch_targets = [0i64; 64];
-    let mut allow_branch_exits = long && allow_guarded_stores;
+    // Outgoing branch breakpoints need a retirement counter, but no table
+    // guard when this batch has made no memory writes. Without a table guard
+    // we stop at the first store before decoding any later branch.
+    let mut allow_branch_exits = long && can_loop;
     let mut branch_sources = [0u16; 64];
     let mut branch_count = 0;
     let mut first_branch = 0;
@@ -2245,6 +2321,11 @@ fn prepare_verified<C: VmContext>(
         if can_loop {
             let tail = &bytes[offset..available];
             if let Some((length, displacement)) = relative_branch(tail, long, default32) {
+                if paged && batch.writes_memory && !allow_guarded_stores {
+                    // Re-enter after a store before control can reach a
+                    // translation changed by that store.
+                    break;
+                }
                 let end = offset + length;
                 let target = end as i64 + displacement;
                 let backward = target < end as i64;
@@ -2285,6 +2366,11 @@ fn prepare_verified<C: VmContext>(
         else {
             break;
         };
+        if paged && batch.writes_memory && memory && !writes && !allow_guarded_stores {
+            // A prior store may have rewritten this load's PTE. End the
+            // batch and flush translations before executing the load.
+            break;
+        }
         if paged && writes {
             if long
                 && can_loop
@@ -2471,6 +2557,10 @@ fn prepare_verified<C: VmContext>(
             }
             page = page.checked_add(4096)?;
         }
+        // The bounded destination proof excludes every code and translation
+        // frame this instruction can write. Keeping those tables writable
+        // avoids a nested fault on every page walk without ROGPT.
+        batch.validated_stores = true;
     }
     batch.endpoint_intercepted =
         endpoint_intercepted(&bytes[batch.offsets[batch.count] as usize..available]);
@@ -2782,11 +2872,13 @@ mod tests {
         let ctx = paged_context(&[0x90, 0x90, 0x74, 1, 0x48, 0x89, 0xc0, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(!b.uses_counter);
-        assert_eq!(b.count, 2); // Target enters the middle of MOV.
+        assert_eq!(b.branch_exit_count, 1); // Trap the target inside MOV.
+        assert_eq!(b.branch_exits[0], 0x1005);
         let ctx = paged_context(&[0x90, 0x90, 0xeb, 0x7f, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(!b.uses_counter);
-        assert_eq!(b.count, 2);
+        assert_eq!(b.branch_exit_count, 1);
+        assert_eq!(b.branch_exits[0], 0x1083);
         let ctx = paged_context(&[0x90, 0x90, 0x74, 3, 0x48, 0x89, 0x07, 0x0f, 0xc7, 0xf0]);
         let b = planned(&ctx).unwrap();
         assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
@@ -3084,6 +3176,53 @@ mod tests {
         // Moving stores after the pointer advance invalidates the range.
         ctx.memory[0x1000..0x1004].copy_from_slice(&[0x48, 0x8d, 0x7f, 64]);
         assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+    }
+
+    #[test]
+    fn counted_store_loops_accept_read_modify_write_without_counter_payloads() {
+        let code = [
+            0x4c, 0x8b, 0x0f, // mov r9,[rdi]
+            0x49, 0x31, 0xc1, // xor r9,rax
+            0x49, 0xc1, 0xc1, 0x0d, // rol r9,13
+            0x49, 0x81, 0xc1, 1, 0, 0, 0, // add r9,1
+            0x4c, 0x89, 0x0f, // mov [rdi],r9
+            0x4c, 0x31, 0xc8, // xor rax,r9
+            0x48, 0x83, 0xc7, 8, // add rdi,8
+            0x48, 0xff, 0xc9, // dec rcx
+            0x75, 0xe0, // jnz to the first load
+        ];
+        let mut ctx = paged_context(&code);
+        ctx.state_mut().gprs.rcx = 4096;
+        let batch = planned(&ctx).unwrap();
+        assert!(batch.counted_loop.is_some() && batch.validated_stores);
+        assert_eq!(batch.counted_loop.unwrap().iterations, 4096);
+        assert_eq!(batch.count, 9);
+
+        // A payload read of the clamped counter would change the store value.
+        ctx.memory[0x1003..0x1006].copy_from_slice(&[0x49, 0x31, 0xc9]); // xor r9,rcx
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+        // A changed source pointer would invalidate the prechecked range.
+        ctx.memory[0x1003..0x1006].copy_from_slice(&[0x49, 0x31, 0xf9]); // xor r9,rdi
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+        // ADD after DEC would replace the flags consumed by JNZ.
+        ctx.memory[0x1003..0x1006].copy_from_slice(&code[3..6]);
+        ctx.memory[0x1017..0x101e]
+            .copy_from_slice(&[0x48, 0xff, 0xc9, 0x48, 0x83, 0xc7, 8]);
+        assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));
+        assert!(!counted_store_payload(&[0x49, 0x90], 1)); // XCHG, not NOP.
+    }
+
+    #[test]
+    fn paged_store_without_table_guards_cannot_batch_a_later_load() {
+        let ctx = paged_context(&[
+            0x48, 0x8b, 0x1e, // mov rbx,[rsi]
+            0x48, 0x89, 0x07, // mov [rdi],rax: may replace the read PTE
+            0x48, 0x8b, 0x16, // mov rdx,[rsi]
+            0x31, 0xc0, 0x0f, 0x01, 0xd9,
+        ]);
+        let batch = planned(&ctx).unwrap();
+        assert!(batch.writes_memory && batch.validated_stores);
+        assert_eq!(batch.endpoint(), 0x1006); // Stop before the second load.
     }
 
     #[test]
@@ -3693,7 +3832,7 @@ mod tests {
         ctx.state_mut().gprs.rcx = 16;
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare(&mut ctx, true, true, &window).unwrap();
-        assert!(batch.repeat.is_some() && !batch.page_execution);
+        assert!(batch.repeat.is_some() && batch.validated_stores && !batch.page_execution);
         assert!(!ctx.state().svm_rejected_pages.contains(&0x1000));
         for count in [0, 1] {
             ctx.state_mut().gprs.rcx = count;
@@ -3714,7 +3853,7 @@ mod tests {
             let batch = planned(&ctx).unwrap();
             collect_translation_tree(&mut ctx, &batch).unwrap();
             assert!(cached_page_hazards(&mut ctx, 0x7000).is_some());
-            assert!(batch.repeat.is_some() && batch.writes_memory);
+            assert!(batch.repeat.is_some() && batch.writes_memory && batch.validated_stores);
             let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
             retain_translation_cache(&mut ctx, Some(&batch), Some(&window), false);
             assert!(!ctx.state().svm_guard.valid);
@@ -3968,12 +4107,15 @@ mod tests {
 
     #[test]
     fn forward_store_paths_require_addresses_stable_on_every_path() {
-        // A store preceding a branch and another optional store are safe.
+        // Without table guards, stop before a branch following a store.
         let mut ctx = paged_context(&[
             0x48, 0x89, 0x07, 0x74, 4, 0x48, 0x89, 0x47, 8, 0x90, 0x0f, 0x01, 0xd9,
         ]);
         ctx.state_mut().stop_at_tsc = Some(4);
-        let b = planned(&ctx).unwrap();
+        assert!(planned(&ctx).is_none());
+        // With table guards, both forward paths remain in the batch.
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let b = prepare_verified(&ctx, true, false, true, &window).unwrap();
         assert!(b.uses_counter && b.counter_bounded && b.validated_stores);
         assert_eq!(b.count, 4);
         // An optional address change invalidates stores after the merge.
@@ -3997,9 +4139,11 @@ mod tests {
         assert!(b.uses_counter && b.counter_bounded && b.endpoint_intercepted);
         assert_eq!(b.count, 4);
         assert_eq!(b.counter_period(), 1 << 30);
-        // A smaller deadline truncates the region before its branch target.
+        // A smaller deadline stops on the branch's exact exit breakpoint.
         ctx.state_mut().stop_at_tsc = Some(2);
-        assert!(planned(&ctx).is_none());
+        let b = planned(&ctx).unwrap();
+        assert!(!b.uses_counter && b.branch_exit_count == 1);
+        assert!(b.count <= 2);
         // Backward edges still require an interrupt-latency margin.
         let mut ctx = paged_context(&[0x90, 0x90, 0x75, 0xfc, 0x0f, 0x01, 0xd9]);
         ctx.state_mut().stop_at_tsc = Some(4);

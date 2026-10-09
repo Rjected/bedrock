@@ -105,6 +105,12 @@ test_box() {
 set -euo pipefail
 cd /home/ubuntu/bedrock
 rm -f /tmp/bedrock-{module-build,cargo-build,svm_smoke,svm_transitions,svm_bench,native,native-branches}.log
+# rsync can restore source timestamps older than an existing module object.
+# Always rebuild from clean sources so a box never runs an earlier variant.
+make -C /lib/modules/7.0.0-38-generic/build M="$PWD/crates/bedrock" \
+    RUSTC=/usr/bin/rustc-1.91 CC=x86_64-linux-gnu-gcc-13 \
+    KRUSTFLAGS='-L /usr/src/linux-lib-rust-7.0.0-38-generic/rust' \
+    SVM_ONLY=1 clean >/tmp/bedrock-module-clean.log 2>&1
 make -C /lib/modules/7.0.0-38-generic/build M="$PWD/crates/bedrock" \
     RUSTC=/usr/bin/rustc-1.91 CC=x86_64-linux-gnu-gcc-13 \
     KRUSTFLAGS='-L /usr/src/linux-lib-rust-7.0.0-38-generic/rust' \

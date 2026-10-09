@@ -316,7 +316,11 @@ where
             }
             ctx.state_mut().svm_guard.gate_host_write_count = 0;
             ctx.state_mut().svm_guard.gate_host_write_all = false;
-            super::super::exits::refresh_global_tree(ctx, allocator);
+            super::super::exits::refresh_global_tree(
+                ctx,
+                allocator,
+                runner.can_guard_page_tables(),
+            );
         }
 
         ctx.sync_gprs_to_vmx_ctx();

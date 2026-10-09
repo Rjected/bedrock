@@ -68,8 +68,9 @@ before treating a percentage as a performance result.
 
 For a memory-writing workload, build and run `svm_workload` on the box. It
 executes identical assembly natively and in a guest, and checks every output
-word. The 512-round run takes roughly ten seconds per guest sample on the
-current AMD branch:
+word. On the measured EPYC 4244P box, the 512-round run took roughly ten
+seconds per guest sample; an EPYC 4245P box completed 1,024 rounds in about
+three milliseconds. Record the box CPU model and feature bits with each result:
 
 ```sh
 ssh "ubuntu@$BOX" 'cd /home/ubuntu/bedrock && \

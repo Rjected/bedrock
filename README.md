@@ -334,6 +334,16 @@ instructions in 3.118 ms guest versus 3.074 ms native on one box, and
 with only 11 to 21 VM exits per run. The second box reported SVM PMC
 virtualization, ROGPT, and virtual NMI in CPUID. The earlier box's CPUID feature
 bits were not saved, so the reason for the difference is not yet established.
+On a later EPYC 4245P box, a clean build of the current branch passed the SVM
+smoke, transition, and benchmark suites. A nine-sample 1,024-pass memory run
+took 4.030 ms guest versus 3.974 ms native (1.01x, about 12 exits). To isolate a likely
+feature dependency, a box-local diagnostic build disabled ROGPT in both the
+VMCB and planner. With that feature disabled, the same workload took 12.346 ms
+guest versus 3.087 ms native (4.00x, about 5,140 exits, nine samples). Translation-write
+and replay correctness checks passed in that diagnostic build, but its native
+PUSHF acceleration assertion still failed. This is a feature ablation on a
+4245P, not a measurement on a 4244P; it does not establish why the earlier
+4244P run was 6,000x slower or meet the 5% goal on hosts without ROGPT.
 This result is specific to the memory workload. With the earlier Linux 6.18
 reference guest kernel and `svmGuestInitrd`, one EPYC 4245P box booted to the
 snapshot and replayed two forks in 18.43 seconds; the fork outputs matched.

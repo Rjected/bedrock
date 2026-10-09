@@ -473,6 +473,20 @@ impl<Frame> EptPageTable<Frame> {
         unsafe { (*leaf.add(index as usize)).raw() & (1 << 9) != 0 }
     }
 
+    /// Make a mapped AMD page executable without creating a global code
+    /// proof. The scalar and bounded-batch paths validate it on each entry.
+    pub fn permit_npt_execute_4k<A: FrameAllocator>(
+        &mut self,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> Option<()> {
+        let (table, index) = self.npt_leaf_4k(allocator, guest)?;
+        let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
+        // SAFETY: the guest is stopped while changing its NPT leaf.
+        unsafe { (*leaf.add(index as usize)).set_npt_nx(false) };
+        Some(())
+    }
+
     pub fn trust_npt_code_4k<A: FrameAllocator>(
         &mut self,
         allocator: &A,
