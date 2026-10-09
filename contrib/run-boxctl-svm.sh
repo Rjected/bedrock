@@ -21,12 +21,15 @@ case "$mode" in prepare|test|collect|all) ;; *) usage ;; esac
 [[ $box_name =~ ^[a-zA-Z0-9-]+$ ]] || usage
 
 box_target="ubuntu@${box_name}"
+ssh_opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
+    -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
+rsync_ssh='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3'
 kernel=7.0.0-38-generic
 source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 evidence_dir="${source_dir}/target/boxctl-evidence/${box_name}"
 
 check_host() {
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$box_target" 'bash -s' <<'REMOTE'
+    ssh "${ssh_opts[@]}" "$box_target" 'bash -s' <<'REMOTE'
 set -euo pipefail
 test "$(uname -r)" = 7.0.0-38-generic || {
     echo 'run prepare first: box is not booted into Linux 7.0.0-38-generic' >&2
@@ -42,7 +45,7 @@ REMOTE
 }
 
 prepare_box() {
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$box_target" 'bash -s' <<'REMOTE'
+    ssh "${ssh_opts[@]}" "$box_target" 'bash -s' <<'REMOTE'
 set -euo pipefail
 packages=(linux-image-7.0.0-38-generic linux-headers-7.0.0-38-generic
     linux-lib-rust-7.0.0-38-generic rustc-1.91 gcc-13 make kexec-tools curl rsync)
@@ -56,13 +59,13 @@ for package in "${packages[@]}"; do
 done
 REMOTE
 
-    if [[ $(ssh -o BatchMode=yes "$box_target" 'uname -r') != "$kernel" ]]; then
+    if [[ $(ssh "${ssh_opts[@]}" "$box_target" 'uname -r') != "$kernel" ]]; then
         # A successful kexec drops SSH before the command can return.
-        ssh -o BatchMode=yes "$box_target" \
+        ssh "${ssh_opts[@]}" "$box_target" \
             'sudo kexec -l /boot/vmlinuz-7.0.0-38-generic --initrd=/boot/initrd.img-7.0.0-38-generic --reuse-cmdline && sudo systemctl kexec' \
             || true
         for attempt in {1..45}; do
-            if [[ $(ssh -o BatchMode=yes -o ConnectTimeout=2 "$box_target" \
+            if [[ $(ssh "${ssh_opts[@]}" -o ConnectTimeout=2 "$box_target" \
                 'uname -r' 2>/dev/null || true) == "$kernel" ]]; then
                 break
             fi
@@ -71,7 +74,7 @@ REMOTE
     fi
     check_host
 
-    ssh -o BatchMode=yes "$box_target" 'bash -s' <<'REMOTE'
+    ssh "${ssh_opts[@]}" "$box_target" 'bash -s' <<'REMOTE'
 set -euo pipefail
 if [[ ! -x /home/ubuntu/.cargo/bin/cargo ]]; then
     curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs |
@@ -79,14 +82,14 @@ if [[ ! -x /home/ubuntu/.cargo/bin/cargo ]]; then
         >/tmp/bedrock-rustup.log 2>&1
 fi
 REMOTE
-    echo "prepared $box_name: $(ssh -o BatchMode=yes "$box_target" 'uname -r')"
+    echo "prepared $box_name: $(ssh "${ssh_opts[@]}" "$box_target" 'uname -r')"
 }
 
 collect_logs() {
     mkdir -p "$evidence_dir"
-    rsync -az --include 'bedrock-*.log' --exclude '*' \
+    timeout 30 rsync -az -e "$rsync_ssh" --include 'bedrock-*.log' --exclude '*' \
         "$box_target:/tmp/" "$evidence_dir/"
-    ssh -o BatchMode=yes "$box_target" \
+    ssh "${ssh_opts[@]}" "$box_target" \
         'uname -r; lscpu | grep -E "Vendor ID|Model name|Virtualization:"' \
         >"$evidence_dir/host.txt"
     echo "logs: $evidence_dir"
@@ -95,18 +98,19 @@ collect_logs() {
 test_box() {
     check_host
     mkdir -p "$evidence_dir"
-    rm -f "$evidence_dir"/bedrock-{module-build,cargo-build,svm_smoke,svm_transitions,svm_bench,native,native-branches}.log
-    rsync -az --exclude .git --exclude target --exclude '.env*' \
+    rm -f "$evidence_dir"/bedrock-{module-build,cargo-build,svm_smoke,svm_transitions,svm_bench,svm_workload,native,native-branches}.log
+    rsync -az -e "$rsync_ssh" --exclude .git --exclude target --exclude '.env*' \
         --exclude .claude --exclude linux --exclude bhyve \
         "$source_dir/" "$box_target:/home/ubuntu/bedrock/"
 
     test_status=0
-    ssh -o BatchMode=yes "$box_target" 'bash -s' <<'REMOTE' || test_status=$?
+    ssh "${ssh_opts[@]}" "$box_target" 'bash -s' <<'REMOTE' || test_status=$?
 set -euo pipefail
 cd /home/ubuntu/bedrock
-rm -f /tmp/bedrock-{module-build,cargo-build,svm_smoke,svm_transitions,svm_bench,native,native-branches}.log
+rm -f /tmp/bedrock-{module-build,cargo-build,svm_smoke,svm_transitions,svm_bench,svm_workload,native,native-branches}.log
 # rsync can restore source timestamps older than an existing module object.
 # Always rebuild from clean sources so a box never runs an earlier variant.
+echo 'boxctl test: building kernel module'
 make -C /lib/modules/7.0.0-38-generic/build M="$PWD/crates/bedrock" \
     RUSTC=/usr/bin/rustc-1.91 CC=x86_64-linux-gnu-gcc-13 \
     KRUSTFLAGS='-L /usr/src/linux-lib-rust-7.0.0-38-generic/rust' \
@@ -115,24 +119,33 @@ make -C /lib/modules/7.0.0-38-generic/build M="$PWD/crates/bedrock" \
     RUSTC=/usr/bin/rustc-1.91 CC=x86_64-linux-gnu-gcc-13 \
     KRUSTFLAGS='-L /usr/src/linux-lib-rust-7.0.0-38-generic/rust' \
     SVM_ONLY=1 modules >/tmp/bedrock-module-build.log 2>&1
+echo 'boxctl test: building guest examples'
 /home/ubuntu/.cargo/bin/cargo build --release -p bedrock-vm \
     --example svm_smoke --example svm_transitions --example svm_bench \
+    --example svm_workload \
     >/tmp/bedrock-cargo-build.log 2>&1
+echo 'boxctl test: loading module inside box'
 sudo rmmod bedrock 2>/dev/null || true
 if [[ -d /sys/module/kvm_amd ]]; then sudo rmmod kvm_amd; fi
 if [[ -d /sys/module/kvm ]]; then sudo rmmod kvm; fi
 sudo insmod crates/bedrock/bedrock.ko
+echo 'boxctl test: running mixed memory workload'
+sudo timeout 30 taskset -c 1 target/release/examples/svm_workload 1024 3 \
+    >/tmp/bedrock-svm_workload.log 2>&1
 for test_case in svm_smoke svm_transitions svm_bench; do
+    echo "boxctl test: running $test_case"
     sudo timeout 30 "target/release/examples/$test_case" \
         >"/tmp/bedrock-$test_case.log" 2>&1
 done
+echo 'boxctl test: running straight native comparison'
 sudo timeout 20 taskset -c 1 target/release/examples/svm_bench native \
     >/tmp/bedrock-native.log 2>&1
+echo 'boxctl test: running branched native comparison'
 sudo timeout 20 taskset -c 1 target/release/examples/svm_bench native-branches \
     >/tmp/bedrock-native-branches.log 2>&1
 REMOTE
     collect_logs || true
-    for name in svm_smoke svm_transitions svm_bench native native-branches; do
+    for name in svm_workload svm_smoke svm_transitions svm_bench native native-branches; do
         if [[ -f $evidence_dir/bedrock-$name.log ]]; then
             grep 'PASS' "$evidence_dir/bedrock-$name.log" | tail -3 || true
         fi

@@ -45,8 +45,10 @@ contrib/run-boxctl-svm.sh test "$BOX"
 
 `test` syncs the current worktree, builds `bedrock.ko` against the box's
 running HWE kernel, releases `kvm_amd` and `kvm` on the box, loads Bedrock
-there, and runs the smoke, transition, default SVM, native-loop, and branched
-native-loop examples. It skips package installation and rebooting on every
+there, and runs a 37.75-million-instruction mixed memory workload, the smoke
+and transition suites, the default SVM suite, and both native-loop comparisons.
+It prints each build and test phase, and bounds SSH waits if a box drops off
+the network. It skips package installation and rebooting on every
 repeat. A fresh box can run both phases with
 `contrib/run-boxctl-svm.sh all "$BOX"` (or just
 `contrib/run-boxctl-svm.sh "$BOX"`).
@@ -70,17 +72,15 @@ The native-loop example runs nine paired measurements and reports their
 median. These short timings still vary between invocations; repeat a run
 before treating a percentage as a performance result.
 
-For a memory-writing workload, build and run `svm_workload` on the box. It
-executes identical assembly natively and in a guest, and checks every output
-word. On the measured EPYC 4244P box, the 512-round run took roughly ten
-seconds per guest sample; an EPYC 4245P box completed 1,024 rounds in about
-three milliseconds. Record the box CPU model and feature bits with each result:
+The default `test` run now measures 1,024 rounds of `svm_workload`. It executes
+identical assembly natively and in a guest, and checks every output word. For
+an additional stress run with a different round count, use:
 
 ```sh
 ssh "ubuntu@$BOX" 'cd /home/ubuntu/bedrock && \
   /home/ubuntu/.cargo/bin/cargo build --release -p bedrock-vm --example svm_workload && \
   sudo timeout 90 taskset -c 1 target/release/examples/svm_workload 512 3 \
-    > /tmp/bedrock-workload.log 2>&1'
+    > /tmp/bedrock-workload-extra.log 2>&1'
 contrib/run-boxctl-svm.sh collect "$BOX"
 ```
 
@@ -88,10 +88,10 @@ Its `instructions` and `seconds` fields give a measured instruction rate;
 CPU GHz and instructions per second are different units. The sample also
 reports VM exits and the native-to-guest slowdown. `SVM_WORKLOAD_HOST` records
 the SVM feature bits used to select accelerated paths. Keep the box's CPU
-model and feature line with each result: the same branch measured about 6,000x
-slowdown on an EPYC 4244P box and about 1% overhead on two fresh EPYC 4245P
-boxes. The earlier box's feature bits were not recorded, so this difference
-still needs investigation.
+model and feature line with each result: an EPYC 4244P with ROGPT but no PMC
+virtualization measured 5.41x slowdown after counted-store-loop acceleration,
+while an EPYC 4245P with PMC virtualization measured about 1% overhead. This
+difference is a hardware feature gate, not a CPU-frequency comparison.
 
 ## Linux boot and replay checks
 
