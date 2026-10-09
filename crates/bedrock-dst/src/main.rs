@@ -623,6 +623,7 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
     let cmd = warmup_cmd(args)?;
     let mut warm = ready.branch()?;
     let mut last = String::new();
+    let progress_enabled = std::env::var_os("BEDROCK_BOOT_PROGRESS").is_some();
     loop {
         if warm.current_time() >= deadline {
             return Err(format!(
@@ -630,7 +631,21 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
             )
             .into());
         }
+        if progress_enabled {
+            eprintln!(
+                "BEDROCK_WARMUP_PROGRESS phase=run start_vt={:.1} wall_seconds={:.1}",
+                warm.current_time().as_secs_f64(),
+                started.elapsed().as_secs_f64()
+            );
+        }
         warm.run_for(secs(WARMUP_STEP_SECS))?;
+        if progress_enabled {
+            eprintln!(
+                "BEDROCK_WARMUP_PROGRESS phase=hook start_vt={:.1} wall_seconds={:.1}",
+                warm.current_time().as_secs_f64(),
+                started.elapsed().as_secs_f64()
+            );
+        }
         let (code, out) = host_bash(&mut warm, &cmd)?;
         if code != 0 {
             return Err(format!("{} warmup failed ({code}): {}", wl.cmd, out.trim()).into());
