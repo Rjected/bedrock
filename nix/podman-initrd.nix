@@ -61,7 +61,9 @@ let
   # runs inside the workload container (wrapping the process to fuzz), so it is
   # bind-mounted into every container via containers.conf below rather than baked
   # into any image. Built static (like the other guest helpers) so the single
-  # binary can be bind-mounted with no library closure to carry along.
+  # binary can be bind-mounted with no library closure to carry along. Before
+  # exec it installs a seccomp filter that keeps the tree in SCHED_EXT (see
+  # thread-fuzz.c; THREAD_FUZZ_SECCOMP=0 opts out).
   threadFuzz = pkgs.pkgsStatic.stdenv.mkDerivation {
     name = "thread-fuzz";
     dontUnpack = true;
