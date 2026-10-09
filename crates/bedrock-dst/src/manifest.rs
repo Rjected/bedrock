@@ -4,7 +4,8 @@
 //!
 //! A tape replays only against the binaries it was recorded with: the guest
 //! kernel, initrd, image archive and compose file (sha256 each), the loaded
-//! `bedrock.ko`, the TSC frequency and the boot seed, and it must start at
+//! `bedrock.ko`, the workload planner, the TSC frequency and the boot seed,
+//! and it must start at
 //! the same warm-checkpoint virtual time. `replay --tape` re-checks all of
 //! these and refuses on a mismatch unless `--force`.
 
@@ -14,11 +15,13 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::Command;
 
+use bedrock_dst_contract::Preempt;
 use bedrock_lab::InputRecording;
 use bedrock_vm::events::RandomSource;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+use crate::workload::Opaque;
 
 pub const MANIFEST_VERSION: u32 = 1;
 
@@ -152,8 +155,12 @@ pub struct Environment {
     pub compose: InputFile,
     /// Images in the archive: tags, config digest and labels (e.g.
     /// `org.opencontainers.image.revision` when the build sets it).
-    pub image_metadata: Vec<Value>,
+    pub image_metadata: Vec<ImageMetadata>,
     pub bedrock_ko: ModuleIdentity,
+    /// The workload's planner (it makes the configs and required coverage);
+    /// unknown when it is looked up on PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_planner: Option<InputFile>,
     /// `--build-info KEY=VALUE` pairs (e.g. Tempo/reth revisions).
     pub build_info: BTreeMap<String, String>,
     pub tsc_frequency: u64,
@@ -161,12 +168,14 @@ pub struct Environment {
 }
 
 impl Environment {
+    #[allow(clippy::too_many_arguments)]
     pub fn probe(
         vmlinux: &Path,
         initrd: &Path,
         images: &Path,
         compose: &Path,
         build_info: &[String],
+        workload_planner: Option<&Path>,
         tsc_frequency: u64,
         boot_seed: u64,
     ) -> io::Result<Self> {
@@ -180,6 +189,7 @@ impl Environment {
                 Vec::new()
             }),
             bedrock_ko: ModuleIdentity::probe(),
+            workload_planner: workload_planner.and_then(|p| InputFile::of(p).ok()),
             build_info: build_info
                 .iter()
                 .map(|kv| match kv.split_once('=') {
@@ -210,6 +220,14 @@ impl Environment {
             }
         }
         out.extend(self.bedrock_ko.diff(&now.bedrock_ko));
+        if let (Some(a), Some(b)) = (&self.workload_planner, &now.workload_planner) {
+            if a.sha256 != b.sha256 {
+                out.push(format!(
+                    "workload planner: recorded {} ({}), now {} ({})",
+                    a.sha256, a.path, b.sha256, b.path
+                ));
+            }
+        }
         if self.tsc_frequency != now.tsc_frequency {
             out.push(format!(
                 "TSC frequency: recorded {}, now {}",
@@ -231,10 +249,10 @@ impl Environment {
 pub struct Manifest {
     pub version: u32,
     pub seed: u64,
-    pub bedrock_dst: Value,
+    pub bedrock_dst: DstIdentity,
     pub environment: Environment,
     /// `campaign.json` as the campaign ran.
-    pub campaign: Value,
+    pub campaign: Opaque,
     /// Warm checkpoint (= branch start) and branch end, in retired guest
     /// instructions.
     pub warm_checkpoint_instructions: u64,
@@ -243,7 +261,7 @@ pub struct Manifest {
     /// replay, which serves the tape instead).
     pub rng_seed: u64,
     /// `Branch::set_preempt` (period, seed), applied by every replay.
-    pub preempt: Value,
+    pub preempt: Preempt,
     pub tape: Option<TapeSummary>,
     /// Set for a branch from a moment of another recorded run (`bedrock-dst
     /// branch`): its parent, moment and what it varied.
@@ -251,13 +269,53 @@ pub struct Manifest {
     pub branch: Option<crate::branching::BranchInfo>,
 }
 
-pub fn bedrock_dst_identity() -> Value {
+/// The bedrock-dst binary that recorded a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DstIdentity {
+    pub version: String,
+    pub exe: Option<String>,
+    pub exe_sha256: Option<String>,
+}
+
+pub fn bedrock_dst_identity() -> DstIdentity {
     let exe = std::env::current_exe().ok();
-    json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "exe": exe.as_ref().map(|p| p.to_string_lossy().into_owned()),
-        "exe_sha256": exe.as_deref().and_then(|p| sha256_file(p).ok()),
-    })
+    DstIdentity {
+        version: env!("CARGO_PKG_VERSION").into(),
+        exe: exe.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        exe_sha256: exe.as_deref().and_then(|p| sha256_file(p).ok()),
+    }
+}
+
+/// One image of the archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageMetadata {
+    pub tags: Option<Vec<String>>,
+    /// The config blob's path in the archive.
+    pub config: String,
+    pub config_sha256: Option<String>,
+    pub labels: Option<BTreeMap<String, String>>,
+}
+
+/// An entry of a `docker save` archive's manifest.json.
+#[derive(Deserialize)]
+struct ArchiveImage {
+    #[serde(rename = "Config", default)]
+    config: String,
+    #[serde(rename = "RepoTags", default)]
+    repo_tags: Option<Vec<String>>,
+}
+
+/// The part of an image config blob we record.
+#[derive(Default, Deserialize)]
+struct ImageConfigBlob {
+    #[serde(default)]
+    config: ImageConfigLabels,
+}
+
+#[derive(Default, Deserialize)]
+struct ImageConfigLabels {
+    #[serde(rename = "Labels", default)]
+    labels: Option<BTreeMap<String, String>>,
 }
 
 /// Entries of a tar archive: `(name, data offset, size)`. Seeks over data,
@@ -313,7 +371,7 @@ fn tar_entries(f: &mut File) -> io::Result<Vec<(String, u64, u64)>> {
 }
 
 /// Tags, config digest and labels of each image in a `docker save` archive.
-pub fn image_metadata(path: &Path) -> io::Result<Vec<Value>> {
+pub fn image_metadata(path: &Path) -> io::Result<Vec<ImageMetadata>> {
     let mut f = File::open(path)?;
     let entries = tar_entries(&mut f)?;
     let mut read = |name: &str| -> io::Result<Option<Vec<u8>>> {
@@ -335,22 +393,21 @@ pub fn image_metadata(path: &Path) -> io::Result<Vec<Value>> {
     let Some(manifest) = read("manifest.json")? else {
         return Ok(Vec::new());
     };
-    let manifest: Vec<Value> = serde_json::from_slice(&manifest).map_err(io::Error::other)?;
+    let manifest: Vec<ArchiveImage> =
+        serde_json::from_slice(&manifest).map_err(io::Error::other)?;
     let mut out = Vec::new();
     for image in manifest {
-        let config = image["Config"].as_str().unwrap_or_default().to_string();
-        let blob = read(&config)?;
+        let blob = read(&image.config)?;
         let labels = blob
             .as_deref()
-            .and_then(|b| serde_json::from_slice::<Value>(b).ok())
-            .map(|c| c["config"]["Labels"].clone())
-            .unwrap_or(Value::Null);
-        out.push(json!({
-            "tags": image["RepoTags"],
-            "config": config,
-            "config_sha256": blob.as_deref().map(sha256_bytes),
-            "labels": labels,
-        }));
+            .and_then(|b| serde_json::from_slice::<ImageConfigBlob>(b).ok())
+            .and_then(|c| c.config.labels);
+        out.push(ImageMetadata {
+            tags: image.repo_tags,
+            config_sha256: blob.as_deref().map(sha256_bytes),
+            config: image.config,
+            labels,
+        });
     }
     Ok(out)
 }
@@ -387,18 +444,21 @@ mod tests {
         tar_entry(
             &mut tar,
             "manifest.json",
-            br#"[{"Config": "blobs/sha256/cfg", "RepoTags": ["bedrock/tempo-localnet:pinned"], "Layers": []}]"#,
+            br#"[{"Config": "blobs/sha256/cfg", "RepoTags": ["bedrock/node:pinned"], "Layers": []}]"#,
         );
         tar.extend([0u8; 1024]);
         std::fs::write(&path, &tar).unwrap();
         let meta = image_metadata(&path).unwrap();
         assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0]["tags"][0], "bedrock/tempo-localnet:pinned");
+        assert_eq!(meta[0].tags.as_ref().unwrap()[0], "bedrock/node:pinned");
         assert_eq!(
-            meta[0]["labels"]["org.opencontainers.image.revision"],
+            meta[0].labels.as_ref().unwrap()["org.opencontainers.image.revision"],
             "abc123"
         );
-        assert_eq!(meta[0]["config_sha256"], sha256_bytes(config));
+        assert_eq!(
+            meta[0].config_sha256.as_deref(),
+            Some(&*sha256_bytes(config))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -420,6 +480,7 @@ mod tests {
                 path: None,
                 sha256: None,
             },
+            workload_planner: None,
             build_info: BTreeMap::new(),
             tsc_frequency: 2_995_200_000,
             boot_seed: 1,

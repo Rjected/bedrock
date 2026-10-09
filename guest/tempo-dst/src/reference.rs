@@ -2,7 +2,7 @@
 
 //! E7: a reference node as a differential oracle.
 //!
-//! With `--reference`, a second Tempo node (`tempo-ref`, RPC on 8547) follows
+//! With `reference=true`, a second Tempo node (`tempo-ref`, RPC on 8547) follows
 //! the primary: it fetches each block from the primary's RPC (reth's debug
 //! consensus client) and re-executes it on reth's simplest engine paths (no
 //! prewarming or caches, synchronous state root, no state masking), backfilling

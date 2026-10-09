@@ -2,7 +2,15 @@
 
 //! In-guest side of the Tempo deterministic simulation harness.
 //!
+//! It implements the bedrock-dst workload contract (`bedrock-dst-contract`,
+//! workloads/tempo-dst/README.md); requests are JSON, `-` reads one from
+//! stdin:
+//!
 //! ```text
+//! tempo-dst parse-args <req|->  # host: ArgsRequest -> TempoArgs
+//! tempo-dst config <req|->      # host: PlanRequest -> Plan (config.json, scenario, coverage)
+//! tempo-dst observe <req|->     # host: ObserveRequest -> Observation
+//! tempo-dst warmup '<req>'      # guest: WarmupRequest -> WarmupStatus (one warmup step)
 //! tempo-dst start '<config json>'  # set up a branch and snapshot assertion offsets
 //! tempo-dst nemesis    # crash/restart the node per /bedrock/in/config.json
 //! tempo-dst redecide '<json>'  # replace the rest of a running branch's kill plan / load generations
@@ -28,14 +36,48 @@ mod common;
 mod finalize;
 mod nemesis;
 mod oracle;
+mod planner;
 mod reference;
+mod scenario;
 mod start;
 mod tip20;
 mod trie_gen;
 mod trie_ref;
+mod warmup;
+
+/// Prints `value` as one JSON line, or exits 1 with `what: error`.
+fn print_json<T: serde::Serialize, E: std::fmt::Display>(what: &str, r: Result<T, E>) {
+    match r
+        .map_err(|e| e.to_string())
+        .and_then(|v| serde_json::to_string(&v).map_err(|e| e.to_string()))
+    {
+        Ok(s) => println!("{s}"),
+        Err(e) => {
+            eprintln!("{what}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
 fn main() {
+    let arg = |i| std::env::args().nth(i).unwrap_or_default();
     match std::env::args().nth(1).as_deref() {
+        Some("parse-args") => print_json(
+            "parse-args",
+            planner::request(&arg(2)).and_then(|r| planner::parse_args(&r)),
+        ),
+        Some("config") => print_json(
+            "config",
+            planner::request(&arg(2)).and_then(|r| planner::config(&r)),
+        ),
+        Some("observe") => print_json(
+            "observe",
+            planner::request(&arg(2)).and_then(|r| planner::observe(&r)),
+        ),
+        Some("warmup") => print_json(
+            "warmup",
+            planner::request(&arg(2)).and_then(|r| warmup::run(&r).map_err(|e| e.to_string())),
+        ),
         Some("start") => {
             let config = std::env::args().nth(2).unwrap_or_default();
             if let Err(e) = start::run(&config) {
@@ -156,7 +198,7 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: tempo-dst <start|nemesis|redecide|oracle|finalize|head|reference-head|deploy|deploy-tip20|trie-spec|tip20-spec|chain-spec|chain-check|chain-watch>");
+            eprintln!("usage: tempo-dst <parse-args|config|observe|warmup|start|nemesis|redecide|oracle|finalize|head|reference-head|deploy|deploy-tip20|trie-spec|tip20-spec|chain-spec|chain-check|chain-watch>");
             std::process::exit(2);
         }
     }

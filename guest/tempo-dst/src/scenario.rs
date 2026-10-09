@@ -2,12 +2,18 @@
 
 //! `seed-N/scenario.json`: every harness decision of one run, by value.
 //!
+//! The planner (`planner.rs`, run by `bedrock-dst` on the host) makes and
+//! returns these as the workload contract's `decisions`; the driver only
+//! reads the generic fields (`seed`, `rng_seed`, `swarm.preempt`, `run_secs`)
+//! and stores the rest as is.
+//!
 //! A seed is a compressed scenario: the swarm draw, the preemption jitter
 //! seed, the nemesis kill plan and each load generation's seeds are all
 //! derived from it. The scenario stores the derived values, so
 //! `bedrock-dst replay --scenario` reruns the same decisions even after the
-//! seed-to-decision derivation changes (it never calls `swarm_for`, the
-//! nemesis planner or the generators' seed derivations).
+//! seed-to-decision derivation changes (the planner, handed recorded
+//! decisions, never calls the preemption draw, the nemesis planner or the
+//! generators' seed derivations).
 //!
 //! It does not cover randomness inside the guest that is not a harness
 //! decision (thread-fuzz schedules, Tempo's and the kernel's own RNG use):
@@ -19,13 +25,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Load, Swarm};
+use crate::planner::{Load, Swarm};
 
 pub const SCENARIO_VERSION: u32 = 1;
 
 /// Who makes the harness decisions that are not swarm features (the
 /// nemesis kill plan, each load generation's seeds).
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Decisions {
     /// The guest derives them (the nemesis draws its plan from Bedrock's
@@ -33,7 +39,7 @@ pub enum Decisions {
     /// `replay --scenario` then has to deliver them, so the delivered config
     /// differs from the original and only the decisions (not the thread
     /// schedule) are guaranteed to replay. The default, and what campaigns
-    /// from before `--decisions` used.
+    /// from before decision modes existed used.
     #[default]
     Guest,
     /// The driver derives them from the seed before the run and delivers
@@ -76,9 +82,9 @@ pub struct LoadScenario {
     pub tps: u64,
     /// Load image; `None` is the plain txgen image.
     pub image: Option<String>,
-    /// `--workload-seed` (generation `g`'s derived txgen seed is this + g).
+    /// `workload_seed` (generation `g`'s derived txgen seed is this + g).
     pub workload_seed: u64,
-    /// Spec seeds drawn in the guest from getrandom (`--spec-seeds-from-getrandom`).
+    /// Spec seeds drawn in the guest from getrandom (`spec_seeds_from_getrandom`).
     #[serde(default)]
     pub draw_spec_seeds: bool,
     /// Per-generation inputs, delivered by `replay --scenario`.
@@ -249,7 +255,15 @@ pub(crate) mod tests {
             decisions: Decisions::Explicit,
             seed: 3,
             rng_seed: 3,
-            swarm: crate::swarm_for(&crate::tests::campaign_args(&["--load", "trie"]), 3),
+            swarm: Swarm {
+                preempt: bedrock_dst_contract::Preempt {
+                    period: 200_000,
+                    seed: 1,
+                },
+                load: Load::Trie,
+                reference: false,
+                nemesis: true,
+            },
             run_secs: 180,
             liveness_secs: 60,
             nemesis: NemesisScenario {

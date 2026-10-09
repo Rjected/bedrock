@@ -23,7 +23,7 @@ pub const NODE_CONTAINER: &str = "tempo";
 const RPC_URL: &str = "http://127.0.0.1:8545";
 /// Overrides [`RPC_URL`], for running checks against a node outside Bedrock.
 const RPC_URL_ENV: &str = "TEMPO_DST_RPC";
-/// E7 reference node (compose service `tempo-ref`, `--reference`).
+/// E7 reference node (compose service `tempo-ref`, `reference=true`).
 pub const REFERENCE_CONTAINER: &str = "tempo-ref";
 pub const REFERENCE_RPC_URL: &str = "http://127.0.0.1:8547";
 pub const CONFIG_PATH: &str = "/bedrock/in/config.json";
@@ -57,26 +57,32 @@ impl Default for NemesisConfig {
 }
 
 /// txgen load container; `count == 0` disables it.
+///
+/// Fields are in alphabetical order, like every struct of [`Config`]: the
+/// planner serializes it as config.json, byte-identical to the configs the
+/// driver built as sorted JSON maps before the workload contract.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct LoadConfig {
-    pub seed: u64,
     pub count: u64,
-    pub tps: u64,
-    /// Load image; empty means the plain txgen image.
-    pub image: String,
-    /// txgen spec inside the image; empty means the image's default.
-    pub spec: String,
-    /// Explicit per-generation inputs, indexed by load generation (0 at
-    /// branch start, one more per node restart). A generation past the end
-    /// is derived ([`Config::load_generation`]).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub generations: Vec<LoadGeneration>,
     /// A derived generation draws its spec seed from getrandom (Bedrock's
     /// controlled stream, so it is on the input tape) instead of using the
     /// run seed. See [`Config::draw_load_generation`].
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub draw_spec_seeds: bool,
+    /// Explicit per-generation inputs, indexed by load generation (0 at
+    /// branch start, one more per node restart). A generation past the end
+    /// is derived ([`Config::load_generation`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub generations: Vec<LoadGeneration>,
+    /// Load image; empty means the plain txgen image.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub image: String,
+    pub seed: u64,
+    /// txgen spec inside the image; empty means the image's default.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub spec: String,
+    pub tps: u64,
 }
 
 /// The inputs of one load generation: everything its txgen run and generated
@@ -84,10 +90,10 @@ pub struct LoadConfig {
 /// load's count and the trie slots.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LoadGeneration {
-    /// `TXGEN_SEED` (txgen's own transaction randomness).
-    pub txgen_seed: u64,
     /// Seed of the generated spec (the run seed when derived).
     pub spec_seed: u64,
+    /// `TXGEN_SEED` (txgen's own transaction randomness).
+    pub txgen_seed: u64,
 }
 
 /// A RawStorage contract whose storage root E5 checks against an
@@ -96,13 +102,14 @@ pub struct LoadGeneration {
 #[serde(default)]
 pub struct TrieConfig {
     pub address: String,
-    /// Slots the oracles read and prove. Empty: generated from the run seed
-    /// (`trie_gen::slots`), along with the load spec.
-    pub slots: Vec<u64>,
     /// The load spec comes from `trie_gen` over explicit `slots` (a
     /// scenario's recorded slots), instead of `load.spec`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
+    /// Slots the oracles read and prove. Empty: generated from the run seed
+    /// (`trie_gen::slots`), along with the load spec.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<u64>,
 }
 
 impl TrieConfig {
@@ -163,44 +170,55 @@ impl Config {
     }
 }
 
+/// `/bedrock/in/config.json`: the run config the planner makes and the
+/// `start` hook installs (the contract's guest config).
+/// Fields are in alphabetical order (see [`LoadConfig`]).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    /// The branch's seed (the driver's `--seeds` index).
-    pub seed: u64,
-    /// Virtual seconds the branch runs before finalize.
-    pub run_secs: u64,
-    pub nemesis: NemesisConfig,
+    /// Chain-of-blocks load and E9.
+    pub cob: Option<CobConfig>,
     /// Guest seconds the head may stall before liveness fails.
     pub liveness_secs: u64,
     pub load: LoadConfig,
-    pub trie: Option<TrieConfig>,
-    /// TIP-20 load (`tip20::spec`) and its E8 oracle.
-    pub tip20: bool,
-    /// Chain-of-blocks load and E9.
-    pub cob: Option<CobConfig>,
-    /// The E7 reference node runs (compose service `tempo-ref`).
-    pub reference: bool,
-    /// Explicit kill schedule (driver-made decisions, `bedrock-dst replay
+    pub nemesis: NemesisConfig,
+    /// Explicit kill schedule (planner-made decisions, `bedrock-dst replay
     /// --scenario`). Absent: drawn from Bedrock-controlled randomness
     /// (`nemesis::plan`) per `nemesis`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nemesis_plan: Option<Vec<PlannedKill>>,
+    /// The E7 reference node runs (compose service `tempo-ref`).
+    pub reference: bool,
+    /// Virtual seconds the branch runs before finalize.
+    pub run_secs: u64,
+    /// The branch's seed (the driver's `--seeds` index).
+    pub seed: u64,
+    /// The run's swarm record (driver-side choices such as preemption),
+    /// recorded so the run is self-describing; the guest ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<crate::planner::Swarm>,
+    /// TIP-20 load (`tip20::spec`) and its E8 oracle.
+    pub tip20: bool,
+    pub trie: Option<TrieConfig>,
+    /// The campaign's txgen seed (as `load.seed`); informational.
+    pub workload_seed: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            seed: 0,
-            run_secs: 120,
-            nemesis: NemesisConfig::default(),
+            cob: None,
             liveness_secs: 60,
             load: LoadConfig::default(),
-            trie: None,
-            tip20: false,
-            cob: None,
-            reference: false,
+            nemesis: NemesisConfig::default(),
             nemesis_plan: None,
+            reference: false,
+            run_secs: 120,
+            seed: 0,
+            swarm: None,
+            tip20: false,
+            trie: None,
+            workload_seed: 0,
         }
     }
 }

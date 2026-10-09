@@ -487,12 +487,22 @@ dependencies = [
 name = "bedrock-dst"
 version = "0.1.0"
 dependencies = [
+ "bedrock-assertions",
+ "bedrock-dst-contract",
  "bedrock-lab",
  "bedrock-vm",
  "clap",
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "bedrock-dst-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2782,6 +2792,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-trie",
  "bedrock-assertions",
+ "bedrock-dst-contract",
  "nix",
  "rand 0.9.4",
  "serde",

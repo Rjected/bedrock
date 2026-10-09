@@ -20,7 +20,7 @@ DOCKER='sudo docker' ./workloads/tempo-dst/regressions/run.sh reth-27267 --seeds
 | `RETH_FIX_PR`, `RETH_FIX_HEAD` | Unmerged fix; buggy = pinned, fixed = pinned with the PR applied |
 | `BASE_RETH_PRS` | `"<pr>:<head> ..."`: unmerged fixes for other bugs, applied to both images so a known bug with the same signature can't fire on either side |
 | `VARIANT` | `run.sh --variant` (node flags; part of the boot prefix) |
-| `CAMPAIGN_ARGS` | Extra `bedrock-dst campaign` arguments (normally just the load) |
+| `CAMPAIGN_ARGS` | Extra `bedrock-dst campaign` arguments (normally just the load, `--workload-arg load=trie`) |
 | `EXPECT` | Signature prefix a buggy-image seed must fail with, and no fixed-image seed may |
 
 `build.sh <name>` builds `bedrock/tempo-localnet:<name>-{buggy,fixed}` (Tempo
@@ -30,7 +30,7 @@ DOCKER='sudo docker' ./workloads/tempo-dst/regressions/run.sh reth-27267 --seeds
 |---|---|---|
 | `reth-27267` | #27267: proof v2 emits inlined leaves as standalone proof nodes (`eth_getMultiProof`) | First run (pinned base, 8 seeds) inconclusive: #27615 hit both sides (1/8 each). Now on a #27615 base |
 | `reth-26843` | #26843: proof v2 drops a clean sibling on branch collapse under a prefix set (historical `eth_getMultiProof`) | Defined, on a #27615 base; not run yet. Patch also reverts #27634 and rolls back four later proof v2 commits |
-| `reth-27615` | #27615: range trie changesets miss nodes created and deleted while the trie frontier lags (historical proofs, disk unwinds) | **Reproduced generically** (8 seeds, `--load trie`, default flags): buggy (pinned) 6/8 seeds hit E5/*, fixed (pinned + PR) 0/8. First found organically by the generated load on the pinned node |
+| `reth-27615` | #27615: range trie changesets miss nodes created and deleted while the trie frontier lags (historical proofs, disk unwinds) | **Reproduced generically** (8 seeds, `load=trie`, default flags): buggy (pinned) 6/8 seeds hit E5/*, fixed (pinned + PR) 0/8. First found organically by the generated load on the pinned node |
 | #27270 | Sparse-trie reuse across forks with identical state roots; publishing abandoned jobs' tries | Not defined: needs forks. Tempo disables the engine API, so this needs a fork driver |
 | #27614 | Missing prefix invalidation for in-memory fork keys | Not defined: unreachable at the pin since #27634 (every overlay uses trie changesets); needs that reverted plus a fork driver. Not what the generated load hits: the reth unit test still fails with only #27614 applied and passes with only #27615's own changes |
 

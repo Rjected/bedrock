@@ -105,6 +105,8 @@
         bedrock-cli = userland.bedrock-cli;
         bedrock-determinism = userland.bedrock-determinism;
         bedrock-dst = userland.bedrock-dst;
+        # The Tempo workload's planner (static; the same binary as in the guest).
+        tempo-dst = podmanInitrd.tempoDst;
         inherit podmanInitrd;
         default = userland.bedrock-cli;
       };
