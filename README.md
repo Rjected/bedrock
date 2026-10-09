@@ -240,6 +240,16 @@ page-table data. Only about 19,000 of the first 300,000 scalar steps retained
 the same RIP. The bulk of this boot's scalar work is therefore early code
 execution and patching, not repeated REP iterations on the previously sampled
 `memcpy` page.
+Follow-up traces on the same box found that the planner rejects low page
+`0x1000` because its full-page scan finds more than four hazardous entry
+offsets, exceeding the available hardware breakpoint slots. A sampled
+`apply_returns` run had `force_single_step` set on 49,972 of 50,000 scalar
+entries on page `0x1253000`. The low page changes contents during boot: a
+sampled `dec rcx; jnz` branches from `0x1005` back to `0x1000`, while other
+samples show different bytes at `0x1005`. A narrow counted-loop experiment
+that assumed a loop starting at `0x1005` did not match the live loop and did
+not reduce exits (about 883,000); it was reverted. Any fast path here needs
+to prove the actual branch target and account for the page's changing bytes.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
