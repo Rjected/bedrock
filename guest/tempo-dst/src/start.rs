@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 
-use crate::common::{self, Config, ASSERTIONS_PATH, CONFIG_PATH, EVENTS_PATH, OUT_DIR};
+use crate::common::{self, Config, CONFIG_PATH, EVENTS_PATH, OUT_DIR};
 use crate::{cob_gen, tip20, trie_gen};
 
 /// Starts `tempo-dst <sub>` in its own session so it outlives the I/O-channel
@@ -41,12 +41,11 @@ pub fn run(config_json: &str) -> io::Result<()> {
     fs::create_dir_all(OUT_DIR)?;
     fs::write(CONFIG_PATH, config_json)?;
     fs::write(EVENTS_PATH, "")?;
-    let offset = fs::metadata(ASSERTIONS_PATH).map_or(0, |m| m.len());
+    crate::assertions::snapshot()?;
 
     spawn_detached("oracle")?;
     spawn_detached("nemesis")?;
     start_load(&config, 0)?;
-    println!("{offset}");
     Ok(())
 }
 

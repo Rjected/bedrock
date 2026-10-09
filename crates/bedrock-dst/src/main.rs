@@ -1036,10 +1036,9 @@ fn run_seed(
         "seed {seed}: started at vt {:.1}s",
         d.b.current_time().as_secs_f64()
     );
-    let offset: usize = out
-        .trim()
-        .parse()
-        .map_err(|_| format!("tempo-dst start failed ({code}): {out}"))?;
+    if code != 0 {
+        return Err(format!("tempo-dst start failed ({code}): {out}").into());
+    }
 
     let end = start + secs(s.run_secs);
     let guest_exit = d.run_until(end)?;
@@ -1047,7 +1046,11 @@ fn run_seed(
     let mut assertions = Vec::new();
     if guest_exit.is_none() {
         host_bash(&mut d, "tempo-dst finalize")?;
-        assertions = fetch(&mut d, "/bedrock/assertions.jsonl", offset)?;
+        let (code, out) = host_bash(&mut d, "tempo-dst merge-assertions")?;
+        if code != 0 {
+            return Err(format!("tempo-dst merge-assertions failed ({code}): {out}").into());
+        }
+        assertions = fetch(&mut d, "/bedrock/out/assertions.jsonl", 0)?;
         for f in COLLECT {
             let data = fetch(&mut d, &format!("/bedrock/{f}"), 0)?;
             fs::write(dir.join(Path::new(f).file_name().unwrap()), data)?;

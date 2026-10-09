@@ -17,9 +17,10 @@
 //! tempo-dst chain-watch <secs>   # E9 against a live node, outside Bedrock
 //! ```
 //!
-//! Assertions go to /bedrock/assertions.jsonl, control events to
+//! Assertions go to /bedrock/assertions/*.jsonl, control events to
 //! /bedrock/events.jsonl. `TEMPO_DST_RPC` overrides the node's RPC URL.
 
+mod assertions;
 mod cob;
 mod cob_gen;
 mod common;
@@ -44,6 +45,13 @@ fn main() {
         Some("nemesis") => nemesis::run(),
         Some("oracle") => oracle::run(),
         Some("finalize") => finalize::run(),
+        Some("forward-assertions") => assertions::forward(),
+        Some("merge-assertions") => {
+            if let Err(e) = assertions::merge_seed() {
+                eprintln!("merge-assertions: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("deploy") => {
             let arg = |i| std::env::args().nth(i).unwrap_or_default();
             let spec = std::env::args()

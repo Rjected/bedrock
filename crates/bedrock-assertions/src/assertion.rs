@@ -4,6 +4,8 @@
 //! [`Location`].
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::Condition;
 
@@ -36,6 +38,25 @@ pub struct AssertionData {
     /// Describes the asserted property.
     pub message: String,
     pub location: Location,
+    /// Wall-clock time at construction, strictly increasing within this process.
+    #[serde(default)]
+    pub timestamp_unix_nano: u64,
+}
+
+pub fn timestamp_unix_nano() -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before Unix epoch")
+        .as_nanos() as u64;
+    let mut last = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(last.saturating_add(1));
+        match LAST.compare_exchange_weak(last, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(actual) => last = actual,
+        }
+    }
 }
 
 impl AssertionData {
@@ -45,6 +66,7 @@ impl AssertionData {
             condition,
             message: message.into(),
             location,
+            timestamp_unix_nano: timestamp_unix_nano(),
         }
     }
 }
@@ -144,5 +166,12 @@ mod tests {
         let json = serde_json::to_string(&a).unwrap();
         let back: Assertion = serde_json::from_str(&json).unwrap();
         assert_eq!(a, back);
+    }
+
+    #[test]
+    fn assertion_timestamps_increase() {
+        let first = Assertion::always(Condition::Bool(true), "first", loc());
+        let second = Assertion::always(Condition::Bool(true), "second", loc());
+        assert!(second.data().timestamp_unix_nano > first.data().timestamp_unix_nano);
     }
 }
