@@ -233,6 +233,12 @@ impl TryFrom<u32> for ExitReason {
         if value == 513 {
             return Ok(Self::SvmPopf);
         }
+        // SVM event delivery can exhaust the COW page pool before VM entry.
+        // It stores this software exit in the VMCS so the normal run loop can
+        // return to the sleepable ioctl path and refill the pool.
+        if value == Self::PoolExhausted as u32 {
+            return Ok(Self::PoolExhausted);
+        }
         let basic = value & 0xFFFF;
         match basic {
             0 => Ok(Self::ExceptionNmi),
@@ -317,5 +323,18 @@ impl TryFrom<u32> for ExitReason {
             79 => Ok(Self::Wrmsrlist),
             _ => Err(UnknownExitReason(basic)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExitReason;
+
+    #[test]
+    fn svm_pending_event_can_return_for_cow_pool_refill() {
+        assert_eq!(
+            ExitReason::try_from(ExitReason::PoolExhausted as u32),
+            Ok(ExitReason::PoolExhausted)
+        );
     }
 }
