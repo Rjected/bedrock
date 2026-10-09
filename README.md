@@ -317,6 +317,10 @@ matched snapshot TSC `499445737` and RAM hash `dd6a53449a59f0aa`; a fresh
 two-root replay and the box hardware suite passed. The exact cause of the
 first shortcut's rare extra tick is not yet independently isolated, so this
 optimization needs continued replay testing on other AMD boxes.
+A box-only diagnostic confirmed that this fallback is exercised: it observed
+NPT mapping-generation changes during the root boot as early as emulated TSC
+2 and again near TSC 200,000, plus changes in both forked children. The
+temporary counters were removed after the check.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000
