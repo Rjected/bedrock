@@ -287,6 +287,19 @@ ordering change was reverted. A narrower cached-plan-first trial did not
 complete the transition suite: the box stopped answering SSH during that
 test, so the change was discarded without a performance claim. A fresh box
 passed the unchanged suite.
+On a later EPYC 4245P box, a fresh Linux boot with temporary kernel-only
+diagnostic counters recorded 280,114 instruction-fetch faults in the first
+300,000 nested-page faults; 277,076 fetches reached code the global gate
+could not trust. Only 14,676 faults released protected page-table writes and
+596 targeted trusted-code writes. Two physical pages accounted for 199,582
+of those fetches (71%): 129,053 on the page containing `memcpy`/`memset`, and
+70,529 on the page containing `insn_decode`. The former also contains four
+`REP MOVS`/`REP STOS` instructions; the latter contains `RDRAND` and
+`REP MOVSB`. Even entry into ordinary instructions on either page must fault
+because the page also contains these hazardous instructions. The diagnostic
+boot preserved the expected snapshot TSC and RAM hash; its counters were
+removed after profiling. Faster handling of protected page-table writes
+alone cannot remove the dominant exit source on this guest image.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
