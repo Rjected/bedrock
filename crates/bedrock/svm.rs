@@ -165,7 +165,15 @@ pub(crate) unsafe fn run(
     pa: u64,
     batch: Option<&super::vmx::InstructionBatch>,
 ) -> Result<u64, VmEntryError> {
-    ctx.svm_guest_xsaveopt = u64::from(guest_xsaveopt_supported());
+    // 1 requests the initializing full XSAVE; assembly promotes it to 2.
+    // XSAVEOPT is valid only after this area has received a full XSAVE.
+    if guest_xsaveopt_supported() {
+        if ctx.svm_guest_xsaveopt == 0 {
+            ctx.svm_guest_xsaveopt = 1;
+        }
+    } else {
+        ctx.svm_guest_xsaveopt = 0;
+    }
     v.write(o::RAX, 8, ctx.guest_rax);
     v.write(o::CR2, 8, ctx.guest_cr2);
     let entry_rip = v.read(o::RIP, 8);

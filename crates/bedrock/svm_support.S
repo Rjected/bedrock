@@ -221,12 +221,15 @@ SYM_FUNC_START(svm_run_guest)
 	mov	%rax, %rdx
 	shr	$32, %rdx		/* EDX = high 32 bits of mask */
 	mov	VMXCTX_GUEST_XSAVE_PTR(%rdi), %rcx
-	cmpq	$0, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
-	je	.Lsvm_guest_xsave_full
+	cmpq	$2, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
+	jne	.Lsvm_guest_xsave_full
 	xsaveopt64 (%rcx)
 	jmp	.Lsvm_guest_xsave_done
 .Lsvm_guest_xsave_full:
 	xsave64	(%rcx)
+	cmpq	$1, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
+	jne	.Lsvm_guest_xsave_done
+	movq	$2, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
 .Lsvm_guest_xsave_done:
 
 	/* Restore host XCR0 before loading host FPU state */

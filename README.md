@@ -200,9 +200,10 @@ On an EPYC 4245P box, using XSAVEOPT only for the guest image immediately
 following XRSTOR of that same image reduced a five-run Linux boot/fork median
 from 2.98 to 2.87 seconds in one same-box A/B run (an earlier comparison was
 2.89 versus 2.85 seconds). The host image still uses full XSAVE, and CPUs
-without XSAVEOPT keep the original guest save. A hardware test preserves an
-XMM value across a VM exit and two forks; the Linux snapshot and RAM hash
-matched in all measured runs. This is a modest entry-cost improvement, not a
+without XSAVEOPT keep the original guest save. Each guest image receives a
+full XSAVE before XSAVEOPT, repeated after guest XCR0 changes. A hardware test
+preserves an XMM value across a VM exit and two forks; the Linux snapshot and
+RAM hash matched in all measured runs. This is a modest entry-cost improvement, not a
 solution to the repeated execute faults.
 A boxctl EPYC 4245P profile classified the first 350,000 nested-page faults
 in the Linux boot/fork run: 326,702 (93.3%) selected scalar execution on an

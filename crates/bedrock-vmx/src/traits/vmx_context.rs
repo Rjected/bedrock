@@ -62,8 +62,8 @@ pub struct VmxContext {
     // CR2 is not in the VMCS, so it's swapped manually (offset 280).
     pub guest_cr2: u64,
 
-    // AMD SVM may use XSAVEOPT for the guest image it just loaded with XRSTOR
-    // (offset 288). The host image still requires a full XSAVE each entry.
+    // AMD SVM guest save: 0 = unsupported/uninitialized, 1 = first full XSAVE
+    // pending, 2 = XSAVEOPT permitted (offset 288). The host still uses XSAVE.
     pub svm_guest_xsaveopt: u64,
 }
 
