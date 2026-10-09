@@ -299,6 +299,11 @@ pub fn arm_for_next_iteration<C: VmContext>(ctx: &mut C) {
     // APIC deadline 0 = unset. The action's vector is informational (the
     // pre-entry path does the real injection), so the APIC vector is reused
     // for every target kind.
+    //
+    // The forced-preemption deadline (`apic.preempt_deadline`) is deliberately
+    // not a target: arming the single counter for it would steal it from the
+    // APIC timer and make the timer land late. It fires on the first
+    // deterministic exit at or after its deadline instead (`check_preempt`).
     let chosen_target = [
         Some(apic_deadline).filter(|&t| t != 0),
         io_channel_deadline,

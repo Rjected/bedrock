@@ -30,3 +30,4 @@ crates/bedrock/*.cmd
 crates/bedrock/.*.cmd
 crates/bedrock/Module.symvers
 crates/bedrock/modules.order
+/dst-out*/

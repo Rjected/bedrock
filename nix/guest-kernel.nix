@@ -29,6 +29,10 @@ let
       # bedrock_ncpus=N boot param: affinity syscalls report N CPUs so thread
       # pools are sized as on an N-core machine (still one vCPU underneath).
       ../guest/patches/0006-sched-report-bedrock-ncpus-from-affinity-syscalls.patch
+      # Flush the TLB after ptep_set_access_flags upgrades a CoW'd PTE to
+      # writable; a stale read-only entry otherwise causes a spurious fault
+      # that shifts the instruction count (oss-garage/bedrock#59).
+      ../guest/patches/0006-x86-mm-flush-after-pte-write.patch
     ];
   };
 

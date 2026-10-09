@@ -319,6 +319,44 @@ pub(crate) fn handle_set_rdrand_config<F: VmFileOps>(vm_file: &mut F, arg: usize
     0
 }
 
+/// Handle SET_PREEMPT_CONFIG ioctl - configure deterministic preemption.
+///
+/// Applies to this VM only: a forked VM owns a deep copy of its parent's
+/// device state, so reconfiguring a branch leaves the parent checkpoint and
+/// sibling branches untouched.
+pub(crate) fn handle_set_preempt_config<F: VmFileOps>(vm_file: &mut F, arg: usize) -> isize {
+    let mut config = core::mem::MaybeUninit::<BedrockPreemptConfig>::uninit();
+
+    // SAFETY: Bounded copy from the user pointer `arg` into writable `config`.
+    let not_copied = unsafe {
+        bedrock_copy_from_user(
+            config.as_mut_ptr().cast::<core::ffi::c_void>(),
+            arg as *const core::ffi::c_void,
+            size_of::<BedrockPreemptConfig>() as core::ffi::c_ulong,
+        )
+    };
+
+    if not_copied != 0 {
+        return -(bindings::EFAULT as isize);
+    }
+
+    // SAFETY: The copy returned 0, so `config` is fully initialized.
+    let config = unsafe { config.assume_init() };
+
+    let vm = vm_file.vm_mut();
+    vm.state_mut()
+        .devices
+        .apic
+        .configure_preempt(config.period, config.seed);
+
+    log_info!(
+        "SET_PREEMPT_CONFIG: period={}, seed=0x{:x}\n",
+        config.period,
+        config.seed
+    );
+    0
+}
+
 /// Handle GET_RANDOM_REQUEST ioctl - return the pending `HYPERCALL_GET_RANDOM`
 /// request (PID + byte count).
 pub(crate) fn handle_get_random_request<F: VmFileOps>(vm_file: &F, arg: usize) -> isize {

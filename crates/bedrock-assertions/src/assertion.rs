@@ -4,6 +4,7 @@
 //! [`Location`].
 
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::Condition;
 
@@ -36,6 +37,9 @@ pub struct AssertionData {
     /// Describes the asserted property.
     pub message: String,
     pub location: Location,
+    /// Wall-clock time at construction, in nanoseconds since the Unix epoch.
+    #[serde(default)]
+    pub timestamp_unix_nano: u64,
 }
 
 impl AssertionData {
@@ -45,6 +49,10 @@ impl AssertionData {
             condition,
             message: message.into(),
             location,
+            timestamp_unix_nano: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64,
         }
     }
 }

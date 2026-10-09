@@ -1,0 +1,19 @@
+services:
+  tempo:
+    image: bedrock/tempo-localnet:pinned
+    container_name: tempo
+    network_mode: host
+    command: ["--bare", "--block-time", "200ms"]
+    environment:
+      RUST_LOG: info,reth::engine::tree=debug
+  txgen:
+    image: bedrock/tempo-txgen:latest
+    container_name: txgen
+    network_mode: host
+    environment:
+      TXGEN_COUNT: "10000"
+      TXGEN_TPS: "0"
+    volumes:
+      - /workload/fair-bench:/usr/local/bin/fair-bench:ro
+      - /workload/fair-run.sh:/workload/run.sh:ro
+    depends_on: [tempo]

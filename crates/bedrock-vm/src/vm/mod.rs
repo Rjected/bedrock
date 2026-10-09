@@ -7,7 +7,9 @@ mod exit;
 mod ioctl;
 mod stats;
 
-pub use config::{EventConfig, ExitTrigger, SingleStepConfig, EXIT_REASON_CHECKPOINT};
+pub use config::{
+    EventConfig, ExitTrigger, PreemptConfig, SingleStepConfig, EXIT_REASON_CHECKPOINT,
+};
 pub use exit::{ExitKind, VmExit};
 pub use ioctl::{
     FeedbackBufferInfo, FeedbackBufferInfoRequest, IoActionPayload, RandomBytes, RandomRequest,
@@ -430,6 +432,24 @@ impl Vm {
                 self.fd.as_raw_fd(),
                 BEDROCK_VM_SET_RDRAND_CONFIG as libc::c_ulong,
                 config as *const RdrandConfig,
+            )
+        };
+
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
+    }
+
+    /// Configure deterministic instruction-granular preemption for this VM
+    /// (see [`PreemptConfig`]).
+    pub fn set_preempt_config(&self, config: &PreemptConfig) -> io::Result<()> {
+        let ret = unsafe {
+            libc::ioctl(
+                self.fd.as_raw_fd(),
+                BEDROCK_VM_SET_PREEMPT_CONFIG as libc::c_ulong,
+                config as *const PreemptConfig,
             )
         };
 

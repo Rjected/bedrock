@@ -1,0 +1,42 @@
+--- /home/ubuntu/bedrock/crates/bedrock-cli/src/main.rs	2026-10-07 00:44:11.560489073 +0000
++++ /tmp/bedrock-fair-source/crates/bedrock-cli/src/main.rs	2026-10-07 16:31:39.575370915 +0000
+@@ -422,6 +422,7 @@
+ 
+         match vm.run() {
+             Ok(exit) => {
++                let fair_host_seconds = wall_clock_start.elapsed().as_secs_f64();
+                 // Print `Serial` records; write all records to --events-jsonl.
+                 if exit.event_len > 0 {
+                     if let Some(buffer) = vm.event_buffer() {
+@@ -445,6 +446,12 @@
+ 
+                 match exit.kind() {
+                     ExitKind::VmcallShutdown => {
++                        println!("FAIR_LIFETIME {}", serde_json::json!({
++                            "guest_tsc": exit.emulated_tsc,
++                            "tsc_frequency": exit.tsc_frequency,
++                            "host_seconds": fair_host_seconds
++                        }));
++                        let _ = io::stdout().flush();
+                         info!("VM shutdown (VMCALL hypercall)");
+                         break;
+                     }
+@@ -499,6 +506,18 @@
+                         continue;
+                     }
+                     ExitKind::VmcallReady => {
++                        if let Ok(regs) = vm.get_regs() {
++                            if regs.gprs.rbx == 0x4641495254494d45 {
++                                println!("FAIR_TIMING {}", serde_json::json!({
++                                    "marker": regs.gprs.rcx,
++                                    "guest_monotonic_ns": regs.gprs.rdx,
++                                    "guest_tsc": exit.emulated_tsc,
++                                    "tsc_frequency": exit.tsc_frequency,
++                                    "host_seconds": fair_host_seconds
++                                }));
++                                let _ = io::stdout().flush();
++                            }
++                        }
+                         info!("VM ready (VMCALL hypercall) at tsc {}", exit.emulated_tsc);
+                         continue;
+                     }

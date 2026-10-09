@@ -11,6 +11,7 @@
 //! exit code — serialized as one line of JSON — to the sink at
 //! [`ASSERTIONS_PATH`], where a downstream collector can aggregate the results.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -21,7 +22,7 @@ use serde::Deserialize;
 /// Default assertion sink: an append-only JSONL file, one assertion per line.
 /// Override with the `BEDROCK_ASSERTIONS_PATH` environment variable (used by
 /// tests/local runs).
-const ASSERTIONS_PATH: &str = "/bedrock/assertions.jsonl";
+const ASSERTIONS_PATH: &str = "/bedrock/assertions/workload-monitor.jsonl";
 
 /// A single `podman events --format json` record. Only the fields we act on are
 /// declared; everything else in the line is ignored. Field names match podman's
@@ -56,6 +57,58 @@ const EXEC_DEATH_MSG: &str = "exec exit code is zero";
 /// genuine SIGKILL/OOM exec death (also 137) is likewise ignored.
 const BARRIER_KILL_EXIT_CODE: i64 = 137;
 
+/// Control-event log written by fault injectors (see guest/tempo-dst). Override
+/// with `BEDROCK_EVENTS_PATH`.
+const EVENTS_PATH: &str = "/bedrock/events.jsonl";
+
+/// Container exit code after SIGKILL (128 + 9).
+const SIGKILL_EXIT_CODE: i64 = 137;
+
+/// A fault-injector event; only nemesis kills are acted on.
+#[derive(Deserialize)]
+struct ControlEvent {
+    source: String,
+    kind: String,
+    container: Option<String>,
+}
+
+/// Number of nemesis kills recorded for each container in an events log.
+fn nemesis_kills(events: &str) -> HashMap<String, usize> {
+    let mut kills = HashMap::new();
+    for ev in events
+        .lines()
+        .filter_map(|l| serde_json::from_str::<ControlEvent>(l).ok())
+    {
+        if ev.source == "nemesis" && ev.kind == "kill" {
+            if let Some(name) = ev.container {
+                *kills.entry(name).or_insert(0) += 1;
+            }
+        }
+    }
+    kills
+}
+
+/// Whether a container death is a deliberate nemesis SIGKILL. The nemesis logs
+/// each kill before issuing it, so a SIGKILL death is expected while its
+/// container has more recorded kills than deaths already excused; any other
+/// death, including an unexplained SIGKILL, is still asserted.
+fn is_nemesis_kill(
+    exit_code: i64,
+    name: &str,
+    kills: &HashMap<String, usize>,
+    excused: &mut HashMap<String, usize>,
+) -> bool {
+    if exit_code != SIGKILL_EXIT_CODE {
+        return false;
+    }
+    let done = excused.entry(name.to_string()).or_insert(0);
+    if kills.get(name).copied().unwrap_or(0) > *done {
+        *done += 1;
+        return true;
+    }
+    false
+}
+
 impl Event {
     /// For a container- or exec-death event we assert on, the exit code paired
     /// with the assertion message; else `None`. The container-death message
@@ -81,6 +134,9 @@ impl Event {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("forward-assertions") {
+        bedrock_assertions::files::forward();
+    }
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1);
@@ -117,12 +173,22 @@ fn run() -> Result<(), String> {
         .take()
         .ok_or("podman events produced no stdout")?;
 
+    let events_path = std::env::var("BEDROCK_EVENTS_PATH").unwrap_or_else(|_| EVENTS_PATH.into());
+    let mut excused = HashMap::new();
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|e| format!("reading podman events: {e}"))?;
 
         // Best-effort: a line we can't parse is simply skipped.
         if let Ok(event) = serde_json::from_str::<Event>(&line) {
             if let Some((exit_code, message)) = event.death() {
+                let name = event.name.as_deref().unwrap_or_default();
+                let kills =
+                    nemesis_kills(&std::fs::read_to_string(&events_path).unwrap_or_default());
+                if event.status.as_deref() == Some("died")
+                    && is_nemesis_kill(exit_code, name, &kills, &mut excused)
+                {
+                    continue;
+                }
                 record_exit_code_assertion(sink.as_mut(), exit_code, &message);
             }
         }
@@ -149,8 +215,7 @@ fn record_exit_code_assertion(sink: Option<&mut File>, exit_code: i64, message: 
             return;
         }
     };
-    // One write of a single sub-PIPE_BUF line keeps appends atomic across the
-    // file's concurrent writers.
+    // This monitor owns its assertion file; other writers use separate files.
     line.push('\n');
     if let Err(e) = file.write_all(line.as_bytes()) {
         eprintln!("failed to append assertion to sink: {e}");
@@ -202,5 +267,36 @@ mod tests {
             .expect("container death asserts");
         assert_eq!(code, 137);
         assert_eq!(msg, "container btcd1 exit code is zero");
+    }
+
+    #[test]
+    fn nemesis_kills_are_excused_once_each() {
+        let log = concat!(
+            r#"{"source":"nemesis","kind":"kill","container":"tempo","guest_time_ns":1}"#,
+            "\n",
+            r#"{"source":"nemesis","kind":"restart","container":"tempo","guest_time_ns":2}"#,
+            "\n",
+            r#"{"source":"nemesis","kind":"kill","container":"tempo","guest_time_ns":3}"#,
+            "\n",
+            "not json\n",
+        );
+        let kills = nemesis_kills(log);
+        assert_eq!(kills.get("tempo"), Some(&2));
+        let mut excused = HashMap::new();
+        assert!(is_nemesis_kill(137, "tempo", &kills, &mut excused));
+        assert!(is_nemesis_kill(137, "tempo", &kills, &mut excused));
+        // A third SIGKILL death has no matching kill: still a fault.
+        assert!(!is_nemesis_kill(137, "tempo", &kills, &mut excused));
+    }
+
+    #[test]
+    fn non_sigkill_deaths_and_other_containers_are_not_excused() {
+        let log = r#"{"source":"nemesis","kind":"kill","container":"tempo","guest_time_ns":1}"#;
+        let kills = nemesis_kills(log);
+        let mut excused = HashMap::new();
+        // A panic (101) during a nemesis window is still asserted.
+        assert!(!is_nemesis_kill(101, "tempo", &kills, &mut excused));
+        assert!(!is_nemesis_kill(137, "txgen", &kills, &mut excused));
+        assert!(is_nemesis_kill(137, "tempo", &kills, &mut excused));
     }
 }

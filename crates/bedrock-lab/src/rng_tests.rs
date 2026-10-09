@@ -2,7 +2,10 @@
 
 //! [`InputRecording::record_event`] tests over hand-built event bytes (no VM).
 
-use super::{InputRecording, InputSource, IoInput, RandomInput, RecordedInputSource};
+use super::{
+    Cut, InputRecording, InputSource, IoInput, PrefixSource, RandomInput, RecordedInputSource,
+    SeededSource,
+};
 use crate::bash::BashTarget;
 use crate::time::VirtTime;
 use bedrock_vm::events::{
@@ -136,11 +139,63 @@ fn get_random_events_become_random_inputs() {
         ]
     );
 
-    // Replays in order via next_random, zero-extending past the recording.
+    // Replays in order via next_random, and fails (never zero-fills) past the
+    // recording.
     let mut src = RecordedInputSource::new(rec);
-    assert_eq!(src.next_random(4, 42), vec![1, 2, 3, 4]);
-    assert_eq!(src.next_random(16, 7), vec![0xAA; 16]);
-    assert_eq!(src.next_random(3, 0), vec![0, 0, 0]);
+    assert_eq!(src.next_random(4, 42), Some(vec![1, 2, 3, 4]));
+    assert_eq!(src.next_random(16, 7), Some(vec![0xAA; 16]));
+    assert_eq!(src.exhaustion(), None);
+    assert_eq!(src.next_random(3, 0), None);
+    let why = src.exhaustion().unwrap();
+    assert!(why.contains("exhausted"), "{why}");
+    assert!(why.contains("holds only 2"), "{why}");
+    assert_eq!(src.random_consumed(), 2);
+}
+
+#[test]
+fn recorded_source_fails_on_exhaustion_and_divergence() {
+    let mut buf = Vec::new();
+    get_random_record(&mut buf, 0, 1_000, 42, &[1, 2, 3, 4]);
+    random_record(&mut buf, 1, 2_000, 0xAB);
+    let rec = recording_from(&buf);
+
+    // A GET_RANDOM of another length than recorded diverged: no bytes, and
+    // the cursor stays put.
+    let mut src = RecordedInputSource::new(rec.clone());
+    assert_eq!(src.next_random(8, 42), None);
+    let why = src.exhaustion().unwrap();
+    assert!(why.contains("diverged at randomness input #0"), "{why}");
+    assert!(why.contains("GetRandom of 8 bytes"), "{why}");
+    assert_eq!(src.random_consumed(), 0);
+    // Once failed, it keeps failing (InputSource contract).
+    assert_eq!(src.next_random(4, 42), None);
+    assert_eq!(src.next_rng_u64(), None);
+
+    // An RDRAND where the tape has GET_RANDOM diverged too.
+    let mut src = RecordedInputSource::new(rec.clone());
+    assert_eq!(src.next_rng_u64(), None);
+    assert!(src.exhaustion().unwrap().contains("RDRAND"));
+
+    // In order it serves everything, then reports exhaustion.
+    let mut src = RecordedInputSource::new(rec);
+    assert_eq!(src.next_random(4, 42), Some(vec![1, 2, 3, 4]));
+    assert_eq!(src.next_rng_u64(), Some(0xAB));
+    assert_eq!(src.next_rng_u64(), None);
+    assert!(src.exhaustion().unwrap().contains("input tape exhausted"));
+}
+
+#[test]
+fn default_next_random_fails_when_the_source_runs_dry() {
+    let mut left = 1u32;
+    let mut src = move || {
+        left = left.checked_sub(1)?;
+        Some(0x0102_0304_0506_0708_u64)
+    };
+    assert_eq!(
+        src.next_random(8, 0),
+        Some(0x0102_0304_0506_0708_u64.to_le_bytes().to_vec())
+    );
+    assert_eq!(src.next_random(1, 0), None);
 }
 
 #[test]
@@ -156,7 +211,7 @@ fn rdrand_and_get_random_share_one_ordered_stream() {
 
     let mut src = RecordedInputSource::new(rec);
     assert_eq!(src.next_rng_u64(), Some(0xAB));
-    assert_eq!(src.next_random(4, 9), vec![7, 7, 7, 7]);
+    assert_eq!(src.next_random(4, 9), Some(vec![7, 7, 7, 7]));
     assert_eq!(src.next_rng_u64(), Some(0xCD));
     assert_eq!(src.next_rng_u64(), None);
 }
@@ -263,4 +318,194 @@ fn recording_round_trips_through_replay_source() {
     assert_eq!(second.command, "second");
     assert!(second.record_output);
     assert!(source.next_io_input().is_none());
+}
+
+#[test]
+fn seeded_source_serves_the_kernel_stream() {
+    use bedrock_vmx::devices::RandomState;
+    for seed in [0u64, 1, 7, 0xbed0_7e3b] {
+        let mut kernel = RandomState::seeded_rng(seed);
+        let mut src = super::SeededSource::new(seed);
+        // RDRAND: one stream value each.
+        for _ in 0..4 {
+            assert_eq!(src.next_rng_u64(), Some(kernel.next_seeded_u64()));
+        }
+        // GET_RANDOM: the in-kernel fill (vmcall.rs) takes one value per 8
+        // bytes and truncates the last.
+        for len in [8usize, 12, 1, 256] {
+            let mut want = Vec::new();
+            while want.len() < len {
+                let n = (len - want.len()).min(8);
+                want.extend_from_slice(&kernel.next_seeded_u64().to_le_bytes()[..n]);
+            }
+            assert_eq!(src.next_random(len, 0), Some(want));
+        }
+    }
+}
+
+fn t(instructions: u64) -> VirtTime {
+    VirtTime::from_instructions(instructions, FREQ)
+}
+
+fn rdrand_at(at: u64, value: u64) -> RandomInput {
+    RandomInput {
+        at: t(at),
+        source: RandomSource::Rdrand,
+        pid: 0,
+        bytes: value.to_le_bytes().to_vec(),
+    }
+}
+
+fn io_at(at: u64, command: &str) -> IoInput {
+    IoInput {
+        at: t(at),
+        target: BashTarget::Host,
+        command: command.into(),
+        record_output: true,
+    }
+}
+
+/// Four RDRANDs at 1k..4k with a `start` action at 500 and a `finalize` at
+/// 5k: the shape of a seed's tape.
+fn run_recording() -> InputRecording {
+    InputRecording::from_parts(
+        vec![
+            rdrand_at(1_000, 0x11),
+            rdrand_at(2_000, 0x22),
+            rdrand_at(3_000, 0x33),
+            rdrand_at(4_000, 0x44),
+        ],
+        vec![io_at(500, "start"), io_at(5_000, "finalize")],
+    )
+}
+
+/// A fallback that counts up from `base`, standing in for a branch seed.
+fn counter(base: u64) -> impl FnMut() -> Option<u64> + Clone + Send + Sync + 'static {
+    let mut n = base;
+    move || {
+        n += 1;
+        Some(n)
+    }
+}
+
+#[test]
+fn prefix_source_switches_at_an_input_index() {
+    let rec = run_recording();
+    let cut = rec.cut_at_index(2);
+    // Host actions before input #2's time go with the prefix.
+    assert_eq!(cut, Cut { random: 2, io: 1 });
+    let mut src = PrefixSource::new(&rec, cut, counter(100));
+    assert!(src.in_prefix());
+    assert_eq!(src.next_rng_u64(), Some(0x11));
+    assert_eq!(src.next_rng_u64(), Some(0x22));
+    assert!(!src.in_prefix());
+    assert_eq!(src.prefix_consumed(), 2);
+    // Then the fallback, from its own start.
+    assert_eq!(src.next_rng_u64(), Some(101));
+    assert_eq!(src.next_random(8, 7), Some(102u64.to_le_bytes().to_vec()));
+    // Host actions: the prefix's, then the fallback's (none).
+    assert_eq!(src.next_io_input().unwrap().command, "start");
+    assert!(src.next_io_input().is_none());
+    // Past the end: everything up to the last input is prefix.
+    assert_eq!(rec.cut_at_index(99), Cut { random: 4, io: 1 });
+}
+
+#[test]
+fn prefix_source_switches_at_a_virtual_time() {
+    let rec = run_recording();
+    // Strictly before t: an input at exactly 3_000 is not in the prefix.
+    let cut = rec.cut_at_time(t(3_000));
+    assert_eq!(cut, Cut { random: 2, io: 1 });
+    assert_eq!(rec.cut_at_time(t(3_001)), Cut { random: 3, io: 1 });
+    assert_eq!(rec.cut_at_time(t(0)), Cut::default());
+    assert_eq!(rec.cut_at_time(t(9_000)), Cut { random: 4, io: 2 });
+    let mut src = PrefixSource::new(&rec, rec.cut_at_time(t(2_500)), counter(0));
+    assert_eq!(src.cut(), Cut { random: 2, io: 1 });
+    let served: Vec<_> = (0..4).map(|_| src.next_rng_u64().unwrap()).collect();
+    assert_eq!(served, [0x11, 0x22, 1, 2]);
+}
+
+#[test]
+fn recording_is_prefix_plus_suffix() {
+    let rec = run_recording();
+    for n in 0..=4 {
+        let cut = rec.cut_at_index(n);
+        let (prefix, suffix) = (rec.prefix(cut), rec.suffix(cut));
+        assert_eq!(prefix.random_inputs().len(), n);
+        assert_eq!(prefix.concat(&suffix), rec);
+        assert!(rec.starts_with(&prefix));
+
+        // The recording's own suffix as fallback serves the recording exactly
+        // (a branch that varies nothing is the original run).
+        let mut src = PrefixSource::new(&rec, cut, RecordedInputSource::new(suffix.clone()));
+        let served: Vec<_> = (0..4).map(|_| src.next_rng_u64().unwrap()).collect();
+        assert_eq!(served, [0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(src.next_rng_u64(), None);
+        let io: Vec<_> = std::iter::from_fn(|| src.next_io_input())
+            .map(|i| i.command)
+            .collect();
+        assert_eq!(io, ["start", "finalize"]);
+
+        // A branch forked at the cut has consumed the prefix already.
+        let mut after =
+            PrefixSource::new(&rec, cut, RecordedInputSource::new(suffix)).after_prefix();
+        assert!(!after.in_prefix());
+        let rest: Vec<_> = std::iter::from_fn(|| after.next_rng_u64()).collect();
+        assert_eq!(rest, [0x11, 0x22, 0x33, 0x44][n..]);
+    }
+    let other = InputRecording::from_parts(vec![rdrand_at(1_000, 0x99)], vec![]);
+    assert!(!rec.starts_with(&other));
+}
+
+#[test]
+fn prefix_source_is_strict_before_the_cut() {
+    let rec = run_recording();
+    let mut src = PrefixSource::new(&rec, rec.cut_at_index(2), counter(0));
+    // A GET_RANDOM where the prefix recorded an RDRAND: the branch diverged
+    // before its moment, so the source stops (and does not fall through).
+    assert_eq!(src.next_random(16, 1), None);
+    let why = src.exhaustion().unwrap();
+    assert!(
+        why.contains("recorded prefix") && why.contains("#0"),
+        "{why}"
+    );
+    assert_eq!(src.next_rng_u64(), None);
+    // Clones are independent.
+    let fresh = PrefixSource::new(&rec, rec.cut_at_index(2), counter(0));
+    let mut a = fresh.clone();
+    let mut b = fresh.clone_box();
+    assert_eq!(a.next_rng_u64(), Some(0x11));
+    assert_eq!(b.next_rng_u64(), Some(0x11));
+    assert_eq!(a.next_rng_u64(), Some(0x22));
+    assert_eq!(a.next_rng_u64(), Some(1));
+    assert_eq!(b.next_rng_u64(), Some(0x22));
+}
+
+#[test]
+fn seeded_source_continues_a_recorded_stream() {
+    let mut whole = SeededSource::new(42);
+    let mut consumed = Vec::new();
+    for (i, len) in [None, Some(12), Some(1), None, Some(256)]
+        .into_iter()
+        .enumerate()
+    {
+        let (source, bytes) = match len {
+            None => (
+                RandomSource::Rdrand,
+                whole.next_rng_u64().unwrap().to_le_bytes().to_vec(),
+            ),
+            Some(n) => (RandomSource::GetRandom, whole.next_random(n, 3).unwrap()),
+        };
+        consumed.push(RandomInput {
+            at: t(i as u64),
+            source,
+            pid: 3,
+            bytes,
+        });
+    }
+    assert_eq!(SeededSource::draws(&consumed), 1 + 2 + 1 + 1 + 32);
+    let mut cont = SeededSource::new(42).skip(SeededSource::draws(&consumed));
+    for _ in 0..8 {
+        assert_eq!(cont.next_rng_u64(), whole.next_rng_u64());
+    }
 }

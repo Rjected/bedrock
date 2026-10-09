@@ -1,0 +1,142 @@
+# Tempo dev node for DST campaigns (see README.md). Runs `tempo node` directly
+# (the localnet wrapper's bare mode, without the wrapper) so variant flags and
+# thread-fuzz apply to the node process itself. thread-fuzz is bind-mounted into
+# every container by the initrd's containers.conf and puts the node under the
+# sched_ext concurrency-fuzz scheduler; its schedule comes from Bedrock's
+# controlled getrandom stream. run.sh appends variant flags to `command`.
+#
+# Lines between `# >>> reference` and `# <<< reference` are the E7 reference
+# node (README "Reference node"); run.sh drops them unless `--workload-arg reference=true`.
+services:
+  tempo:
+    image: bedrock/tempo-localnet:pinned
+    pull_policy: never
+    container_name: tempo
+    network_mode: host
+    privileged: true  # thread-fuzz sets SCHED_EXT (CAP_SYS_NICE)
+    entrypoint: ["/usr/local/bin/thread-fuzz", "/usr/local/bin/tempo"]
+    command:
+      - node
+      - --dev
+      - --dev.block-time
+      - 200ms
+      - --datadir
+      - /data
+      - --tempo.bootnodes-endpoint
+      - none
+      - --disable-discovery
+      - --no-persist-peers
+      - --http
+      - --http.addr
+      - 127.0.0.1
+      - --http.port
+      - "8545"
+      - --http.api
+      - all
+      - --builder.gaslimit
+      - "3000000000"
+      # Differential oracle: compare sparse-trie task updates against the
+      # regular state root and log "Difference in ... trie updates".
+      - --engine.state-root-task-compare-updates
+      # E5/E6 read proofs up to 128 blocks behind the tip (historical
+      # proofs come from the persisted trie with a reverted overlay).
+      - --rpc.eth-proof-window
+      - "256"
+      - --color
+      - never
+      # >>> reference
+      # Fixed p2p identity, so tempo-ref can name the primary as a trusted
+      # peer and download blocks it missed (e.g. while the primary was down).
+      - --p2p-secret-key-hex
+      - e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7
+      # <<< reference
+    environment:
+      # engine::persistence=debug emits "Saved range of blocks", which the
+      # durability oracle uses as the persisted-block watermark.
+      RUST_LOG: info,engine::persistence=debug,reth::engine::tree=debug
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/tempo.jsonl
+    volumes:
+      - tempo-data:/data
+
+  # >>> reference
+  # E7 reference node: follows the primary through its RPC and re-executes
+  # every block on reth's simplest engine paths. Plain `tempo` (no
+  # thread-fuzz), never killed by the nemesis. `--follow URL
+  # --follow.nocertify` is Tempo's way to set reth's
+  # `--debug.rpc-consensus-url` without starting the commonware consensus
+  # stack (which, outside `--dev`, demands a validator signing key).
+  tempo-ref:
+    image: bedrock/tempo-localnet:pinned
+    pull_policy: never
+    container_name: tempo-ref
+    network_mode: host
+    entrypoint: ["/usr/local/bin/tempo"]
+    command:
+      - node
+      # The chain spec `--dev` selects.
+      - --chain
+      - dev
+      - --datadir
+      - /data
+      - --tempo.bootnodes-endpoint
+      - none
+      - --disable-discovery
+      - --no-persist-peers
+      - --port
+      - "30304"
+      # The primary, by the public key of its --p2p-secret-key-hex. The RPC
+      # follower only sees blocks produced while it polls; blocks from before
+      # it started, or rebuilt while the primary was down, come over p2p.
+      - --trusted-peers
+      - enode://237d4293b7bacfbf580ea0beddc988668d6f5bfec8467bb21f272d2a569befd0c9c23acbe114320734bc9d92e0875a0fe72247f4ca2653ded1dfe3130e3dc51c@127.0.0.1:30303
+      - --disable-tx-gossip
+      - --ipcdisable
+      - --http
+      - --http.addr
+      - 127.0.0.1
+      - --http.port
+      - "8547"
+      - --http.api
+      - all
+      - --ws.port
+      - "8548"
+      - --authrpc.port
+      - "8552"
+      - --follow
+      - http://127.0.0.1:8545
+      - --follow.nocertify
+      # Simple baseline paths: no prewarming, precompile or state caches, the
+      # synchronous state root (no sparse-trie task), no state masking.
+      - --engine.disable-prewarming
+      - --engine.disable-precompile-cache
+      - --engine.state-root-fallback
+      - --engine.disable-state-cache
+      - --engine.num-state-masking-blocks
+      - "0"
+      - --engine.persistence-threshold
+      - "3"
+      - --rpc.eth-proof-window
+      - "256"
+      - --color
+      - never
+    environment:
+      RUST_LOG: info
+      BEDROCK_ASSERTIONS_PATH: /bedrock/assertions/tempo-ref.jsonl
+    volumes:
+      - tempo-ref-data:/data
+
+  # <<< reference
+  # Signals bedrock ready once the node produces blocks (the lab's initial
+  # checkpoint), then idles; same pattern as workloads/integration-tests.
+  ready:
+    image: bedrock/tempo-dst-ready:latest
+    pull_policy: never
+    container_name: ready
+    network_mode: host
+    privileged: true  # Required for VMCALL
+
+volumes:
+  tempo-data:
+  # >>> reference
+  tempo-ref-data:
+  # <<< reference

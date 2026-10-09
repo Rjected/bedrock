@@ -38,6 +38,11 @@ pub enum LabError {
     /// The I/O channel returned bytes the lab couldn't decode.
     BadResponse(String),
 
+    /// The [`InputSource`](crate::InputSource) ran out of (or diverged from)
+    /// its randomness while an I/O action was running; `reason` is its
+    /// [`exhaustion`](crate::InputSource::exhaustion) explanation.
+    InputExhausted { at: VirtTime, reason: String },
+
     /// The lab could not store a file chunk from the guest.
     FileStoreFailed {
         at: VirtTime,
@@ -74,6 +79,9 @@ impl fmt::Display for LabError {
                 "failed to queue InputSource I/O at {at:?} for {target:?} command {command:?}: {source}"
             ),
             Self::BadResponse(msg) => write!(f, "bad I/O channel response: {msg}"),
+            Self::InputExhausted { at, reason } => {
+                write!(f, "input source exhausted at {:.6}s: {reason}", at.as_secs_f64())
+            }
             Self::FileStoreFailed { at, source } => write!(
                 f,
                 "storing a file chunk from the guest failed at {at:?}: {source:?}"

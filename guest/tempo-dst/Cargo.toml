@@ -1,0 +1,27 @@
+[package]
+name = "tempo-dst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-guest nemesis and oracles for Tempo deterministic simulation runs"
+
+# Fetched into the guest at /usr/local/bin/tempo-dst. Runs in the guest host
+# namespace (where podman is) and is started per branch by the host driver.
+# Built as a static musl binary, like workload-monitor.
+[[bin]]
+name = "tempo-dst"
+path = "src/main.rs"
+
+[dependencies]
+bedrock-assertions = { path = "../../crates/bedrock-assertions" }
+bedrock-dst-contract = { path = "../../crates/bedrock-dst-contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+nix = { version = "0.30", features = ["process", "time"] }
+rand = "0.9"
+# E5 from-scratch storage roots and E6 eth_getProof verification.
+alloy-primitives = { version = "1", default-features = false, features = ["std", "serde"] }
+alloy-rlp = "0.3"
+alloy-trie = { version = "0.9", default-features = false, features = ["std", "ethereum"] }
+# Plain HTTP to the local node only; no TLS.
+ureq = { version = "2", default-features = false, features = ["json"] }

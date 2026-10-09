@@ -377,6 +377,7 @@ unsafe extern "C" fn bedrock_forked_vm_ioctl(
         BEDROCK_VM_RUN => handlers::handle_run(vm_file, arg),
         BEDROCK_VM_SET_RDRAND_CONFIG => handlers::handle_set_rdrand_config(vm_file, arg),
         BEDROCK_VM_SET_RDRAND_VALUE => handlers::handle_set_rdrand_value(vm_file, arg),
+        BEDROCK_VM_SET_PREEMPT_CONFIG => handlers::handle_set_preempt_config(vm_file, arg),
         BEDROCK_VM_GET_RANDOM_REQUEST => handlers::handle_get_random_request(vm_file, arg),
         BEDROCK_VM_SET_RANDOM_BYTES => handlers::handle_set_random_bytes(vm_file, arg),
         BEDROCK_VM_SET_EVENT_CONFIG => handlers::handle_set_event_config(vm_file, arg),

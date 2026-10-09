@@ -19,5 +19,6 @@ mod determinism;
 mod feedback;
 mod file_store;
 mod file_xfer;
+mod preempt;
 mod rng;
 mod workload_monitor;

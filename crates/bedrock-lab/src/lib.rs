@@ -49,6 +49,7 @@ mod error;
 mod event;
 mod inner;
 mod rng;
+mod tape;
 mod time;
 mod tree;
 
@@ -59,7 +60,9 @@ pub use checkpoint::{Checkpoint, CheckpointId, LabOpts};
 pub use error::LabError;
 pub use event::{Event, EventSink};
 pub use rng::{
-    InputRecording, InputSource, IoInput, RandomInput, RecordedInputSource, RngMode, SystemRng,
+    Cut, InputRecording, InputSource, IoInput, PrefixSource, RandomInput, RecordedInputSource,
+    RngMode, SeededSource, SystemRng,
 };
+pub use tape::{Tape, TapeError, TAPE_MAGIC, TAPE_VERSION};
 pub use time::{VirtDuration, VirtTime};
 pub use tree::{BranchView, Tree};

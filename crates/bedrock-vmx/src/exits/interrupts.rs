@@ -19,6 +19,10 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+#[cfg(test)]
+#[path = "interrupts_tests.rs"]
+mod tests;
+
 /// Set the timer vector in IRR if the APIC timer has expired (per emulated TSC).
 pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
     let current_tsc = ctx.state().emulated_tsc;
@@ -69,6 +73,72 @@ pub fn check_apic_timer<C: VmContext>(ctx: &mut C) {
         source: InjectSource::Timer as u8,
         _pad: [0; 6],
         target_tsc: timer_deadline,
+    };
+    let _ = ctx
+        .state_mut()
+        .event_append(EventKind::Inject, payload.as_bytes());
+}
+
+/// Deterministic instruction-granular preemption.
+///
+/// The guest scheduler only switches threads when it is entered (timer tick,
+/// syscall, block/yield), so a race whose two conflicting accesses have no
+/// scheduler entry between them is never interleaved, whatever the seed. With
+/// `apic.preempt_period != 0` this raises the guest's LVT timer vector (an
+/// extra "tick") once the emulated TSC reaches `preempt_deadline`, then draws
+/// the next gap from `[period, 2*period)` via the APIC's own xorshift stream.
+///
+/// Runs only on the `last_exit_deterministic` injection path, so the firing
+/// point is the first deterministic exit at or after the deadline: a pure
+/// function of guest execution and the seed, never host time. The deadline is
+/// deliberately not armed on PEBS (see `arm_for_next_iteration`): the single
+/// precise counter stays with the APIC timer, I/O channel and stop deadlines,
+/// so preemption cannot make them land late. The cost is coarser placement:
+/// in an exit-free stretch the preemption waits for the next exit.
+///
+/// Held off until the guest has a usable timer vector (APIC software-enabled,
+/// LVT unmasked, vector >= 16); before that an injection would be dropped.
+pub(super) fn check_preempt<C: VmContext>(ctx: &mut C) {
+    let apic = &ctx.state().devices.apic;
+    if apic.preempt_period == 0 {
+        return;
+    }
+    if (apic.svr & (1 << 8)) == 0 {
+        return;
+    }
+    if (apic.lvt_timer & (1 << 16)) != 0 {
+        return;
+    }
+    let vector = (apic.lvt_timer & 0xFF) as u8;
+    if vector < 16 {
+        return;
+    }
+
+    let current_tsc = ctx.state().emulated_tsc;
+    let deadline = apic.preempt_deadline;
+
+    // Lazy arm on the first eligible pass after `configure_preempt`.
+    if deadline == 0 {
+        let apic = &mut ctx.state_mut().devices.apic;
+        let interval = apic.next_preempt_interval();
+        apic.preempt_deadline = current_tsc.saturating_add(interval);
+        return;
+    }
+    if current_tsc < deadline {
+        return;
+    }
+
+    // Due. Shares the sticky IRR bit with a real timer firing on the same exit.
+    let apic = &mut ctx.state_mut().devices.apic;
+    apic.irr[(vector / 32) as usize] |= 1u32 << (vector % 32);
+    let interval = apic.next_preempt_interval();
+    apic.preempt_deadline = current_tsc.saturating_add(interval);
+
+    let payload = InjectPayload {
+        vector,
+        source: InjectSource::Preempt as u8,
+        _pad: [0; 6],
+        target_tsc: deadline,
     };
     let _ = ctx
         .state_mut()
@@ -259,6 +329,8 @@ pub fn inject_pending_interrupt<C: VmContext>(ctx: &mut C) -> Result<(), ExitErr
                 // After the timer, so the (usually higher-vector) timer wins
                 // and ours waits in IRR.
                 check_io_channel(ctx);
+                // No-op unless preemption is configured for this VM.
+                check_preempt(ctx);
                 true
             }
         };

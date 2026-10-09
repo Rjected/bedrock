@@ -1,0 +1,16 @@
+[package]
+name = "bedrock-dst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Seeded deterministic-simulation campaigns over a warm bedrock-lab checkpoint"
+
+[dependencies]
+bedrock-lab = { path = "../bedrock-lab", features = ["serde"] }
+bedrock-vm = { path = "../bedrock-vm" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+bedrock-dst-contract = { path = "../bedrock-dst-contract" }
+sha2 = "0.10"
+bedrock-assertions = { path = "../bedrock-assertions" }

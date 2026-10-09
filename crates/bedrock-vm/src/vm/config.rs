@@ -18,6 +18,29 @@ pub struct SingleStepConfig {
     pub tsc_end: u64,
 }
 
+/// Deterministic instruction-granular preemption: SET_PREEMPT_CONFIG ioctl
+/// payload. The guest's LVT timer vector is raised at the first deterministic
+/// exit after a gap of retired instructions drawn from `[period, 2*period)`,
+/// the gap re-drawn from a per-VM xorshift stream seeded by `seed` (separate
+/// from the RDRAND PRNG). `period == 0` disables it. Applies to one VM only;
+/// a fork inherits its parent's setting and stream position.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct PreemptConfig {
+    pub period: u64,
+    pub seed: u64,
+}
+
+impl PreemptConfig {
+    pub fn new(period: u64, seed: u64) -> Self {
+        Self { period, seed }
+    }
+
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+}
+
 /// Synthetic exit reason of periodic checkpoint `Exit` records.
 pub const EXIT_REASON_CHECKPOINT: u32 = 0xFFFFFFFF;
 

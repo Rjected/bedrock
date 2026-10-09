@@ -71,6 +71,11 @@ pub(crate) const BEDROCK_VM_GET_RANDOM_REQUEST: u32 =
 pub(crate) const BEDROCK_VM_SET_RANDOM_BYTES: u32 =
     _IOW::<BedrockRandomBytes>(BEDROCK_IOC_MAGIC, 15);
 
+/// Ioctl number for SET_PREEMPT_CONFIG command - configure deterministic
+/// instruction-granular preemption.
+pub(crate) const BEDROCK_VM_SET_PREEMPT_CONFIG: u32 =
+    _IOW::<BedrockPreemptConfig>(BEDROCK_IOC_MAGIC, 16);
+
 /// Mirror of `bedrock_vmx::RANDOM_REPLY_MAX`. Wire-ABI constant — keep in
 /// lockstep with the userland `RandomBytes` (in `bedrock-vm`).
 pub(crate) const BEDROCK_RANDOM_REPLY_MAX: usize = 256;
@@ -170,6 +175,16 @@ pub(crate) struct BedrockRdrandConfig {
     pub _reserved: u32,
     /// Value: seed for mode 0, unused for mode 1.
     pub value: u64,
+}
+
+/// Deterministic preemption configuration passed from userspace.
+#[repr(C)]
+pub(crate) struct BedrockPreemptConfig {
+    /// Mean-ish gap in retired guest instructions; each gap is drawn from
+    /// `[period, 2*period)`. 0 disables preemption.
+    pub period: u64,
+    /// Seed of the per-VM jitter stream (0 is mapped to a non-zero constant).
+    pub seed: u64,
 }
 
 /// Single-step (MTF) configuration passed from userspace.

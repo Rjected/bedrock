@@ -103,3 +103,34 @@ fn urandom_reads_route_through_get_random_hypercall() {
         "expected at least the 64 requested bytes served via GET_RANDOM, got {served}",
     );
 }
+
+fn read_urandom_reseeded(ready: &bedrock_lab::Checkpoint, seed: u64) -> Vec<u8> {
+    let mut branch = ready.branch().expect("fork branch");
+    branch.reseed_rng(seed).expect("reseed");
+    let out = branch
+        .bash(
+            BashTarget::host(),
+            "head -c 32 /dev/urandom | od -An -tx1",
+            true,
+        )
+        .expect("bash");
+    assert!(out.success(), "urandom read failed: exit={}", out.exit_code);
+    out.output
+}
+
+#[test]
+fn reseeded_branches_diverge_by_seed() {
+    let Some(ready) = common::ready_checkpoint() else {
+        return common::skip("reseeded_branches_diverge_by_seed");
+    };
+
+    let a = read_urandom_reseeded(&ready, 1);
+    let b = read_urandom_reseeded(&ready, 1);
+    let c = read_urandom_reseeded(&ready, 2);
+
+    assert_eq!(a, b, "equal seeds should replay identically");
+    assert_ne!(
+        a, c,
+        "different seeds should give different guest randomness"
+    );
+}

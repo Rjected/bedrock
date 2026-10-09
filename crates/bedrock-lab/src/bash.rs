@@ -5,6 +5,7 @@
 use bedrock_vm::io_channel;
 
 /// Where a [`Branch::bash`](crate::Branch::bash) command runs.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BashTarget {
     /// Run on the guest host (outside any container).

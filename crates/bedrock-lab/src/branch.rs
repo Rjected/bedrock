@@ -7,7 +7,8 @@ use std::sync::Arc;
 use bedrock_vm::events::EventKind;
 use bedrock_vm::file_store::FileWriter;
 use bedrock_vm::{
-    EventCategories, EventConfig as VmEventConfig, EventStream, ExitKind, ExitTrigger, Vm, VmError,
+    EventCategories, EventConfig as VmEventConfig, EventStream, ExitKind, ExitTrigger,
+    PreemptConfig, RdrandConfig, Vm, VmError,
 };
 
 use crate::bash::{self, BashOutput, BashTarget};
@@ -154,6 +155,9 @@ pub struct Branch {
     pending_input_io: Option<IoInput>,
     input_io_exhausted: bool,
     input_recording: InputRecording,
+    /// Record inputs even without an [`InputSource`] (see
+    /// [`Branch::set_record_inputs`]).
+    record_inputs: bool,
     /// Cache of the last `vm.set_stop_at_tsc` value; `None` = unknown
     /// (post-fork), so the next `set_stop_at` always sends the ioctl.
     last_stop_at: Option<Option<u64>>,
@@ -197,6 +201,7 @@ impl Branch {
             pending_input_io,
             input_io_exhausted,
             input_recording,
+            record_inputs: false,
             last_stop_at: None,
             event_config: EventConfig::default(),
             file_writer: FileWriter::new(),
@@ -235,6 +240,79 @@ impl Branch {
         &self.origin
     }
 
+    /// Re-seed the hypervisor's in-VM PRNG, which serves RDRAND/RDSEED and
+    /// guest `getrandom()` without exiting to userspace. Sibling branches
+    /// re-seeded differently diverge from the fork point; equal seeds replay
+    /// identically. Replaces exit-to-userspace randomness, so it is meant for
+    /// branches without an [`InputSource`].
+    pub fn reseed_rng(&mut self, seed: u64) -> Result<()> {
+        self.vm_mut()
+            .set_rdrand_config(&RdrandConfig::seeded_rng(seed))
+            .map_err(|source| {
+                LabError::Vm(VmError::Ioctl {
+                    operation: "SET_RDRAND_CONFIG",
+                    source,
+                })
+            })
+    }
+
+    /// Enable deterministic instruction-granular preemption on this branch:
+    /// the guest's timer vector is raised at the first deterministic exit
+    /// after a gap of retired guest instructions drawn from `[period,
+    /// 2*period)`, each gap re-drawn from a xorshift stream seeded by `seed`.
+    /// `period == 0` disables it. The guest scheduler then gets preemption
+    /// points inside code that never enters it on its own (spin loops,
+    /// lock-free paths), so sibling branches with different seeds reach
+    /// different interleavings while equal `(period, seed)` replay
+    /// identically.
+    ///
+    /// State lives in the branch VM's emulated APIC: the parent checkpoint and
+    /// sibling branches are unaffected, and a later fork of this branch
+    /// inherits it. Driven only by guest execution, never host time.
+    pub fn set_preempt(&mut self, period: u64, seed: u64) -> Result<()> {
+        self.vm_mut()
+            .set_preempt_config(&PreemptConfig::new(period, seed))
+            .map_err(|source| {
+                LabError::Vm(VmError::Ioctl {
+                    operation: "SET_PREEMPT_CONFIG",
+                    source,
+                })
+            })
+    }
+
+    /// Record this branch's inputs into its
+    /// [`input_recording`](Self::input_recording) even without an
+    /// [`InputSource`], e.g. a [`reseed_rng`](Self::reseed_rng) branch whose
+    /// randomness is served in-kernel: the hypervisor emits a `Randomness`
+    /// record for every value it serves in either mode, so turning on
+    /// `RANDOMNESS` and `IO_CHANNEL` capture is enough to build a tape that a
+    /// [`RecordedInputSource`](crate::RecordedInputSource) replays. Inputs
+    /// consumed before this call are not recorded.
+    pub fn set_record_inputs(&mut self, on: bool) -> Result<()> {
+        self.record_inputs = on;
+        self.apply_event_config()
+    }
+
+    /// Whether inputs are being recorded (always, with an input source).
+    fn records_inputs(&self) -> bool {
+        self.record_inputs || self.input_source.is_some()
+    }
+
+    /// Why the branch's [`InputSource`] stopped serving randomness, after a
+    /// [`RunOutcome::RngExhausted`] (see [`InputSource::exhaustion`]).
+    pub fn input_exhaustion(&self) -> Option<String> {
+        self.input_source.as_ref()?.exhaustion()
+    }
+
+    fn exhausted_error(&self, at: VirtTime) -> LabError {
+        LabError::InputExhausted {
+            at,
+            reason: self
+                .input_exhaustion()
+                .unwrap_or_else(|| "input source returned no randomness".into()),
+        }
+    }
+
     /// Configure the event stream (see [`EventConfig`]). Records are forwarded
     /// to the tree's [`EventSink`](crate::EventSink) as [`Event::Record`].
     ///
@@ -250,7 +328,7 @@ impl Branch {
     /// Every path that (re)installs the capture config must go through here.
     fn apply_event_config(&mut self) -> Result<()> {
         let mut extra = EventCategories::SERIAL;
-        if self.input_source.is_some() {
+        if self.records_inputs() {
             extra = extra.union(RECORDING_CATEGORIES);
         }
         let vm_config = self.event_config.to_vm_config_with(extra);
@@ -298,7 +376,7 @@ impl Branch {
         // No memory hashing: it would dominate run time, and register state
         // already pins down divergence at instruction granularity.
         let mut categories = EventCategories::EXIT.union(EventCategories::SERIAL);
-        if self.input_source.is_some() {
+        if self.records_inputs() {
             categories = categories.union(RECORDING_CATEGORIES);
         }
         let config = VmEventConfig::enabled(categories)
@@ -373,6 +451,7 @@ impl Branch {
             input_source,
             input_recording,
             partial,
+            record_inputs,
             ..
         } = self;
         let vm = vm.as_ref().expect("Branch.vm taken");
@@ -380,7 +459,7 @@ impl Branch {
             return;
         };
         let drained = &buffer[..event_len.min(buffer.len())];
-        let record_inputs = input_source.is_some();
+        let record_inputs = *record_inputs || input_source.is_some();
         let freq = lab.tsc_frequency;
         for record in EventStream::new(drained) {
             if record.kind() == EventKind::Serial.as_u16() {
@@ -587,7 +666,19 @@ impl Branch {
                 }
                 ExitKind::Rdrand | ExitKind::Rdseed => match self.feed_rng()? {
                     FeedRng::Fed => continue,
-                    FeedRng::Exhausted | FeedRng::NoSource => {
+                    FeedRng::Exhausted => return Err(self.exhausted_error(at)),
+                    FeedRng::NoSource => {
+                        return Err(LabError::UnexpectedExit {
+                            at,
+                            kind: exit.kind(),
+                        })
+                    }
+                },
+                // As in run_until: guest getrandom() exits while the action runs.
+                ExitKind::VmcallGetRandom => match self.feed_random()? {
+                    FeedRng::Fed => continue,
+                    FeedRng::Exhausted => return Err(self.exhausted_error(at)),
+                    FeedRng::NoSource => {
                         return Err(LabError::UnexpectedExit {
                             at,
                             kind: exit.kind(),
@@ -636,7 +727,10 @@ impl Branch {
             let Some(source) = self.input_source.as_mut() else {
                 return Ok(FeedRng::NoSource);
             };
-            source.next_random(len, pid)
+            match source.next_random(len, pid) {
+                Some(bytes) => bytes,
+                None => return Ok(FeedRng::Exhausted),
+            }
         };
 
         self.vm_mut().set_random_bytes(&bytes).map_err(|source| {
