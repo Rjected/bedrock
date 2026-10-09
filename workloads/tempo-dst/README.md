@@ -38,9 +38,12 @@ failures can be grouped by feature (`regressions/hunt.sh` prints that table).
 | `workload-monitor` | `guest/workload-monitor` | Excuses container SIGKILL deaths that the nemesis logged |
 | compose / run | `workloads/tempo-dst` | Node config, variants, campaign entry point |
 
-Guest contract: assertions go to `/bedrock/assertions.jsonl` (serialized
-`bedrock_assertions::Assertion`, message = `<signature>: <detail>`). Control
-events go to `/bedrock/events.jsonl` (`{source, kind, container,
+Guest contract: each writer appends serialized `bedrock_assertions::Assertion`
+records to its own `/bedrock/assertions/<writer>.jsonl` file. Records include a
+`timestamp_unix_nano` and a message of `<signature>: <detail>`. Guest init
+forwards complete lines to the serial log; at the end of each seed, the guest
+merges all files by timestamp for the host's `assertions.jsonl` and verdict.
+Control events go to `/bedrock/events.jsonl` (`{source, kind, container,
 guest_time_ns, detail}`). The driver writes inputs to `/bedrock/in/config.json`.
 
 ## Oracles

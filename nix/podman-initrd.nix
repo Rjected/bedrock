@@ -234,7 +234,7 @@ let
   };
 
   # Workload monitor (Rust). Tails `podman events` and records an exit-code
-  # assertion to /bedrock/assertions.jsonl on each container/exec death; it does
+  # assertion to /bedrock/assertions/workload-monitor.jsonl on each death; it does
   # not write to the guest log. Built as a static musl binary so it is
   # self-contained in the rootfs; it has no native deps, so no extra
   # buildInputs / pkg-config are needed. `-p workload-monitor` builds only that
@@ -348,9 +348,7 @@ let
 
     # Bind-mount shared host-namespace paths into every container podman
     # creates, without touching any compose file:
-    #   - the assertion sink (a single JSONL file appended to by the host-side
-    #     workload monitor and by workload code inside containers, e.g.
-    #     `eventually_` drivers); and
+    #   - the assertion directory, with one JSONL file per writer; and
     #   - the coverage dir, where each instrumented process keeps its feedback
     #     bitmap as a file (see guest/libfeedback.c), so the pages outlive the
     #     container that produced them; and
@@ -363,7 +361,7 @@ let
     # in the rootfs) before a container starts, else podman bind-mounts an
     # auto-created path in its place.
     volumes = [
-      "/bedrock/assertions.jsonl:/bedrock/assertions.jsonl",
+      "/bedrock/assertions:/bedrock/assertions",
       "/bedrock/coverage:/bedrock/coverage",
       "${threadFuzz}/bin/thread-fuzz:/usr/local/bin/thread-fuzz:ro",
     ]
@@ -482,7 +480,7 @@ pkgs.stdenv.mkDerivation {
     ln -sf ${scxFuzz}/bin/scx-init rootfs/usr/local/bin/scx-init
 
     # workload-monitor: watches podman container/exec lifecycle events and
-    # records exit-code assertions to /bedrock/assertions.jsonl. Lives on the
+    # records exit-code assertions to /bedrock/assertions/workload-monitor.jsonl. Lives on the
     # guest rootfs (not inside any container image) so it observes every
     # container from the host namespace.
     install -m 0755 ${workloadMonitor}/bin/workload-monitor \

@@ -3,7 +3,7 @@
 //! In-guest side of the Tempo deterministic simulation harness.
 //!
 //! ```text
-//! tempo-dst start '<config json>'  # set up a branch; prints the assertion offset
+//! tempo-dst start '<config json>'  # set up a branch and snapshot assertion offsets
 //! tempo-dst nemesis    # crash/restart the node per /bedrock/in/config.json
 //! tempo-dst redecide '<json>'  # replace the rest of a running branch's kill plan / load generations
 //! tempo-dst oracle     # online oracles (log scan, liveness, durability)
@@ -18,9 +18,10 @@
 //! tempo-dst chain-watch <secs>   # E9 against a live node, outside Bedrock
 //! ```
 //!
-//! Assertions go to /bedrock/assertions.jsonl, control events to
+//! Assertions go to /bedrock/assertions/*.jsonl, control events to
 //! /bedrock/events.jsonl. `TEMPO_DST_RPC` overrides the node's RPC URL.
 
+mod assertions;
 mod cob;
 mod cob_gen;
 mod common;
@@ -51,6 +52,13 @@ fn main() {
         }
         Some("oracle") => oracle::run(),
         Some("finalize") => finalize::run(),
+        Some("forward-assertions") => assertions::forward(),
+        Some("merge-assertions") => {
+            if let Err(e) = assertions::merge_seed() {
+                eprintln!("merge-assertions: {e}");
+                std::process::exit(1);
+            }
+        }
         Some("deploy") => {
             let arg = |i| std::env::args().nth(i).unwrap_or_default();
             let spec = std::env::args()

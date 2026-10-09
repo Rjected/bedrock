@@ -28,7 +28,6 @@ pub const REFERENCE_CONTAINER: &str = "tempo-ref";
 pub const REFERENCE_RPC_URL: &str = "http://127.0.0.1:8547";
 pub const CONFIG_PATH: &str = "/bedrock/in/config.json";
 pub const EVENTS_PATH: &str = "/bedrock/events.jsonl";
-pub const ASSERTIONS_PATH: &str = "/bedrock/assertions.jsonl";
 pub const OUT_DIR: &str = "/bedrock/out";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -249,7 +248,6 @@ pub struct DstEvent {
 
 fn append_line(path: &str, line: &str) {
     match OpenOptions::new().create(true).append(true).open(path) {
-        // One write per line keeps concurrent appenders from interleaving.
         Ok(mut f) => {
             let _ = f.write_all(format!("{line}\n").as_bytes());
         }
@@ -280,19 +278,17 @@ pub fn read_events() -> Vec<DstEvent> {
 /// prefixes the message.
 pub fn assert_always(cond: Condition, component: &str, signature: &str, detail: &str) {
     note_always(cond.evaluate(), component, signature, detail);
-    write_assertion(Assertion::always(
-        cond,
-        message(signature, detail),
-        location(component),
-    ));
+    write_assertion(
+        component,
+        Assertion::always(cond, message(signature, detail), location(component)),
+    );
 }
 
 pub fn assert_sometimes(cond: Condition, component: &str, signature: &str, detail: &str) {
-    write_assertion(Assertion::sometimes(
-        cond,
-        message(signature, detail),
-        location(component),
-    ));
+    write_assertion(
+        component,
+        Assertion::sometimes(cond, message(signature, detail), location(component)),
+    );
 }
 
 /// Per Always signature in this process: guest time of its last pass, and
@@ -303,7 +299,8 @@ static ALWAYS_SEEN: std::sync::Mutex<BTreeMap<String, (Option<u64>, bool)>> =
 /// Emits an `assertion`/`first-failure` event the first time an Always
 /// signature fails in this process, with the guest time of its last pass
 /// (if it ever passed): when it went wrong, for picking a moment to branch
-/// from (`bedrock-dst moments`). Assertions themselves carry no time.
+/// from (`bedrock-dst moments`). Assertion timestamps are wall-clock times;
+/// this event records monotonic guest time for a precise branch moment.
 fn note_always(ok: bool, component: &str, signature: &str, detail: &str) {
     let mut seen = ALWAYS_SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let entry = seen.entry(signature.to_string()).or_default();
@@ -343,8 +340,9 @@ fn message(signature: &str, detail: &str) -> String {
     }
 }
 
-fn write_assertion(a: Assertion) {
-    append_line(ASSERTIONS_PATH, &serde_json::to_string(&a).unwrap());
+fn write_assertion(component: &str, a: Assertion) {
+    let path = format!("{}/tempo-dst-{component}.jsonl", crate::assertions::DIR);
+    append_line(&path, &serde_json::to_string(&a).unwrap());
 }
 
 thread_local! {

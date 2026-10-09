@@ -22,7 +22,7 @@ use serde::Deserialize;
 /// Default assertion sink: an append-only JSONL file, one assertion per line.
 /// Override with the `BEDROCK_ASSERTIONS_PATH` environment variable (used by
 /// tests/local runs).
-const ASSERTIONS_PATH: &str = "/bedrock/assertions.jsonl";
+const ASSERTIONS_PATH: &str = "/bedrock/assertions/workload-monitor.jsonl";
 
 /// A single `podman events --format json` record. Only the fields we act on are
 /// declared; everything else in the line is ignored. Field names match podman's
@@ -212,8 +212,7 @@ fn record_exit_code_assertion(sink: Option<&mut File>, exit_code: i64, message: 
             return;
         }
     };
-    // One write of a single sub-PIPE_BUF line keeps appends atomic across the
-    // file's concurrent writers.
+    // This monitor owns its assertion file; other writers use separate files.
     line.push('\n');
     if let Err(e) = file.write_all(line.as_bytes()) {
         eprintln!("failed to append assertion to sink: {e}");

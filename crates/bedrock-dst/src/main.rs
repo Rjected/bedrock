@@ -1085,8 +1085,6 @@ struct Started {
     d: Driver,
     /// Where the branch forked (the warm checkpoint).
     start: VirtTime,
-    /// The assertion-log offset `tempo-dst start` printed.
-    offset: usize,
 }
 
 /// Applies the scenario's forced preemption to `b` and delivers `config`
@@ -1110,11 +1108,10 @@ fn begin(s: &Scenario, b: Branch, tape: Option<TapeCursor>, config: &str) -> Res
         "seed {seed}: started at vt {:.1}s",
         d.b.current_time().as_secs_f64()
     );
-    let offset: usize = out
-        .trim()
-        .parse()
-        .map_err(|_| format!("tempo-dst start failed ({code}): {out}"))?;
-    Ok(Started { d, start, offset })
+    if code != 0 {
+        return Err(format!("tempo-dst start failed ({code}): {out}").into());
+    }
+    Ok(Started { d, start })
 }
 
 /// Runs a started branch to `s.run_secs` after its fork (issuing `actions`
@@ -1128,11 +1125,7 @@ fn finish(
     record_tape: bool,
     dir: &Path,
 ) -> Result<SeedRun> {
-    let Started {
-        mut d,
-        start,
-        offset,
-    } = started;
+    let Started { mut d, start } = started;
     let end = start + secs(s.run_secs);
     let mut guest_exit = None;
     for a in actions {
@@ -1162,7 +1155,11 @@ fn finish(
     let mut assertions = Vec::new();
     if guest_exit.is_none() {
         host_bash(&mut d, "tempo-dst finalize")?;
-        assertions = fetch(&mut d, "/bedrock/assertions.jsonl", offset)?;
+        let (code, out) = host_bash(&mut d, "tempo-dst merge-assertions")?;
+        if code != 0 {
+            return Err(format!("tempo-dst merge-assertions failed ({code}): {out}").into());
+        }
+        assertions = fetch(&mut d, "/bedrock/out/assertions.jsonl", 0)?;
         for f in COLLECT {
             let data = fetch(&mut d, &format!("/bedrock/{f}"), 0)?;
             fs::write(dir.join(Path::new(f).file_name().unwrap()), data)?;
@@ -1674,9 +1671,7 @@ fn branch_cmd(a: &BranchArgs) -> Result<()> {
         cut.io,
         tape_rec.io_inputs().len()
     );
-    let Started {
-        d, start, offset, ..
-    } = started;
+    let Started { d, start } = started;
     let checkpoint = d.b.checkpoint()?;
     let prefix_console = fs::read(out.join("prefix-console.log")).unwrap_or_default();
     let streams = rng_streams(&rec.manifest);
@@ -1765,7 +1760,6 @@ fn branch_cmd(a: &BranchArgs) -> Result<()> {
             Started {
                 d: Driver { b, tape: cursor },
                 start,
-                offset,
             },
             &actions,
             true,
