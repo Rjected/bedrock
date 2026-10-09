@@ -84,6 +84,12 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, 32(%rsp)
  mov $0x400, %rax
  mov %rax, %dr7
+ movq $0, 80(%rsp)
+ /* Scalar entries need no hardware execution breakpoints. Guest DR access
+  * is intercepted; DR7 stays disabled while host DR0-DR3 remain untouched. */
+ testb $0xff, 0x560(%r9)
+ jz .Lsvm_skip_breakpoint_regs_entry
+ movq $1, 80(%rsp)
  mov %dr0, %rax
  mov %rax, 24(%rsp)
  mov %dr1, %rax
@@ -100,6 +106,7 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, %dr2
  mov 24(%rcx), %rax
  mov %rax, %dr3
+.Lsvm_skip_breakpoint_regs_entry:
  mov %rdx, %rax
  vmsave %rax
 	mov	VMXCTX_XCR0_MASK(%rdi), %rax
@@ -230,6 +237,8 @@ SYM_FUNC_START(svm_run_guest)
 	xrstor64 (%rcx)
 
 .Lsvm_skip_xsave_exit:
+ cmpq $0, 80(%rsp)
+ je .Lsvm_skip_breakpoint_regs_exit
  mov 24(%rsp), %rax
  mov %rax, %dr0
  mov 56(%rsp), %rax
@@ -238,6 +247,7 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, %dr2
  mov 72(%rsp), %rax
  mov %rax, %dr3
+.Lsvm_skip_breakpoint_regs_exit:
  mov 32(%rsp), %rax
  mov %rax, %dr7
  stgi
