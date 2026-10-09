@@ -208,6 +208,16 @@ An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
 Both diagnostic changes were reverted.
+An unsafe, box-only upper-bound probe made the Linux `memcpy` physical page
+globally executable despite its four `REP MOVS`/`REP STOS` hazards. One Linux
+boot/fork replay fell from 2.93 seconds and about 880,000 exits to 2.13 seconds
+and 664,446 exits, with the same final snapshot and RAM hash. The broader
+REP-page rule failed the exact-deadline hardware test: after 10,000 REP
+iterations the accelerated child reported instruction count 19, while the
+stepped reference required 10,004. Thus the tempting exit reduction is not a
+valid deterministic backend; both unsafe probes were reverted. A viable
+solution must trap or account for REP iterations at every executable alias
+and preserve mid-REP deadline behavior.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.
