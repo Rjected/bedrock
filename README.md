@@ -189,6 +189,13 @@ the global gate across ordinary COW remaps, or remove redundant VMCB/PMU writes
 did not produce a repeatable Linux speedup and were reverted. The remaining
 work is to reduce the Linux exit rate and per-entry cost while preserving exact
 instruction counts and replay state.
+In a box-only diagnostic over one million entries, the SVM runner spent about
+4.53 billion cycles between calling its assembly entry and returning from it;
+this interval includes guest execution. Temporarily omitting XSAVE/XRSTOR
+reduced that interval to 3.80 billion cycles, and omitting XCR0 switching as
+well reduced it to 3.55 billion. Both changes violate FPU isolation or
+guest-visible XCR0 semantics and were reverted. They bound the benefit of
+FPU-switch optimization on this workload; reducing VM exits remains necessary.
 The table-frame list can be reused within a RUN while guarded execution,
 known non-writing instructions (including ENDBR64 and conditional branches),
 or MOV/PUSH stores proven disjoint from table frames preserve its shape.
