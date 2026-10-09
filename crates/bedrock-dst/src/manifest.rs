@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::workload::Opaque;
 
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -153,6 +153,9 @@ pub struct Environment {
     pub initrd: InputFile,
     pub images: InputFile,
     pub compose: InputFile,
+    /// Optional binary fetched into the Tempo guest at boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tempo_dst: Option<InputFile>,
     /// Images in the archive: tags, config digest and labels (e.g.
     /// `org.opencontainers.image.revision` when the build sets it).
     pub image_metadata: Vec<ImageMetadata>,
@@ -174,6 +177,7 @@ impl Environment {
         initrd: &Path,
         images: &Path,
         compose: &Path,
+        tempo_dst: Option<&Path>,
         build_info: &[String],
         workload_planner: Option<&Path>,
         tsc_frequency: u64,
@@ -184,6 +188,7 @@ impl Environment {
             initrd: InputFile::of(initrd)?,
             images: InputFile::of(images)?,
             compose: InputFile::of(compose)?,
+            tempo_dst: tempo_dst.map(InputFile::of).transpose()?,
             image_metadata: image_metadata(images).unwrap_or_else(|e| {
                 eprintln!("warning: cannot read image metadata from {images:?}: {e}");
                 Vec::new()
@@ -218,6 +223,14 @@ impl Environment {
                     a.sha256, a.path, b.sha256, b.path
                 ));
             }
+        }
+        match (&self.tempo_dst, &now.tempo_dst) {
+            (Some(a), Some(b)) if a.sha256 != b.sha256 => out.push(format!(
+                "tempo-dst: recorded {} ({}), now {} ({})",
+                a.sha256, a.path, b.sha256, b.path
+            )),
+            (None, Some(_)) | (Some(_), None) => out.push("tempo-dst presence changed".into()),
+            _ => {}
         }
         out.extend(self.bedrock_ko.diff(&now.bedrock_ko));
         if let (Some(a), Some(b)) = (&self.workload_planner, &now.workload_planner) {
@@ -474,6 +487,7 @@ mod tests {
             initrd: file("b"),
             images: file("c"),
             compose: file("d"),
+            tempo_dst: Some(file("e")),
             image_metadata: vec![],
             bedrock_ko: ModuleIdentity {
                 srcversion: Some("S1".into()),
@@ -488,14 +502,18 @@ mod tests {
         assert!(env.diff(&env.clone()).is_empty());
         let mut now = env.clone();
         now.initrd.sha256 = "B".into();
+        now.tempo_dst.as_mut().unwrap().sha256 = "E".into();
         now.bedrock_ko.srcversion = Some("S2".into());
         now.boot_seed = 2;
         let d = env.diff(&now);
-        assert_eq!(d.len(), 3, "{d:?}");
+        assert_eq!(d.len(), 4, "{d:?}");
         assert!(d[0].starts_with("initrd"));
+        assert!(d[1].starts_with("tempo-dst"));
         // Unknown on either side is not a mismatch.
         now = env.clone();
         now.bedrock_ko.srcversion = None;
         assert!(env.diff(&now).is_empty());
+        now.tempo_dst = None;
+        assert_eq!(env.diff(&now), ["tempo-dst presence changed"]);
     }
 }

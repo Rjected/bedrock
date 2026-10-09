@@ -23,10 +23,10 @@ if [ "$#" -gt 0 ]; then shift; fi
 NIX=${NIX:-/nix/var/nix/profiles/default/bin/nix}
 cli=$($NIX build .#bedrock-cli --no-link --print-out-paths)
 kernel=$($NIX build .#guestKernel --no-link --print-out-paths)
-initrd=$($NIX build .#podmanInitrd --no-link --print-out-paths)
-./workloads/tempo/prepare-initrd.sh "$initrd"
-initrd=$PWD/workloads/tempo/initrd.gz
+initrd=$($NIX build .#tempoInitrd --no-link --print-out-paths)
 if [ ! -c /dev/bedrock ]; then
+  # The nested VM reads the shared workspace path, not the host's Nix store.
+  cp "$initrd" workloads/tempo/initrd.gz
   remote_args=
   if [ "$#" -gt 0 ]; then printf -v remote_args '%q ' "$@"; fi
   sshpass -p root ssh -p 2222 -o StrictHostKeyChecking=accept-new root@127.0.0.1 \

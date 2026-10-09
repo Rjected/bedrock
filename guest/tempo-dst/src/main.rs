@@ -29,7 +29,7 @@
 //! Assertions go to /bedrock/assertions/*.jsonl, control events to
 //! /bedrock/events.jsonl. `TEMPO_DST_RPC` overrides the node's RPC URL.
 
-mod assertions;
+use bedrock_assertions::files as assertions;
 mod cob;
 mod cob_gen;
 mod common;
@@ -94,7 +94,6 @@ fn main() {
         }
         Some("oracle") => oracle::run(),
         Some("finalize") => finalize::run(),
-        Some("forward-assertions") => assertions::forward(),
         Some("merge-assertions") => {
             if let Err(e) = assertions::merge_seed() {
                 eprintln!("merge-assertions: {e}");

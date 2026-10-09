@@ -314,6 +314,10 @@ struct CampaignArgs {
     /// Image archive served to the guest as images.tar.
     #[arg(long)]
     images: PathBuf,
+    /// Optional Tempo harness binary served to the guest at boot.
+    #[arg(long)]
+    #[serde(default)]
+    tempo_dst: Option<PathBuf>,
     #[arg(
         long,
         default_value = "console=hvc0 nopti nokaslr mitigations=off break audit=0 bedrock_ncpus=5"
@@ -590,6 +594,13 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
         .initramfs(&initrd);
     vm.setup_linux_boot(&boot)?;
     let path = |p: &Path| p.to_string_lossy().into_owned();
+    let mut files = vec![
+        ("compose.yaml".into(), path(&args.compose)),
+        ("images.tar".into(), path(&args.images)),
+    ];
+    if let Some(tempo_dst) = &args.tempo_dst {
+        files.push(("tempo-dst".into(), path(tempo_dst)));
+    }
     let deadline = VirtTime::from_secs(args.warm_timeout_secs, DEFAULT_TSC_FREQUENCY);
     let ready = Checkpoint::initial_when_ready_with(
         vm,
@@ -597,10 +608,7 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
         LabOpts {
             sink,
             rng: RngMode::Seeded(args.boot_seed),
-            files: vec![
-                ("compose.yaml".into(), path(&args.compose)),
-                ("images.tar".into(), path(&args.images)),
-            ],
+            files,
             ..Default::default()
         },
     )?;
@@ -1060,6 +1068,7 @@ fn probe_environment(args: &CampaignArgs) -> Result<Environment> {
         &args.initrd,
         &args.images,
         &args.compose,
+        args.tempo_dst.as_deref(),
         &args.build_info,
         args.workload_planner.as_deref(),
         DEFAULT_TSC_FREQUENCY,
@@ -2043,6 +2052,7 @@ mod tests {
             initrd: file("i"),
             images: file("t"),
             compose: file("c"),
+            tempo_dst: None,
             image_metadata: vec![],
             bedrock_ko: Default::default(),
             workload_planner: None,

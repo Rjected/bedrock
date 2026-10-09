@@ -3,7 +3,7 @@
 //
 // Downloads one or more host-side files into the guest filesystem over the
 // file-transmission hypercall (HYPERCALL_FILE_FETCH). This is how the workload's
-// compose.yaml / images.tar reach the guest from the host at boot.
+// compose.yaml / images.tar and optional helpers reach the guest at boot.
 //
 // It registers a single 1 MB buffer as a feedback buffer (under the id
 // "bedrock-file-xfer") to use as the shared transport, then for each
@@ -12,6 +12,7 @@
 // (chunk length + data) are framed inside the buffer — see libvmcall.h and
 // crates/bedrock-vm/src/file_xfer.rs, which must stay in sync with this.
 //
+// Prefix a name with '?' to skip it when the host did not provide it.
 // Usage: bedrock-file-fetch <name> <path> [<name> <path> ...]
 // e.g.   bedrock-file-fetch compose.yaml /workload/compose.yaml
 //                           images.tar   /images/images.tar
@@ -37,9 +38,9 @@
 #define XFER_BUF_SIZE VMCALL_FEEDBACK_BUFFER_MAX_SIZE
 
 // Download the host file named `name` into `path`, chunked through `buf`.
-// Returns 0 on success, -1 on failure.
+// Returns 0 on success, 1 for an absent optional file, -1 on failure.
 static int fetch_one(unsigned char *buf, size_t buf_size, const char *name,
-		     const char *path)
+		     const char *path, int optional)
 {
 	size_t name_len = strlen(name);
 	size_t data_cap = buf_size - VMCALL_FILE_XFER_HEADER_LEN;
@@ -76,10 +77,13 @@ static int fetch_one(unsigned char *buf, size_t buf_size, const char *name,
 		memcpy(&result, buf, sizeof(result));
 
 		if (result == VMCALL_FILE_XFER_NOT_FOUND) {
+			close(fd);
+			unlink(path);
+			if (optional)
+				return 1;
 			fprintf(stderr,
 				"file-fetch: host has no file named '%s'\n",
 				name);
-			close(fd);
 			return -1;
 		}
 		if (result < 0) {
@@ -177,10 +181,17 @@ int main(int argc, char **argv)
 	}
 
 	for (int i = 1; i + 1 < argc; i += 2) {
-		if (fetch_one(buf, XFER_BUF_SIZE, argv[i], argv[i + 1]) != 0)
+		const char *name = argv[i];
+		int optional = name[0] == '?';
+		int status = fetch_one(buf, XFER_BUF_SIZE, name + optional,
+				       argv[i + 1], optional);
+		if (status < 0)
 			return 1;
-		printf("file-fetch: downloaded %s -> %s\n", argv[i],
-		       argv[i + 1]);
+		if (status == 1)
+			printf("file-fetch: optional %s unavailable\n", name + 1);
+		else
+			printf("file-fetch: downloaded %s -> %s\n", name,
+			       argv[i + 1]);
 	}
 
 	return 0;

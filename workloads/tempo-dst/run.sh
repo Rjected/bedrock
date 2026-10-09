@@ -90,15 +90,15 @@ NIX=${NIX:-/nix/var/nix/profiles/default/bin/nix}
 dst=$($NIX build .#bedrock-dst --no-link --print-out-paths)
 planner=$($NIX build .#tempo-dst --no-link --print-out-paths)
 kernel=$($NIX build .#guestKernel --no-link --print-out-paths)
-initrd=$($NIX build .#podmanInitrd --no-link --print-out-paths)
-./workloads/tempo/prepare-initrd.sh "$initrd" "$run_dir/initrd.gz"
+initrd=$($NIX build .#tempoInitrd --no-link --print-out-paths)
 images=${IMAGES:-$root/images.tar}
-sha256sum "$kernel/vmlinux" "$run_dir/initrd.gz" "$images" "$run_dir/compose-run.yaml" \
+sha256sum "$kernel/vmlinux" "$initrd" "$images" "$run_dir/compose-run.yaml" "$planner/bin/tempo-dst" \
   > "$run_dir/inputs.sha256"
 if [ ! -c /dev/bedrock ]; then
   echo "no /dev/bedrock: load bedrock.ko on a bare-metal host with EPT-friendly PEBS" >&2
   exit 1
 fi
 exec "$dst/bin/bedrock-dst" campaign --vmlinux "$kernel/vmlinux" \
-  --initrd "$run_dir/initrd.gz" --compose "$run_dir/compose-run.yaml" --images "$images" \
-  --workload-cmd tempo-dst --workload-planner "$planner/bin/tempo-dst" "$@"
+  --initrd "$initrd" --compose "$run_dir/compose-run.yaml" --images "$images" \
+  --tempo-dst "$planner/bin/tempo-dst" --workload-cmd tempo-dst \
+  --workload-planner "$planner/bin/tempo-dst" "$@"

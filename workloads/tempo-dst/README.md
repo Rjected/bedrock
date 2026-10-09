@@ -34,8 +34,8 @@ failures can be grouped by feature (`regressions/hunt.sh` prints that table).
 | Piece | Where | Role |
 |---|---|---|
 | `bedrock-dst` | `crates/bedrock-dst` | Workload-agnostic host driver: boot, warm checkpoint, branch per seed, collect, verdict, replay ([contract](#workload-contract)) |
-| `tempo-dst` | `guest/tempo-dst` | The workload: in-guest warmup, nemesis and oracles (installed in the podman initrd), and the host-side planner |
-| `workload-monitor` | `guest/workload-monitor` | Excuses container SIGKILL deaths that the nemesis logged |
+| `tempo-dst` | `guest/tempo-dst` | The workload: in-guest warmup, nemesis and oracles (fetched at boot), and the host-side planner |
+| `workload-monitor` | `guest/workload-monitor` | Forwards assertions and excuses container SIGKILL deaths that the nemesis logged |
 | compose / run | `workloads/tempo-dst` | Node config, variants, campaign entry point |
 
 Guest contract: each writer appends serialized `bedrock_assertions::Assertion`
@@ -126,8 +126,8 @@ coverage byte for byte.
 | `E7/reference-stalled` | `reference=true`: the reference's head stays more than 32 blocks behind the primary's for `liveness_secs` while the primary is up (clock restarts at each primary restart) |
 | `E7/block-hash-differs`, `E7/state-root-differs` | `reference=true`: at the highest block both nodes have, they disagree for `liveness_secs` (a crash may rebuild unfinalized blocks; the reference must reorg onto them), named by whether the state roots differ too; or the same header hash comes with different `stateRoot`s |
 | `E7/proof-differs` | `reference=true load=trie`: on blocks both nodes agree on (new ones, plus E5/E6's depth sweep), RawStorage's `eth_getProof` `storageHash` and proven values, `eth_getMultiProof` `storageHash`, and `eth_getStorageAt` values are equal on both |
-| `E7/reference-graceful-stop` | `reference=true`: the reference stops cleanly at the end of the run |
-| `E4/graceful-stop`, `E4/re-execute` | At the end of the run, the node stops cleanly, and `tempo re-execute` over `[1, head]` from its datadir agrees |
+| `E7/reference-graceful-stop`, `E7/reference-repair-trie` | `reference=true`: the reference stops cleanly and `tempo db repair-trie --dry-run` finds no trie inconsistencies in its datadir |
+| `E4/graceful-stop`, `E4/repair-trie`, `E4/re-execute` | At the end of the run, the node stops cleanly, `tempo db repair-trie --dry-run` finds no trie inconsistencies in its datadir, and `tempo re-execute` over `[1, head]` agrees |
 | `container <name> exit code is zero` | workload-monitor: no unexplained container death |
 | `D/guest-exited` | The guest VM stopped mid-run (kernel panic, shutdown) |
 | `S/kill`, `S/recovered`, `S/rewound-unfinalized`, `S/re-executed`, `S/load-included`, `S/trie-checked`, `S/trie-all-slots-live`, `S/chain-appended`, `S/chain-survived-restart`, `S/chain-history-reread` | Coverage (Sometimes): the fault, crash-recovery unwind, recovery, and load paths actually ran |
@@ -275,7 +275,7 @@ plus a human-readable decision file):
 |---|---|---|
 | `tape.bin` | every randomness value Bedrock served the branch (RDRAND, RDSEED, getrandom, with the requesting pid) and every host action (`tempo-dst start/finalize`, artifact fetches) with its virtual time | `bedrock-dst replay --tape <out>/seed-N` |
 | `scenario.json` | every harness decision by value: swarm record (preemption period and seed, load, reference, nemesis), nemesis kill plan, per-load-generation `txgen_seed`/`spec_seed`, run parameters, and what the guest reported (`observed`: plan event, per-generation spec keccak256 and trie slots). A `meaning` map documents each field | `bedrock-dst replay --scenario <out>/seed-N` |
-| `manifest.json` | what the tape is tied to: sha256 of vmlinux, initrd, images.tar and compose file, image tags/config digests/labels from images.tar, `bedrock.ko` srcversion and file sha256 (`$BEDROCK_KO` or `modinfo`), TSC frequency, boot seed, warm-checkpoint and branch-end virtual time, campaign args, `--build-info KEY=VALUE` pairs (e.g. Tempo/reth revisions), tape sha256 and per-consumer draw counts | checked by `replay --tape` |
+| `manifest.json` | what the tape is tied to: sha256 of vmlinux, initrd, images.tar, compose file, fetched tempo-dst binary and host planner, image tags/config digests/labels from images.tar, `bedrock.ko` srcversion and file sha256 (`$BEDROCK_KO` or `modinfo`), TSC frequency, boot seed, warm-checkpoint and branch-end virtual time, campaign args, `--build-info KEY=VALUE` pairs (e.g. Tempo/reth revisions), tape sha256 and per-consumer draw counts | checked by `replay --tape` |
 
 **Tape format** (`bedrock_lab::Tape`, version 1, little-endian): magic
 `BDRKTAPE`, version, flags, body length, body, FNV-1a checksum. The body is
@@ -298,9 +298,10 @@ of the draw. Seen live: a `--kernel-rng` tape diverged at input #95 of 537
 extra exits are cheap (~540 draws per 90 s run; thread-fuzz draws through BPF
 prandom, not getrandom). `--no-tape` skips writing the tape.
 
-`run.sh` regenerates `initrd.gz` on every invocation and the result is not
-byte-reproducible, so a tape is tied to the `RUN_DIR` initrd it was recorded
-with (`replay --tape` names the mismatch if it was rebuilt).
+`run.sh` builds `tempoInitrd` and the static `tempo-dst` binary through Nix.
+The prepared initrd is cached in the store and reused across invocations;
+the binary is served through the file-fetch channel at boot. The tape manifest
+pins both files by sha256.
 
 **`replay --tape`** (validated live: a `decisions=explicit load=trie` seed with preemption, two nemesis kills and three load generations replays identically) re-checks the manifest against the current files and
 module (refusing on any mismatch unless `--force`), boots, checks the warm
@@ -511,7 +512,7 @@ draft PR that names it.
 - [x] **E1** Log scanner over `journalctl CONTAINER_NAME=tempo` (survives restarts)
 - [x] **E2** Liveness
 - [x] **E3** Durability of finalized blocks across crash/restart (the `Saved range` frontier is not durable: reth unwinds to its state-trie frontier)
-- [x] **E4** Graceful stop + `tempo re-execute`. Verify on host that `--chain dev` matches the dev node's chain spec (override with `TEMPO_DST_CHAIN`)
+- [x] **E4** Graceful stop + trie repair dry run + `tempo re-execute`. Verify on host that `--chain dev` matches the dev node's chain spec (override with `TEMPO_DST_CHAIN`)
 - [ ] **E4b** Independent state-root check: rebuild the trie from the final state, separate from the sparse trie
 - [x] **E7** Reference-node differential oracle (`reference=true`): a vanilla-flags follower re-executes every block; logs, lag, header/state-root and proof answers compared (`guest/tempo-dst/src/reference.rs`)
 - [ ] **E7b** First campaign with `reference=true`; then consider defaulting it on

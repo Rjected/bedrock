@@ -38,8 +38,9 @@ passes whole-second intervals without a unit. Bare mode retains the dev node
 and prefunded accounts, but skips faucet/liquidity setup. No transactions
 were submitted by this smoke test.
 
-`prepare-initrd.sh` sets `GOMAXPROCS=1` for Podman's Go runtime and starts the
-journal stream early. Tempo's Rust runtime still sees five affinity CPUs.
+The Nix-built `tempoInitrd` applies `prepare-initrd.sh` once per input change:
+it sets `GOMAXPROCS=1` for Podman's Go runtime and starts the journal stream
+early. Tempo's Rust runtime still sees five affinity CPUs.
 `run.sh` stages workload files onto the NixOS VM's local filesystem because
 9P reads directly into Bedrock's mapped guest memory returned EIO.
 
@@ -98,8 +99,7 @@ Capture flags are `--events-jsonl PATH --event-categories all --exit-capture all
 --no-memory-hash --exit-stats-json PATH`. Full exit tracing materially changes
 wall-clock performance. Memory hashes are disabled; register and device
 hashes are retained. `run.sh` accepts extra Bedrock CLI arguments after its
-workload argument, but regenerates the initrd, so freeze the initrd once when
-making a strict comparison across runs.
+workload argument and reuses the Nix-cached prepared initrd across runs.
 
 ```sh
 python3 workloads/tempo/compare-traces.py workloads/tempo/traces

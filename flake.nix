@@ -65,6 +65,10 @@
         inherit pkgs guestKernel;
       };
 
+      tempoInitrd = import ./nix/tempo-initrd.nix {
+        inherit pkgs podmanInitrd;
+      };
+
       # A workload is a directory under workloads/ holding a compose.yaml and a
       # built images.tar (`./workloads/<name>/build.sh`). Both are served to the
       # guest at runtime over the file-transmission hypercall — read from disk,
@@ -105,9 +109,10 @@
         bedrock-cli = userland.bedrock-cli;
         bedrock-determinism = userland.bedrock-determinism;
         bedrock-dst = userland.bedrock-dst;
-        # The Tempo workload's planner (static; the same binary as in the guest).
-        tempo-dst = podmanInitrd.tempoDst;
+        # The Tempo workload's planner is also fetched into the guest at boot.
+        tempo-dst = userland.tempo-dst;
         inherit podmanInitrd;
+        inherit tempoInitrd;
         default = userland.bedrock-cli;
       };
 
