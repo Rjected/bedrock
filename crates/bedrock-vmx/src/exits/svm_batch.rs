@@ -2296,7 +2296,9 @@ fn prepare_verified<C: VmContext>(
         g.r14,
         g.r15,
     ];
-    if long && paged && can_loop {
+    // Counted store loops reconstruct retirements from the loop register and
+    // decoded boundary; they do not need a virtualized PMU.
+    if long && paged {
         if counted_store_loop(ctx, linear, &bytes[..available], &gprs, &mut batch).is_some() {
             return Some(batch);
         }
@@ -3189,6 +3191,9 @@ mod tests {
         let b = planned(&ctx).unwrap();
         assert!(b.counted_loop.is_some() && b.validated_stores && !b.uses_counter);
         assert_eq!(b.count, 4);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(prepare_verified(&ctx, false, false, false, &window)
+            .is_some_and(|batch| batch.counted_loop.is_some()));
         for address in [0x1000, 0x3000, 0x4000, 0x5000] {
             ctx.state_mut().gprs.rdi = address;
             assert!(!planned(&ctx).is_some_and(|b| b.counted_loop.is_some()));

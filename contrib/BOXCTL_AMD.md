@@ -59,6 +59,10 @@ and any unsaved logs disappear when it expires.
 The current experimental global-gate branch failed a decoded-branch
 performance assertion on an EPYC 4244P `m4-metal-small` box but passed on an
 EPYC 4245P box; see the AMD status in the [main README](../README.md).
+On a later 4244P box, CPUID showed ROGPT present but PMC virtualization
+absent. Record `SVM_WORKLOAD_HOST` along with the model name: the two CPU
+models select very different instruction-counting paths despite using the
+same plan name.
 If `test` returns nonzero, the box remains available for focused benchmarks
 and debugging.
 

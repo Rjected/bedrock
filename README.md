@@ -371,6 +371,21 @@ the final build with explicit guard-revocation checks took 17.64 seconds.
 The snapshot TSC and memory hash matched; VM-entry setup cycles fell by about
 9%. This improves the ROGPT path but does not address the unaccelerated
 no-ROGPT path or establish 5% overhead for Linux against native execution.
+An EPYC 4244P box later identified the other major feature dependency:
+CPUID Fn8000_000A_EDX was `0x1ebfbcff`, with ROGPT and virtual NMI present
+but PMC virtualization absent. With instruction-counter batches disabled, a
+589,893-instruction memory workload took 0.367 seconds and about 131,400 exits.
+Counted store loops need no hardware PMC: enabling their existing range and
+register proof independently reduced that same workload to 0.330 ms and 104
+exits. A 37.75-million-instruction run took 21.5 ms guest versus 3.97 ms
+native (5.4x, about 6,180 exits). This is a large improvement on the 4244P
+but is still far from the 5% target. A guest-only host perf counter measured
+the expected instruction count plus one tick per VM entry, but its overflow
+interrupt did not stop a long SVM run: an exact-deadline test rejected a
+159,998-instruction batch against a 99,995-instruction budget. Host perf
+counting therefore cannot replace virtual PMC overflow without another
+reliable way to bound execution. General Linux execution on this 4244P still
+single-steps heavily.
 On the EPYC 4244P box, the default `svm_bench` suite also fails its
 decoded-branch acceleration assertion: one case needs 40,131 exits with the global gate and
 20,029 without it, where the test requires fewer than 100. Its functional
