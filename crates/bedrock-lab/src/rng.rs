@@ -75,6 +75,64 @@ impl InputRecording {
         &self.io_inputs
     }
 
+    /// Where to cut this recording before randomness input `n`: the host
+    /// actions recorded before that input's time go with the prefix. Past
+    /// the end, the cut keeps everything recorded up to the last input.
+    pub fn cut_at_index(&self, n: usize) -> Cut {
+        let n = n.min(self.random_inputs.len());
+        let io = match self.random_inputs.get(n) {
+            Some(next) => self.io_inputs.iter().filter(|i| i.at < next.at).count(),
+            None => match self.random_inputs.last() {
+                Some(last) => self.io_inputs.iter().filter(|i| i.at <= last.at).count(),
+                None => 0,
+            },
+        };
+        Cut { random: n, io }
+    }
+
+    /// Where to cut this recording at virtual time `t`: every input recorded
+    /// before `t` is in the prefix.
+    pub fn cut_at_time(&self, t: VirtTime) -> Cut {
+        Cut {
+            random: self.random_inputs.iter().filter(|r| r.at < t).count(),
+            io: self.io_inputs.iter().filter(|i| i.at < t).count(),
+        }
+    }
+
+    /// The inputs before `cut`.
+    pub fn prefix(&self, cut: Cut) -> InputRecording {
+        let r = cut.random.min(self.random_inputs.len());
+        let i = cut.io.min(self.io_inputs.len());
+        Self::from_parts(
+            self.random_inputs[..r].to_vec(),
+            self.io_inputs[..i].to_vec(),
+        )
+    }
+
+    /// The inputs from `cut` on.
+    pub fn suffix(&self, cut: Cut) -> InputRecording {
+        let r = cut.random.min(self.random_inputs.len());
+        let i = cut.io.min(self.io_inputs.len());
+        Self::from_parts(
+            self.random_inputs[r..].to_vec(),
+            self.io_inputs[i..].to_vec(),
+        )
+    }
+
+    /// `self` followed by `rest` (e.g. a tape prefix and a branch's suffix).
+    pub fn concat(&self, rest: &InputRecording) -> InputRecording {
+        let mut out = self.clone();
+        out.random_inputs.extend_from_slice(&rest.random_inputs);
+        out.io_inputs.extend_from_slice(&rest.io_inputs);
+        out
+    }
+
+    /// Whether `prefix` is a prefix of this recording on both streams.
+    pub fn starts_with(&self, prefix: &InputRecording) -> bool {
+        self.random_inputs.starts_with(&prefix.random_inputs)
+            && self.io_inputs.starts_with(&prefix.io_inputs)
+    }
+
     /// Append the input carried by one record: `Randomness` yields a
     /// [`RandomInput`], an `IoChannel` *request* an [`IoInput`]; all else
     /// (including I/O responses) is ignored.
@@ -198,6 +256,127 @@ impl From<InputRecording> for RecordedInputSource {
     }
 }
 
+/// Where a [`PrefixSource`] stops serving its recording: the number of
+/// randomness inputs and of host actions in the prefix (see
+/// [`InputRecording::cut_at_time`] and [`InputRecording::cut_at_index`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Cut {
+    pub random: usize,
+    pub io: usize,
+}
+
+/// Serves a recorded run up to a [`Cut`], then switches to `fallback`: the
+/// source of a branch from a moment of a recorded run.
+///
+/// The prefix is served strictly, like a [`RecordedInputSource`]: a request
+/// that does not match the next recorded input stops the source (the branch
+/// diverged before the moment). Randomness and host actions switch
+/// independently, each when its own prefix runs out. What a branch records
+/// is therefore the recording's prefix followed by whatever the fallback
+/// served, so the branch replays from its own tape. With the recording's
+/// own suffix as fallback (a [`RecordedInputSource`] over
+/// [`InputRecording::suffix`]) it serves exactly the recording.
+///
+/// A branch forked from a checkpoint taken at the cut has consumed the prefix
+/// already: build its source with [`after_prefix`](Self::after_prefix).
+#[derive(Clone)]
+pub struct PrefixSource {
+    prefix: RecordedInputSource,
+    cut: Cut,
+    fallback: Box<dyn InputSource>,
+}
+
+impl PrefixSource {
+    pub fn new<S: InputSource + 'static>(
+        recording: &InputRecording,
+        cut: Cut,
+        fallback: S,
+    ) -> Self {
+        let prefix = recording.prefix(cut);
+        let cut = Cut {
+            random: prefix.random_inputs.len(),
+            io: prefix.io_inputs.len(),
+        };
+        Self {
+            prefix: RecordedInputSource::new(prefix),
+            cut,
+            fallback: Box::new(fallback),
+        }
+    }
+
+    /// This source with its prefix already consumed: everything comes from
+    /// the fallback.
+    pub fn after_prefix(mut self) -> Self {
+        self.prefix.random_pos = self.cut.random;
+        self.prefix.io_pos = self.cut.io;
+        self
+    }
+
+    pub fn cut(&self) -> Cut {
+        self.cut
+    }
+
+    /// Whether randomness still comes from the recorded prefix.
+    pub fn in_prefix(&self) -> bool {
+        self.prefix.random_pos < self.cut.random
+    }
+
+    /// Randomness inputs served from the prefix so far.
+    pub fn prefix_consumed(&self) -> usize {
+        self.prefix.random_pos
+    }
+
+    /// Whether the prefix stopped on a mismatched request.
+    fn prefix_failed(&self) -> bool {
+        self.prefix.exhausted.is_some()
+    }
+}
+
+impl std::fmt::Debug for PrefixSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrefixSource")
+            .field("cut", &self.cut)
+            .field("random_pos", &self.prefix.random_pos)
+            .field("io_pos", &self.prefix.io_pos)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InputSource for PrefixSource {
+    fn next_rng_u64(&mut self) -> Option<u64> {
+        if self.in_prefix() || self.prefix_failed() {
+            return self.prefix.next_rng_u64();
+        }
+        self.fallback.next_rng_u64()
+    }
+
+    fn next_random(&mut self, len: usize, pid: u32) -> Option<Vec<u8>> {
+        if self.in_prefix() || self.prefix_failed() {
+            return self.prefix.next_random(len, pid);
+        }
+        self.fallback.next_random(len, pid)
+    }
+
+    fn exhaustion(&self) -> Option<String> {
+        match self.prefix.exhaustion() {
+            Some(why) => Some(format!("in the recorded prefix: {why}")),
+            None => self.fallback.exhaustion(),
+        }
+    }
+
+    fn next_io_input(&mut self) -> Option<IoInput> {
+        if self.prefix.io_pos < self.cut.io {
+            return self.prefix.next_io_input();
+        }
+        self.fallback.next_io_input()
+    }
+
+    fn clone_box(&self) -> Box<dyn InputSource> {
+        Box::new(self.clone())
+    }
+}
+
 /// A userspace source of lab inputs: RNG values (with [`RngMode::Source`]) and
 /// host-driven I/O actions.
 ///
@@ -249,6 +428,26 @@ impl<F: FnMut() -> Option<u64> + Send + Sync + Clone + 'static> InputSource for 
 impl Clone for Box<dyn InputSource> {
     fn clone(&self) -> Self {
         self.clone_box()
+    }
+}
+
+/// A boxed source is a source (e.g. a [`PrefixSource`] fallback picked at
+/// run time).
+impl InputSource for Box<dyn InputSource> {
+    fn next_rng_u64(&mut self) -> Option<u64> {
+        (**self).next_rng_u64()
+    }
+    fn next_random(&mut self, len: usize, pid: u32) -> Option<Vec<u8>> {
+        (**self).next_random(len, pid)
+    }
+    fn exhaustion(&self) -> Option<String> {
+        (**self).exhaustion()
+    }
+    fn next_io_input(&mut self) -> Option<IoInput> {
+        (**self).next_io_input()
+    }
+    fn clone_box(&self) -> Box<dyn InputSource> {
+        (**self).clone_box()
     }
 }
 
@@ -356,6 +555,27 @@ impl SeededSource {
         Self {
             state: if seed == 0 { 1 } else { seed },
         }
+    }
+
+    /// Skip `n` stream values (what [`draws`](Self::draws) says a run
+    /// consumed), to continue a recorded run's stream.
+    pub fn skip(mut self, n: u64) -> Self {
+        for _ in 0..n {
+            self.next();
+        }
+        self
+    }
+
+    /// Stream values `inputs` took from this source: one per RDRAND/RDSEED,
+    /// one per started 8 bytes of a GET_RANDOM.
+    pub fn draws(inputs: &[RandomInput]) -> u64 {
+        inputs
+            .iter()
+            .map(|r| match r.source {
+                RandomSource::GetRandom => r.bytes.len().div_ceil(8) as u64,
+                _ => 1,
+            })
+            .sum()
     }
 
     fn next(&mut self) -> u64 {

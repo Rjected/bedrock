@@ -293,7 +293,120 @@ how decisions are derived from seeds, but not to randomness inside the guest
 that is not a harness decision (thread-fuzz, Tempo's RNG): it reproduces that
 only through `rng_seed`, i.e. while the binaries stay the same. Restarting a
 run part-way is by re-execution from the warm checkpoint (a tape prefix),
-not disk snapshots.
+not disk snapshots: see [Branching](#branching-from-a-moment).
+
+## Branching from a moment
+
+One recorded seed can be turned into many nearby runs, Antithesis-style:
+re-execute it exactly to a moment `T`, checkpoint there, and fork `K`
+branches that continue from `T` with other randomness and/or other
+decisions. Each branch is a full seed run (oracles, artifacts, verdict) with
+its own `tape.bin`, `scenario.json` and `manifest.json`, so it replays with
+`replay --tape` and can itself be branched.
+
+```sh
+bedrock-dst moments dst-out/seed-7               # pick T
+bedrock-dst branch dst-out/seed-7 --at 31.2 --seeds 50          # fresh randomness
+bedrock-dst branch dst-out/seed-7 --at 31.2 --seeds 8 --vary both
+bedrock-dst branch dst-out/seed-7 --at input:812 --vary none --seeds 1  # = the original
+bedrock-dst replay --tape dst-out/seed-7/branches-31.2s/branch-3
+```
+
+**How.** `branch` checks the manifest like `replay --tape` (refusing other
+binaries unless `--force`), boots the warm checkpoint, and branches it with a
+`bedrock_lab::PrefixSource`: the tape's inputs before `T` served strictly
+(randomness in order; host actions, i.e. `tempo-dst start`, at their recorded
+virtual times), with the driver's commands checked against them. At `T` it
+checkpoints (in memory) and forks each branch from there with a
+`PrefixSource` past its prefix, so a branch's input recording is the tape's
+prefix followed by what its suffix source served. Each branch then runs to the
+original end time, finalizes and is judged exactly like a campaign seed.
+`Checkpoint::branch_with_input_source` replaces the checkpoint's source
+entirely, including a host action it had pulled but not queued.
+
+**`--at`** takes virtual seconds since the run forked from the warm
+checkpoint (`31.2`; what `moments` prints), absolute virtual time
+(`vt:110.5`, as `console.log` stamps it), or "just before randomness input
+`n`" (`input:812`). The run stops at the first exit at or after `T`; the
+branch records where it actually forked (`manifest.json` `branch.at_instructions`,
+`branch.cut`: how many randomness inputs and host actions came from the
+parent). `T` must lie after the start action and before the run's end.
+
+**`moments <seed-dir>`** lists moments to branch from: the start action,
+each nemesis kill and restart, each later load generation, and, per Always
+signature, its first failure, the last pass before it, and 5 s before it.
+Failure times come from `assertion`/`first-failure` events (the guest emits
+one per signature and process, with the guest time of its last pass);
+guest times are mapped to virtual time through the run's first event, so
+they are good to a few hundred ms (`input:<n>` is exact).
+
+**`--vary`** (what changes after `T`):
+
+| `--vary` | Randomness after `T` | Decisions after `T` |
+|---|---|---|
+| `none` | the rest of the tape | the original's (the run is the original, byte for byte) |
+| `rng` (default) | a fresh `SeededSource` per branch | the original's (the kill plan and load seeds are already in the guest) |
+| `decisions` | the original's stream continued (`SeededSource` of the stretch in force, skipped past what the prefix drew) | re-drawn |
+| `both` | fresh | re-drawn |
+
+Re-drawing keeps every kill that fired before `T` and every load generation
+started before it (generation 0 and one per restart done); the rest of the kill
+plan is drawn like the guest planner would, starting after `T`, and later
+generations get fresh txgen and spec seeds. The driver delivers them at `T`
+with `tempo-dst redecide '<json>'`: the guest waits until the nemesis is
+between faults, stops it, keeps whatever already happened (the guest knows
+exactly which kills fired; the driver only estimates it from the kill times),
+writes the merged plan into `config.json` and starts `tempo-dst nemesis
+--resume`, which finishes a kill in flight and continues on the original
+nemesis clock. The merged plan is the nemesis' last `plan` event, so it is
+what the branch's `scenario.json` records. `redecide` is a host action on the
+branch's tape and in `manifest.json` `branch.actions`; `replay --tape`
+issues it again at its time.
+
+**Determinism.** Branch `i`'s seed is `branch_seed(parent tape sha256, T, i)`,
+so a branch is a pure function of the parent tape, the moment and the branch
+seed. `--vary none` must reproduce the parent exactly (artifacts and tape),
+and `branch` fails if it does not. A branch's manifest records `parent`,
+`parent_tape_sha256`, `at`, `cut`, `vary`, `branch`, `rng_seed`, and
+`rng_streams` (which `SeededSource` served which stretch of the run's
+randomness, so `--vary decisions` on a branch continues the right stream).
+
+**Output** (default `<seed-dir>/branches-<at>/`): `boot-console.log`,
+`prefix-console.log` (the prefix, also at the top of each branch's
+`console.log`), `branch-<i>/` (a seed directory), and `summary.json`; the
+driver prints signatures × branches like `hunt.sh`, plus how many branches
+are distinct runs (by assertions and events) and how many equal the parent.
+
+**Use cases.**
+
+- *Explore around a failure.* For a seed that hits #16 (a wrong block), branch
+  50 ways from 5 s before the first wrong block: `moments` prints the
+  `5 s before first failure: E9/...` line, then `branch <seed> --at <that>
+  --seeds 50`. How many branches still fail, and with which signatures,
+  says whether the bug needs that exact schedule or just that state.
+- *Find siblings*: `--vary both` from a kill shortly before the failure
+  re-rolls the later kills and loads, finding other paths to the same or
+  neighboring signatures.
+- *Minimize*: branch from later and later moments (or `--vary rng` from just
+  before the failure) to find how little of the run must be replayed for the
+  failure to stay reproducible; each failing branch is a smaller, replayable
+  seed.
+
+**Validated live** on a `--load trie --run-secs 90` seed on the pinned image
+(one kill at 27 s, failing with the known E5/E6 multiproof/untargeted
+signatures at ~73 s): `--vary none` from the restart (30.9 s, input 89 of
+370) reproduced every artifact, the tape and console.log byte for byte; 4
+`--vary rng` branches from there gave 4 distinct runs (3 pass, 1 with the same
+E5/E6 signatures); rerunning branch 1 alone gave the identical tape and
+artifacts; 3 `--vary both` branches from 15 s re-drew kills at 16/56, 17/51
+and 39 s and passed; `replay --tape` of an rng branch and of a `both` branch
+(with its `redecide`) were identical.
+
+**Limitations.** A branch needs the parent's binaries (it re-executes the
+tape). `--vary decisions` needs a guest with `redecide` (this tree; older
+initrds lack it) and changes guest timing at `T` by the host action itself.
+Moments derived from guest events are approximate. Branches run
+sequentially in one process from one in-memory checkpoint.
 
 ## Task board
 
@@ -312,7 +425,8 @@ draft PR that names it.
 - [ ] **A4b** Also compare exit-record streams (reuse `compare-traces.py`) for divergence localization
 - [ ] **A5** Parallel seeds. A `Branch` is single-driver: shard seeds across processes, each booting its own prefix, or add multi-branch driving. Watch fork memory (oss-garage/bedrock#28)
 - [x] **A6** Trace replay: per-seed `tape.bin` + `manifest.json` (`replay --tape`) and `scenario.json` (`replay --scenario`); `--decisions explicit`
-- [ ] **A6b** Validate `replay --tape`/`--scenario` across loads and many seeds (one trie seed done); tape prefix branching (restart at a recorded vt, mutate the rest)
+- [ ] **A6b** Validate `replay --tape`/`--scenario` across loads and many seeds (one trie seed done)
+- [x] **A6c** Branching from a moment of a recorded run: `bedrock-dst branch --at T --vary none|rng|decisions|both` (`PrefixSource`, `tempo-dst redecide`), `bedrock-dst moments`
 
 ### B: Crash faults
 - [ ] **B1** Verify on host that the `tempo-data` volume survives `podman kill` + `start`

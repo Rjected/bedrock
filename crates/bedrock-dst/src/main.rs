@@ -26,7 +26,14 @@
 //! `replay --scenario` reruns the recorded decisions instead of the seed's;
 //! `replay --tape` serves the recorded inputs (randomness and host actions at
 //! their recorded virtual times) and refuses to run against other binaries.
+//!
+//! `branch <out>/seed-<n> --at T` re-executes a recorded seed's tape to the
+//! moment `T`, checkpoints there, and runs `--seeds` branches from it that
+//! vary the randomness and/or decisions after `T` (`branching.rs`), each a
+//! full seed run with its own tape; `moments` lists moments worth branching
+//! from.
 
+mod branching;
 mod manifest;
 mod scenario;
 mod verdict;
@@ -40,13 +47,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bedrock_lab::{
-    BashOutput, BashTarget, Branch, Checkpoint, Event, EventSink, InputRecording, IoInput,
-    LabError, LabOpts, RecordedInputSource, RngMode, RunOutcome, SeededSource, Tape, VirtDuration,
-    VirtTime,
+    BashOutput, BashTarget, Branch, Checkpoint, Cut, Event, EventSink, InputRecording, InputSource,
+    IoInput, LabError, LabOpts, PrefixSource, RecordedInputSource, RngMode, RunOutcome,
+    SeededSource, Tape, VirtDuration, VirtTime,
 };
 use bedrock_vm::{
     load_kernel, LinuxBootConfig, PreemptConfig, VmBuilder, VmError, DEFAULT_TSC_FREQUENCY,
 };
+use branching::{At, BranchInfo, BranchResult, HostAction, RngStream, Vary};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use manifest::{Environment, Manifest, TapeSummary};
 use scenario::{Decisions, Generation, Kill, LoadScenario, NemesisScenario, Observed, Scenario};
@@ -247,6 +255,47 @@ enum Cmd {
     Campaign(Box<CampaignArgs>),
     /// Rerun one seed of a finished campaign and compare its artifacts.
     Replay(ReplayArgs),
+    /// Re-execute a recorded seed to a moment, checkpoint there, and fan out
+    /// branches that continue with other randomness and/or decisions.
+    Branch(BranchArgs),
+    /// List moments of a recorded seed worth branching from.
+    Moments(MomentsArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+struct BranchArgs {
+    /// A recorded seed directory (tape.bin, scenario.json, manifest.json):
+    /// a campaign's `seed-<n>`, or a branch.
+    run_dir: PathBuf,
+    /// The moment: virtual seconds since the run forked from the warm
+    /// checkpoint (`42.5`), absolute virtual time (`vt:112.3`), or just
+    /// before a randomness input of the tape (`input:1234`). See `moments`.
+    #[arg(long)]
+    at: At,
+    /// Branches to run.
+    #[arg(long, default_value_t = 4)]
+    seeds: u64,
+    /// First branch seed.
+    #[arg(long, default_value_t = 0)]
+    seed_start: u64,
+    /// Output directory (default `<run_dir>/branches-<at>`).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// What branches change after the moment: `none` (the rest of the tape:
+    /// the original run again), `rng` (fresh randomness per branch),
+    /// `decisions` (re-draw the nemesis kills and load generations not yet
+    /// applied), or `both`.
+    #[arg(long, value_enum, default_value_t = Vary::Rng)]
+    vary: Vary,
+    /// Branch even if manifest.json does not match the current binaries.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(ClapArgs, Debug)]
+struct MomentsArgs {
+    /// A recorded seed directory.
+    run_dir: PathBuf,
 }
 
 #[derive(ClapArgs)]
@@ -443,7 +492,14 @@ struct ConsoleSink {
 
 impl ConsoleSink {
     fn open(&self, path: &Path) -> Result<()> {
-        *self.file.lock().unwrap() = Some(File::create(path)?);
+        self.open_with(path, &[])
+    }
+
+    /// Starts `path` with `prefix` (a branch's console before its moment).
+    fn open_with(&self, path: &Path, prefix: &[u8]) -> Result<()> {
+        let mut f = File::create(path)?;
+        f.write_all(prefix)?;
+        *self.file.lock().unwrap() = Some(f);
         Ok(())
     }
 }
@@ -960,7 +1016,8 @@ struct SeedRun {
 /// Runs scenario `s` on a branch of `warm` and collects its artifacts into
 /// `dir`. `config`: the exact config to deliver (a tape replay passes the
 /// recorded one); `None` builds it from `s` (delivering decisions when
-/// `deliver`).
+/// `deliver`). `actions`: host commands to issue mid-run (a replayed
+/// branch's).
 #[allow(clippy::too_many_arguments)]
 fn run_seed(
     args: &CampaignArgs,
@@ -970,11 +1027,11 @@ fn run_seed(
     deliver: bool,
     config: Option<String>,
     inputs: Inputs,
+    actions: &[HostAction],
     dir: &Path,
 ) -> Result<SeedRun> {
     fs::create_dir_all(dir)?;
     sink.open(&dir.join("console.log"))?;
-    let seed = s.seed;
     let mut record_tape = false;
     let (b, tape) = match inputs {
         // Per-seed randomness: RDRAND and guest getrandom() come from the
@@ -1014,9 +1071,30 @@ fn run_seed(
             (b, Some(cursor))
         }
     };
+    let config = match config {
+        Some(c) => c,
+        None => serde_json::to_string(&guest_config(s, deliver))?,
+    };
+    fs::write(dir.join("config.json"), &config)?;
+    let started = begin(s, b, tape, &config)?;
+    finish(args, s, started, actions, record_tape, dir)
+}
+
+/// A seed's branch after `tempo-dst start`.
+struct Started {
+    d: Driver,
+    /// Where the branch forked (the warm checkpoint).
+    start: VirtTime,
+}
+
+/// Applies the scenario's forced preemption to `b` and delivers `config`
+/// with `tempo-dst start`.
+fn begin(s: &Scenario, b: Branch, tape: Option<TapeCursor>, config: &str) -> Result<Started> {
+    let seed = s.seed;
     let mut d = Driver { b, tape };
-    // Per-seed forced preemption, scoped to this branch; it is driver-side,
-    // so it applies to every load and with --reference.
+    // Per-seed forced preemption, scoped to this branch (and inherited by
+    // checkpoints of it); it is driver-side, so it applies to every load and
+    // with --reference.
     apply_preempt(&mut d.b, s.swarm.preempt)?;
     println!(
         "seed {seed}: branch forked at vt {:.1}s (preempt period {})",
@@ -1024,12 +1102,6 @@ fn run_seed(
         s.swarm.preempt.period
     );
     let start = d.b.current_time();
-
-    let config = match config {
-        Some(c) => c,
-        None => serde_json::to_string(&guest_config(s, deliver))?,
-    };
-    fs::write(dir.join("config.json"), &config)?;
     // JSON from guest_config never contains a single quote.
     let (code, out) = host_bash(&mut d, &format!("tempo-dst start '{config}'"))?;
     println!(
@@ -1039,9 +1111,46 @@ fn run_seed(
     if code != 0 {
         return Err(format!("tempo-dst start failed ({code}): {out}").into());
     }
+    Ok(Started { d, start })
+}
 
+/// Runs a started branch to `s.run_secs` after its fork (issuing `actions`
+/// at their times), finalizes, and collects artifacts, verdict and scenario
+/// into `dir`.
+fn finish(
+    args: &CampaignArgs,
+    s: &Scenario,
+    started: Started,
+    actions: &[HostAction],
+    record_tape: bool,
+    dir: &Path,
+) -> Result<SeedRun> {
+    let Started { mut d, start } = started;
     let end = start + secs(s.run_secs);
-    let guest_exit = d.run_until(end)?;
+    let mut guest_exit = None;
+    for a in actions {
+        let at = VirtTime::from_instructions(a.at_instructions, DEFAULT_TSC_FREQUENCY);
+        if at >= end {
+            break;
+        }
+        guest_exit = d.run_until(at)?;
+        if guest_exit.is_some() {
+            break;
+        }
+        let (code, out) = host_bash(&mut d, &a.command)?;
+        println!(
+            "seed {}: host action at vt {:.3}s exited {code}: {}",
+            s.seed,
+            at.as_secs_f64(),
+            out.trim()
+        );
+        if code != 0 {
+            return Err(format!("host action {:?} failed ({code}): {out}", a.command).into());
+        }
+    }
+    if guest_exit.is_none() {
+        guest_exit = d.run_until(end)?;
+    }
 
     let mut assertions = Vec::new();
     if guest_exit.is_none() {
@@ -1090,8 +1199,14 @@ fn run_seed(
     })
 }
 
-/// Writes a live seed's tape and manifest.
-fn write_trace(args: &CampaignArgs, env: &Environment, run: &SeedRun, dir: &Path) -> Result<()> {
+/// Writes a live seed's (or branch's) tape and manifest.
+fn write_trace(
+    args: &CampaignArgs,
+    env: &Environment,
+    run: &SeedRun,
+    dir: &Path,
+    branch: Option<BranchInfo>,
+) -> Result<()> {
     let tape = run.recording.as_ref().map(|rec| {
         let bytes = Tape {
             tsc_frequency: DEFAULT_TSC_FREQUENCY,
@@ -1131,6 +1246,7 @@ fn write_trace(args: &CampaignArgs, env: &Environment, run: &SeedRun, dir: &Path
         rng_seed: run.scenario.rng_seed,
         preempt: serde_json::to_value(run.scenario.swarm.preempt)?,
         tape: summary,
+        branch,
     };
     fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec_pretty(&m)?)?;
     Ok(())
@@ -1175,9 +1291,10 @@ fn campaign(args: CampaignArgs) -> Result<()> {
             Inputs::Seeded {
                 record: !args.no_tape,
             },
+            &[],
             &dir,
         )?;
-        write_trace(&args, &env, &run, &dir)?;
+        write_trace(&args, &env, &run, &dir, None)?;
         let v = run.verdict;
         println!(
             "seed {seed}: {} ({:.0}s wall) {:?}",
@@ -1230,13 +1347,110 @@ fn diverged_artifacts(a: &Path, b: &Path) -> Vec<&'static str> {
         .collect()
 }
 
+/// A recorded seed's tape with the campaign arguments and environment it
+/// was recorded against (checked against the current binaries).
+struct Recorded {
+    args: CampaignArgs,
+    manifest: Manifest,
+    tape: Tape,
+    env: Environment,
+}
+
+/// Loads `run_dir`'s manifest and tape and checks that the current binaries
+/// are the ones it was recorded with (a mismatch is an error unless
+/// `force`).
+fn load_recorded(run_dir: &Path, force: bool) -> Result<Recorded> {
+    let m: Manifest = serde_json::from_slice(&fs::read(run_dir.join(MANIFEST_FILE))?)
+        .map_err(|e| format!("{}: {e}", run_dir.join(MANIFEST_FILE).display()))?;
+    // The binaries are the ones the tape was recorded with, wherever the
+    // manifest says they were.
+    let args: CampaignArgs = serde_json::from_value(m.campaign.clone())?;
+    let now = probe_environment(&args)?;
+    let diff = m.environment.diff(&now);
+    if !diff.is_empty() {
+        let msg = format!(
+            "the tape was recorded against other binaries:\n  {}",
+            diff.join("\n  ")
+        );
+        if !force {
+            return Err(format!("{msg}\n(--force runs anyway)").into());
+        }
+        eprintln!("warning: {msg}");
+    }
+    let summary = m
+        .tape
+        .as_ref()
+        .ok_or("the run recorded no tape (--no-tape)")?;
+    let bytes = fs::read(run_dir.join(&summary.file))?;
+    if manifest::sha256_bytes(&bytes) != summary.sha256 {
+        return Err(format!("{} does not match its manifest sha256", summary.file).into());
+    }
+    let tape = Tape::from_bytes(&bytes)?;
+    if tape.tsc_frequency != DEFAULT_TSC_FREQUENCY {
+        return Err(format!(
+            "tape TSC frequency {} != {DEFAULT_TSC_FREQUENCY}",
+            tape.tsc_frequency
+        )
+        .into());
+    }
+    Ok(Recorded {
+        args,
+        manifest: m,
+        tape,
+        env: now,
+    })
+}
+
+/// Boots the recorded campaign's warm checkpoint and checks it lands where
+/// the manifest says.
+fn boot_recorded(
+    rec: &Recorded,
+    args: &CampaignArgs,
+    sink: Arc<ConsoleSink>,
+    preempt: bool,
+    force: bool,
+) -> Result<Checkpoint> {
+    let warm = boot(args, sink, preempt)?;
+    let w = rec.manifest.warm_checkpoint_instructions;
+    if warm.time().instructions() != w {
+        let msg = format!(
+            "warm checkpoint at {} instructions, recorded at {w}: the boot prefix differs",
+            warm.time().instructions()
+        );
+        if !force {
+            return Err(format!("{msg} (--force runs anyway)").into());
+        }
+        eprintln!("warning: {msg}");
+    }
+    Ok(warm)
+}
+
+fn read_scenario(run_dir: &Path) -> Result<Scenario> {
+    Ok(
+        serde_json::from_slice(&fs::read(run_dir.join(SCENARIO_FILE))?)
+            .map_err(|e| format!("{}: {e}", run_dir.join(SCENARIO_FILE).display()))?,
+    )
+}
+
 fn replay(r: &ReplayArgs) -> Result<()> {
     let run_dir = r.run_dir.as_path();
     let out = run_dir.parent().ok_or("run dir has no parent")?;
-    let mut args: CampaignArgs = serde_json::from_slice(&fs::read(out.join("campaign.json"))?)?;
-    let seed = seed_of(run_dir)?;
+    let name = run_dir
+        .file_name()
+        .ok_or("run dir has no name")?
+        .to_string_lossy()
+        .into_owned();
+    let branch = fs::read(run_dir.join(MANIFEST_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
+        .and_then(|m| m.branch);
+    if branch.is_some() && !r.tape {
+        return Err("a branch replays with --tape (its seed alone does not describe it)".into());
+    }
     if !r.tape && !r.scenario {
         // Re-derive the seed from the campaign arguments.
+        let mut args: CampaignArgs = serde_json::from_slice(&fs::read(out.join("campaign.json"))?)?;
+        let seed = seed_of(run_dir)?;
         let replay_out = run_dir.join("replay");
         args.out = replay_out.clone();
         args.seed_start = seed;
@@ -1251,88 +1465,49 @@ fn replay(r: &ReplayArgs) -> Result<()> {
         };
     }
 
-    let recorded: Scenario = serde_json::from_slice(&fs::read(run_dir.join(SCENARIO_FILE))?)
-        .map_err(|e| format!("{}: {e}", run_dir.join(SCENARIO_FILE).display()))?;
+    let recorded = read_scenario(run_dir)?;
+    let seed = recorded.seed;
     let mode = if r.tape { "tape" } else { "scenario" };
     let replay_out = run_dir.join(format!("replay-{mode}"));
     fs::create_dir_all(&replay_out)?;
-    args.out = replay_out.clone();
-    let mut tape = None;
-    let mut warm_instructions = None;
-    if r.tape {
-        let m: Manifest = serde_json::from_slice(&fs::read(run_dir.join(MANIFEST_FILE))?)?;
-        // The binaries are the ones the tape was recorded with, wherever the
-        // manifest says they were.
-        args = serde_json::from_value(m.campaign.clone())?;
-        args.out = replay_out.clone();
-        let now = probe_environment(&args)?;
-        let diff = m.environment.diff(&now);
-        if !diff.is_empty() {
-            let msg = format!(
-                "the tape was recorded against other binaries:\n  {}",
-                diff.join("\n  ")
-            );
-            if !r.force {
-                return Err(format!("{msg}\n(--force replays anyway)").into());
-            }
-            eprintln!("warning: {msg}");
-        }
-        let summary = m
-            .tape
-            .as_ref()
-            .ok_or("the run recorded no tape (--no-tape)")?;
-        let bytes = fs::read(run_dir.join(&summary.file))?;
-        if manifest::sha256_bytes(&bytes) != summary.sha256 {
-            return Err(format!("{} does not match its manifest sha256", summary.file).into());
-        }
-        let t = Tape::from_bytes(&bytes)?;
-        if t.tsc_frequency != DEFAULT_TSC_FREQUENCY {
-            return Err(format!(
-                "tape TSC frequency {} != {DEFAULT_TSC_FREQUENCY}",
-                t.tsc_frequency
-            )
-            .into());
-        }
-        warm_instructions = Some(m.warm_checkpoint_instructions);
-        tape = Some(t);
-    }
-    fs::write(
-        replay_out.join("campaign.json"),
-        serde_json::to_vec_pretty(&args)?,
-    )?;
     let sink = Arc::new(ConsoleSink::default());
-    sink.open(&replay_out.join("boot-console.log"))?;
-    let warm = boot(&args, sink.clone(), recorded.swarm.preempt.period != 0)?;
-    if let Some(w) = warm_instructions {
-        if warm.time().instructions() != w {
-            let msg = format!(
-                "warm checkpoint at {} instructions, recorded at {w}: the boot prefix differs",
-                warm.time().instructions()
-            );
-            if !r.force {
-                return Err(format!("{msg} (--force replays anyway)").into());
-            }
-            eprintln!("warning: {msg}");
-        }
-    }
-    let dir = replay_out.join(format!("seed-{seed}"));
-    let run = match tape {
-        Some(t) => {
-            // The exact config the original delivered (it is also in the
-            // tape's first host action, which the driver must match).
-            let config = fs::read_to_string(run_dir.join("config.json"))?;
-            run_seed(
-                &args,
-                &warm,
-                &sink,
-                &recorded,
-                true,
-                Some(config),
-                Inputs::Tape(t),
-                &dir,
-            )?
-        }
-        None => run_seed(
+    let preempt = recorded.swarm.preempt.period != 0;
+    let dir = replay_out.join(&name);
+    let run = if r.tape {
+        let rec = load_recorded(run_dir, r.force)?;
+        let mut args = rec.args.clone();
+        args.out = replay_out.clone();
+        fs::write(
+            replay_out.join("campaign.json"),
+            serde_json::to_vec_pretty(&args)?,
+        )?;
+        sink.open(&replay_out.join("boot-console.log"))?;
+        let warm = boot_recorded(&rec, &args, sink.clone(), preempt, r.force)?;
+        // The exact config the original delivered (it is also in the
+        // tape's first host action, which the driver must match).
+        let config = fs::read_to_string(run_dir.join("config.json"))?;
+        let actions = branch.map(|b| b.actions).unwrap_or_default();
+        run_seed(
+            &args,
+            &warm,
+            &sink,
+            &recorded,
+            true,
+            Some(config),
+            Inputs::Tape(rec.tape),
+            &actions,
+            &dir,
+        )?
+    } else {
+        let mut args: CampaignArgs = serde_json::from_slice(&fs::read(out.join("campaign.json"))?)?;
+        args.out = replay_out.clone();
+        fs::write(
+            replay_out.join("campaign.json"),
+            serde_json::to_vec_pretty(&args)?,
+        )?;
+        sink.open(&replay_out.join("boot-console.log"))?;
+        let warm = boot(&args, sink.clone(), preempt)?;
+        let run = run_seed(
             &args,
             &warm,
             &sink,
@@ -1340,13 +1515,13 @@ fn replay(r: &ReplayArgs) -> Result<()> {
             true,
             None,
             Inputs::Seeded { record: true },
+            &[],
             &dir,
-        )?,
-    };
-    if !r.tape {
+        )?;
         let env = probe_environment(&args)?;
-        write_trace(&args, &env, &run, &dir)?;
-    }
+        write_trace(&args, &env, &run, &dir, None)?;
+        run
+    };
 
     let decisions = recorded.decision_diff(&run.scenario);
     let diverged = diverged_artifacts(run_dir, &dir);
@@ -1360,12 +1535,10 @@ fn replay(r: &ReplayArgs) -> Result<()> {
     }
     match (diverged.is_empty(), exact) {
         (true, _) => {
-            println!("{mode} replay of seed {seed}: identical");
+            println!("{mode} replay of {name}: identical");
             Ok(())
         }
-        (false, true) => {
-            Err(format!("{mode} replay of seed {seed} diverged in {diverged:?}").into())
-        }
+        (false, true) => Err(format!("{mode} replay of {name} diverged in {diverged:?}").into()),
         (false, false) => {
             println!(
                 "{mode} replay of seed {seed}: same decisions; artifacts differ in {diverged:?} \
@@ -1377,10 +1550,328 @@ fn replay(r: &ReplayArgs) -> Result<()> {
     }
 }
 
+/// How a run's randomness was served: a branch's manifest says; a campaign
+/// seed is one stretch of its `rng_seed` stream.
+fn rng_streams(m: &Manifest) -> Vec<RngStream> {
+    match &m.branch {
+        Some(b) => b.rng_streams.clone(),
+        None => vec![RngStream {
+            from_input: 0,
+            seed: m.rng_seed,
+            skip: 0,
+        }],
+    }
+}
+
+/// sha256 over a run's assertions and events: equal for the same run.
+fn fingerprint(dir: &Path) -> String {
+    let mut data = fs::read(dir.join("assertions.jsonl")).unwrap_or_default();
+    data.extend(fs::read(dir.join("events.jsonl")).unwrap_or_default());
+    manifest::sha256_bytes(&data)
+}
+
+/// `bedrock-dst branch`: re-execute a recorded seed to a moment, checkpoint
+/// there, and run `--seeds` branches from the checkpoint.
+fn branch_cmd(a: &BranchArgs) -> Result<()> {
+    let run_dir = a.run_dir.as_path();
+    let rec = load_recorded(run_dir, a.force)?;
+    let parent = read_scenario(run_dir)?;
+    let config = fs::read_to_string(run_dir.join("config.json"))?;
+    let out = a
+        .out
+        .clone()
+        .unwrap_or_else(|| run_dir.join(format!("branches-{}", a.at.slug())));
+    fs::create_dir_all(&out)?;
+    let mut args = rec.args.clone();
+    args.out = out.clone();
+    fs::write(out.join("campaign.json"), serde_json::to_vec_pretty(&args)?)?;
+    let tape = &rec.tape;
+    let tape_rec = &tape.recording;
+    let parent_sha = rec
+        .manifest
+        .tape
+        .as_ref()
+        .map(|t| t.sha256.clone())
+        .unwrap_or_default();
+
+    let sink = Arc::new(ConsoleSink::default());
+    sink.open(&out.join("boot-console.log"))?;
+    let warm = boot_recorded(
+        &rec,
+        &args,
+        sink.clone(),
+        parent.swarm.preempt.period != 0,
+        a.force,
+    )?;
+    let fork = warm.time();
+    let target = a.at.resolve(tape_rec, fork)?;
+    let end = fork + secs(parent.run_secs);
+    let start_io = tape_rec
+        .io_inputs()
+        .first()
+        .ok_or("the tape has no start action")?
+        .at;
+    if target <= start_io || target >= end {
+        return Err(format!(
+            "moment vt {:.3}s is outside the run: pick one after its start action (vt {:.3}s) \
+             and before its end (vt {:.3}s); see `bedrock-dst moments`",
+            target.as_secs_f64(),
+            start_io.as_secs_f64(),
+            end.as_secs_f64()
+        )
+        .into());
+    }
+
+    // The prefix: the tape up to the moment, served strictly, then (never
+    // reached before the checkpoint) the rest of the tape.
+    sink.open(&out.join("prefix-console.log"))?;
+    let cut0 = tape_rec.cut_at_time(target);
+    let source = PrefixSource::new(
+        tape_rec,
+        cut0,
+        RecordedInputSource::new(tape_rec.suffix(cut0)),
+    );
+    let b = warm.branch_with_input_source(source)?;
+    let prefix_io = tape_rec.prefix(cut0);
+    let cursor = TapeCursor {
+        io: prefix_io.io_inputs().to_vec(),
+        pos: 0,
+        deadline: target + secs(60),
+        recording: prefix_io,
+    };
+    let mut started = begin(&parent, b, Some(cursor), &config)?;
+    if started.d.b.current_time() > target {
+        return Err(format!(
+            "moment vt {:.3}s falls inside the start action (it responded at vt {:.3}s)",
+            target.as_secs_f64(),
+            started.d.b.current_time().as_secs_f64()
+        )
+        .into());
+    }
+    if let Some(kind) = started.d.run_until(target)? {
+        return Err(format!("the guest stopped ({kind}) before the moment").into());
+    }
+    let at = started.d.b.current_time();
+    let got = started.d.b.input_recording().clone();
+    if !tape_rec.starts_with(&got) {
+        return Err("re-executing the tape prefix consumed other inputs than the tape".into());
+    }
+    let cut = Cut {
+        random: got.random_inputs().len(),
+        io: got.io_inputs().len(),
+    };
+    let at_run = (at - fork).as_secs_f64();
+    println!(
+        "moment {}: vt {:.6}s (run {at_run:.3}s), after {} of the tape's {} randomness inputs \
+         and {} of its {} host actions",
+        a.at,
+        at.as_secs_f64(),
+        cut.random,
+        tape_rec.random_inputs().len(),
+        cut.io,
+        tape_rec.io_inputs().len()
+    );
+    let Started { d, start } = started;
+    let checkpoint = d.b.checkpoint()?;
+    let prefix_console = fs::read(out.join("prefix-console.log")).unwrap_or_default();
+    let streams = rng_streams(&rec.manifest);
+    // Kill times count from the nemesis start, right after the start action.
+    let t_nemesis = (at - start_io).as_secs_f64();
+
+    let mut results = Vec::new();
+    for i in a.seed_start..a.seed_start + a.seeds {
+        let name = format!("branch-{i}");
+        let dir = out.join(&name);
+        fs::create_dir_all(&dir)?;
+        sink.open_with(&dir.join("console.log"), &prefix_console)?;
+        let seed = branching::branch_seed(&parent_sha, at, i);
+        let mut s = parent.clone();
+        let mut actions = Vec::new();
+        let kept: Vec<RngStream> = streams
+            .iter()
+            .filter(|st| (st.from_input as usize) < cut.random)
+            .copied()
+            .collect();
+        let (fallback, branch_streams, rng_seed): (Box<dyn InputSource>, _, _) = match a.vary {
+            Vary::None => (
+                Box::new(RecordedInputSource::new(tape_rec.suffix(cut))),
+                streams.clone(),
+                None,
+            ),
+            Vary::Rng | Vary::Both => {
+                let mut st = kept;
+                st.push(RngStream {
+                    from_input: cut.random as u64,
+                    seed,
+                    skip: 0,
+                });
+                (Box::new(SeededSource::new(seed)), st, Some(seed))
+            }
+            Vary::Decisions => {
+                let c = branching::continued_stream(&streams, tape_rec, cut.random)
+                    .ok_or("the parent's randomness streams do not cover the moment")?;
+                let mut st = kept;
+                st.push(c);
+                (Box::new(SeededSource::new(c.seed).skip(c.skip)), st, None)
+            }
+        };
+        if let Some(seed) = rng_seed {
+            s.rng_seed = seed;
+        }
+        if a.vary.decisions() {
+            let r = branching::redraw_decisions(&parent, t_nemesis, seed);
+            println!(
+                "{name}: decisions after the moment re-drawn: kills {:?} (kept {}), generations {:?} \
+                 (kept {})",
+                r.nemesis_plan, r.kept_kills, r.generations, r.kept_generations
+            );
+            if Some(&r.nemesis_plan) == parent.nemesis.plan.as_ref()
+                && r.generations == parent.load.generations
+            {
+                println!(
+                    "{name}: nothing is left to re-draw after this moment (the next kill would \
+                     not fit the run); only the randomness varies"
+                );
+            }
+            actions.push(HostAction {
+                at_instructions: at.instructions(),
+                command: format!("tempo-dst redecide '{}'", serde_json::to_string(&r)?),
+            });
+            // What the guest applied, read back from its events.
+            s.nemesis.plan = None;
+            s.load.generations.clear();
+        }
+        let source = PrefixSource::new(tape_rec, cut, fallback).after_prefix();
+        let b = checkpoint.branch_with_input_source(source)?;
+        let cursor = (a.vary == Vary::None).then(|| TapeCursor {
+            io: tape_rec.suffix(cut).io_inputs().to_vec(),
+            pos: 0,
+            deadline: tape.end + secs(60),
+            recording: tape_rec.clone(),
+        });
+        fs::write(dir.join("config.json"), &config)?;
+        println!(
+            "{name}: branch seed {i} ({seed:#x}) from vt {:.3}s",
+            at.as_secs_f64()
+        );
+        let run = finish(
+            &args,
+            &s,
+            Started {
+                d: Driver { b, tape: cursor },
+                start,
+            },
+            &actions,
+            true,
+            &dir,
+        )?;
+        let info = BranchInfo {
+            parent: run_dir.to_string_lossy().into_owned(),
+            parent_seed: parent.seed,
+            parent_tape_sha256: parent_sha.clone(),
+            at: a.at.to_string(),
+            at_instructions: at.instructions(),
+            at_run_secs: at_run,
+            cut,
+            vary: a.vary,
+            branch: i,
+            rng_seed,
+            rng_streams: branch_streams,
+            actions,
+        };
+        write_trace(&args, &rec.env, &run, &dir, Some(info))?;
+        let same_tape =
+            fs::read(dir.join(TAPE_FILE)).ok() == fs::read(run_dir.join(TAPE_FILE)).ok();
+        let diverged = diverged_artifacts(run_dir, &dir);
+        let v = &run.verdict;
+        let result = BranchResult {
+            name: name.clone(),
+            pass: v.pass,
+            failures: v.failures.keys().cloned().collect(),
+            fingerprint: fingerprint(&dir),
+            identical_to_parent: same_tape && diverged.is_empty(),
+        };
+        println!(
+            "{name}: {}{} {:?}",
+            if v.pass { "PASS" } else { "FAIL" },
+            if result.identical_to_parent {
+                " (identical to the parent)"
+            } else {
+                ""
+            },
+            result.failures
+        );
+        results.push(result);
+    }
+    let text = branching::summarize(&results);
+    print!("{text}");
+    fs::write(
+        out.join("summary.json"),
+        serde_json::to_vec_pretty(&json!({
+            "parent": run_dir.to_string_lossy(),
+            "at": a.at.to_string(),
+            "at_instructions": at.instructions(),
+            "at_run_secs": at_run,
+            "cut": cut,
+            "vary": a.vary,
+            "branches": results,
+        }))?,
+    )?;
+    if a.vary == Vary::None {
+        if let Some(r) = results.iter().find(|r| !r.identical_to_parent) {
+            return Err(format!(
+                "{} varied nothing but differs from the parent {}",
+                r.name,
+                run_dir.display()
+            )
+            .into());
+        }
+        println!("--vary none: every branch is identical to the parent");
+    }
+    Ok(())
+}
+
+/// `bedrock-dst moments`: print the moments of a recorded seed worth
+/// branching from, with the `--at` values that pick them.
+fn moments_cmd(a: &MomentsArgs) -> Result<()> {
+    let run_dir = a.run_dir.as_path();
+    let m: Manifest = serde_json::from_slice(&fs::read(run_dir.join(MANIFEST_FILE))?)?;
+    let s = read_scenario(run_dir)?;
+    let summary = m.tape.as_ref().ok_or("the run recorded no tape")?;
+    let tape = Tape::from_bytes(&fs::read(run_dir.join(&summary.file))?)?;
+    let events = fs::read_to_string(run_dir.join("events.jsonl")).unwrap_or_default();
+    let start = VirtTime::from_instructions(m.warm_checkpoint_instructions, tape.tsc_frequency);
+    let list = branching::moments(&events, &tape.recording, start, s.run_secs);
+    println!(
+        "{}: forked at vt {:.3}s, {} s run, {} randomness inputs on the tape",
+        run_dir.display(),
+        start.as_secs_f64(),
+        s.run_secs,
+        tape.recording.random_inputs().len()
+    );
+    println!("{:>10} {:>12} {:>14}  moment", "--at", "vt", "input");
+    for m in &list {
+        println!(
+            "{:>10.3} {:>12.3} {:>14}  {}",
+            m.run_secs,
+            m.vt_secs,
+            format!("input:{}", m.input),
+            m.what
+        );
+    }
+    let verdict = fs::read_to_string(run_dir.join("verdict.json")).unwrap_or_default();
+    if verdict.contains("\"pass\": false") && !events.contains("\"first-failure\"") {
+        println!("(no first-failure events: the guest predates them, so failures are not timed)");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Campaign(args) => campaign(*args),
         Cmd::Replay(r) => replay(&r),
+        Cmd::Branch(b) => branch_cmd(&b),
+        Cmd::Moments(m) => moments_cmd(&m),
     }
 }
 
@@ -1742,6 +2233,131 @@ mod tests {
         assert_eq!(c["nemesis_plan"][0]["at_secs"], 20);
         // ...while the original run was delivered without it.
         assert!(cfg(&guest_args, seed).get("nemesis_plan").is_none());
+    }
+
+    #[test]
+    fn branch_and_moments_parse() {
+        let Cmd::Branch(b) = Cli::parse_from([
+            "x",
+            "branch",
+            "out/seed-3",
+            "--at",
+            "42.5",
+            "--seeds",
+            "50",
+            "--vary",
+            "both",
+        ])
+        .cmd
+        else {
+            unreachable!()
+        };
+        assert_eq!(b.run_dir, Path::new("out/seed-3"));
+        assert_eq!(b.at, At::RunSecs(42.5));
+        assert_eq!((b.seeds, b.seed_start), (50, 0));
+        assert_eq!(b.vary, Vary::Both);
+        assert!(b.out.is_none() && !b.force);
+        // Defaults: four branches with fresh randomness.
+        let Cmd::Branch(b) =
+            Cli::parse_from(["x", "branch", "d", "--at", "input:900", "--out", "o"]).cmd
+        else {
+            unreachable!()
+        };
+        assert_eq!((b.at, b.seeds, b.vary), (At::Input(900), 4, Vary::Rng));
+        assert_eq!(b.out.as_deref(), Some(Path::new("o")));
+        for vary in ["none", "rng", "decisions", "both"] {
+            assert!(Cli::try_parse_from(["x", "branch", "d", "--at", "1", "--vary", vary]).is_ok());
+        }
+        // --at is required and checked.
+        assert!(Cli::try_parse_from(["x", "branch", "d"]).is_err());
+        assert!(Cli::try_parse_from(["x", "branch", "d", "--at", "soon"]).is_err());
+        assert!(Cli::try_parse_from(["x", "branch", "d", "--at", "1", "--vary", "all"]).is_err());
+        let Cmd::Moments(m) = Cli::parse_from(["x", "moments", "out/seed-3"]).cmd else {
+            unreachable!()
+        };
+        assert_eq!(m.run_dir, Path::new("out/seed-3"));
+    }
+
+    #[test]
+    fn manifests_without_branch_info_still_load() {
+        let env = Environment {
+            vmlinux: manifest::InputFile {
+                path: "k".into(),
+                sha256: "0".into(),
+                bytes: 0,
+            },
+            initrd: manifest::InputFile {
+                path: "i".into(),
+                sha256: "0".into(),
+                bytes: 0,
+            },
+            images: manifest::InputFile {
+                path: "t".into(),
+                sha256: "0".into(),
+                bytes: 0,
+            },
+            compose: manifest::InputFile {
+                path: "c".into(),
+                sha256: "0".into(),
+                bytes: 0,
+            },
+            image_metadata: vec![],
+            bedrock_ko: Default::default(),
+            build_info: Default::default(),
+            tsc_frequency: DEFAULT_TSC_FREQUENCY,
+            boot_seed: 1,
+        };
+        let m = Manifest {
+            version: manifest::MANIFEST_VERSION,
+            seed: 3,
+            bedrock_dst: json!({}),
+            environment: env,
+            campaign: json!({}),
+            warm_checkpoint_instructions: 10,
+            branch_end_instructions: 20,
+            rng_seed: 3,
+            preempt: json!({}),
+            tape: None,
+            branch: None,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v.get("branch").is_none());
+        let back: Manifest = serde_json::from_value(v).unwrap();
+        assert_eq!(back, m);
+        // A campaign seed is one stretch of its rng_seed stream.
+        assert_eq!(
+            rng_streams(&m),
+            [RngStream {
+                from_input: 0,
+                seed: 3,
+                skip: 0
+            }]
+        );
+        let mut b = m.clone();
+        b.branch = Some(BranchInfo {
+            parent: "p/seed-3".into(),
+            parent_seed: 3,
+            parent_tape_sha256: "ab".into(),
+            at: "12s".into(),
+            at_instructions: 15,
+            at_run_secs: 12.0,
+            cut: Cut { random: 4, io: 1 },
+            vary: Vary::Both,
+            branch: 2,
+            rng_seed: Some(9),
+            rng_streams: vec![RngStream {
+                from_input: 4,
+                seed: 9,
+                skip: 0,
+            }],
+            actions: vec![HostAction {
+                at_instructions: 15,
+                command: "tempo-dst redecide '{}'".into(),
+            }],
+        });
+        let back: Manifest = serde_json::from_value(serde_json::to_value(&b).unwrap()).unwrap();
+        assert_eq!(back, b);
+        assert_eq!(rng_streams(&b)[0].seed, 9);
     }
 
     #[test]

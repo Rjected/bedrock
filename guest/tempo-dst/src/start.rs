@@ -2,7 +2,7 @@
 
 //! Branch setup, invoked once by the host driver right after forking: installs
 //! the run config, resets the event log, starts the oracle, nemesis, and load,
-//! and prints the assertion-log offset the run's records start at.
+//! and snapshots assertion file offsets for this run.
 
 use std::fs::{self, File};
 use std::io;
@@ -18,9 +18,24 @@ use crate::{cob_gen, tip20, trie_gen};
 /// Starts `tempo-dst <sub>` in its own session so it outlives the I/O-channel
 /// command that launched it.
 fn spawn_detached(sub: &str) -> io::Result<()> {
-    let log = File::create(Path::new(OUT_DIR).join(format!("{sub}.log")))?;
+    spawn_detached_with(sub, &[], false)
+}
+
+/// [`spawn_detached`] with extra arguments; `append` keeps the existing log
+/// (a resumed nemesis continues the original's `nemesis.log`).
+pub(crate) fn spawn_detached_with(sub: &str, args: &[&str], append: bool) -> io::Result<()> {
+    let path = Path::new(OUT_DIR).join(format!("{sub}.log"));
+    let log = if append {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?
+    } else {
+        File::create(path)?
+    };
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg(sub)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);

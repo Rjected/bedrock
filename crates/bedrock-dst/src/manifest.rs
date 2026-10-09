@@ -245,6 +245,10 @@ pub struct Manifest {
     /// `Branch::set_preempt` (period, seed), applied by every replay.
     pub preempt: Value,
     pub tape: Option<TapeSummary>,
+    /// Set for a branch from a moment of another recorded run (`bedrock-dst
+    /// branch`): its parent, moment and what it varied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<crate::branching::BranchInfo>,
 }
 
 pub fn bedrock_dst_identity() -> Value {
