@@ -1743,6 +1743,11 @@ fn collect_page_breakpoints<C: VmContext>(
                 .ok()?;
             for (part, entry) in bytes.chunks_exact(8).enumerate() {
                 let entry = u64::from_le_bytes(entry.try_into().ok()?);
+                // Most table slots are absent. Avoid entering the alias
+                // walker for entries that cannot name executable code.
+                if entry & 1 == 0 || entry & (1 << 63) != 0 {
+                    continue;
+                }
                 let slot = (offset / 8 + part as u64) as u16;
                 visit_alias_entry(ctx, batch, hazards, walk, slot, entry, &mut count)?;
             }

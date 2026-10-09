@@ -386,6 +386,16 @@ also favored the change, though those timings were more variable. Every replay
 matched snapshot TSC `499445737` and RAM hash `dd6a53449a59f0aa`; the SVM
 hardware suite, byte-comparison unit tests, and the 38.659-billion-instruction
 memory workload passed. General near-native Linux execution remains unfinished.
+The alias-breakpoint page-table walk now skips absent or non-executable entries
+before calling its per-entry visitor; the visitor retains the same check as a
+backstop. In five pinned same-box Linux boot/two-fork replays per variant, the
+ten-root median fell from 2.334 to 2.131 seconds (8.7%) and median VM-entry
+preparation fell from 3.932 to 3.266 billion cycles. Reversing A/B order in
+another five paired replays gave 2.289 versus 2.182 seconds (4.7%). Exit counts
+stayed near 845,000. Every replay matched snapshot TSC `499445737` and RAM
+hash `dd6a53449a59f0aa`; the SVM hardware suite and long memory workload
+also passed. This removes avoidable host work per exit but does not yet prove
+roughly 5% overhead for general Linux execution.
 A narrower box-only upper-bound probe promoted just the recurrent Linux
 `memcpy`/`memset` page using three debug breakpoints and one address-mask MSR.
 Six nearby clean-branch runs had a 2.576-second median and about 843,000 exits;
