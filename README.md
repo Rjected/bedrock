@@ -307,6 +307,16 @@ shortcut Linux boots reached snapshot TSC `499445738` rather than
 all reached `499445737`. The shortcut was reverted. This is a correctness
 regression candidate, not a usable speedup; the source of the extra tick
 remains to be identified before any similar tree-refresh optimization.
+A stricter leaf-only refresh now requires the NPT mapping generation to match
+the last full tree guard. Any COW remap or other changed NPT mapping takes the
+complete refresh path. This closes a gap in the first shortcut, which trusted
+guard metadata even when an NPT mapping had changed. On the same EPYC 4245P
+box, the 40-run control median was 2.678 seconds and the revised shortcut's
+80-run median was 2.620 seconds (about 2.2% faster). All 80 revised boots
+matched snapshot TSC `499445737` and RAM hash `dd6a53449a59f0aa`; a fresh
+two-root replay and the box hardware suite passed. The exact cause of the
+first shortcut's rare extra tick is not yet independently isolated, so this
+optimization needs continued replay testing on other AMD boxes.
 A previous scalar-entry profile was contaminated by the boxctl test suite,
 which ran before Linux without resetting module counters. Its roughly 148,000
 entries on low page `0x1000` came from `svm_bench`'s explicit 0–40,000

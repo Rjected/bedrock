@@ -72,6 +72,8 @@ pub(crate) struct SvmGuardScratch {
     pub gate_upper_count: usize,
     pub gate_count: usize,
     pub gate_root: u64,
+    /// Leaf-only refresh is valid only while all guarded NPT mappings persist.
+    pub gate_mapping_generation: u64,
     pub gate_ready: bool,
     pub gate_disabled_no_rogpt: bool,
     pub gate_dirty: bool,
