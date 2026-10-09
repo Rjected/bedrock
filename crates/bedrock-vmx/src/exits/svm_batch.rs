@@ -463,6 +463,33 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
             .any(|page| scratch.tables[..scratch.count].contains(page)))
         .then_some(());
     }
+    // The global gate already walked and write-protected every reachable
+    // table. Reuse that complete tree when a bounded guard expires without a
+    // table write, instead of reading every table page again on each batch.
+    if scratch.gate_ready
+        && !scratch.gate_dirty
+        && scratch.gate_root == root
+        && scratch.gate_count != 0
+    {
+        let count = scratch.gate_count;
+        if code_pages
+            .iter()
+            .any(|page| scratch.gate_tables[..count].contains(page))
+        {
+            return None;
+        }
+        let scratch = &mut ctx.state_mut().svm_guard;
+        scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
+        scratch.translation_count = 0;
+        scratch.translation_cursor = 0;
+        scratch.valid = true;
+        scratch.root = root;
+        scratch.count = count;
+        for index in 0..count {
+            scratch.tables[index] = scratch.gate_tables[index];
+        }
+        return Some(());
+    }
     let scratch = &mut ctx.state_mut().svm_guard;
     scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
     if !scratch.gate_ready || scratch.gate_dirty || scratch.gate_root != root {
@@ -3815,6 +3842,40 @@ mod tests {
             &rebuilt.page_breakpoints[..rebuilt.page_breakpoint_count],
             &[0x1100, 0x9100]
         );
+    }
+
+    #[test]
+    fn bounded_tree_reuses_global_gate_until_table_write() {
+        let mut ctx = paged_context(&[0x90]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        prepare(&mut ctx, true, true, &window).unwrap();
+        let root = ctx.state().svm_guard.root;
+        let count = ctx.state().svm_guard.count;
+        for index in 0..count {
+            ctx.state_mut().svm_guard.gate_tables[index] = ctx.state().svm_guard.tables[index];
+        }
+        ctx.state_mut().svm_guard.gate_count = count;
+        ctx.state_mut().svm_guard.gate_root = root;
+        ctx.state_mut().svm_guard.gate_ready = true;
+
+        ctx.state_mut().svm_guard.valid = false;
+        ctx.state_mut().svm_guard.tables[0] = 0;
+        ctx.state_mut().svm_guard.levels[0] = 0;
+        ctx.state_mut().svm_guard.translation_count = 1;
+        ctx.state_mut().svm_guard.translations[0] = (0x1000, 0x9000);
+        collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
+        assert_eq!(ctx.state().svm_guard.tables[0], root);
+        assert_eq!(ctx.state().svm_guard.count, count);
+        assert_eq!(ctx.state().svm_guard.levels[0], 0); // No table walk.
+        assert_eq!(ctx.state().svm_guard.translation_count, 0);
+
+        ctx.state_mut().svm_guard.valid = false;
+        assert!(collect_translation_tree_pages(&mut ctx, &[0x3000]).is_none());
+
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        ctx.state_mut().svm_guard.valid = false;
+        collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
+        assert_eq!(ctx.state().svm_guard.levels[0], 4); // Rewalked.
     }
 
     #[test]
