@@ -439,6 +439,7 @@ fn run() -> io::Result<()> {
 
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
+    let fair_timing = std::env::var_os("BEDROCK_FAIR_TIMING").is_some();
     let timeout_duration = args
         .wall_clock_timeout
         .map(std::time::Duration::from_secs_f64);
@@ -453,6 +454,9 @@ fn run() -> io::Result<()> {
 
         match vm.run() {
             Ok(exit) => {
+                // Capture the host boundary before serial event processing.
+                let exit_wall_seconds =
+                    fair_timing.then(|| wall_clock_start.elapsed().as_secs_f64());
                 // Print `Serial` records; write all records to --events-jsonl.
                 if exit.event_len > 0 {
                     if let Some(buffer) = vm.event_buffer() {
@@ -476,6 +480,17 @@ fn run() -> io::Result<()> {
 
                 match exit.kind() {
                     ExitKind::VmcallShutdown => {
+                        if let Some(host_seconds) = exit_wall_seconds {
+                            println!(
+                                "FAIR_LIFETIME {}",
+                                serde_json::json!({
+                                    "guest_tsc": exit.emulated_tsc,
+                                    "tsc_frequency": exit.tsc_frequency,
+                                    "host_seconds": host_seconds,
+                                })
+                            );
+                            let _ = io::stdout().flush();
+                        }
                         info!("VM shutdown (VMCALL hypercall)");
                         break;
                     }
@@ -530,6 +545,23 @@ fn run() -> io::Result<()> {
                         continue;
                     }
                     ExitKind::VmcallReady => {
+                        if let Some(host_seconds) = exit_wall_seconds {
+                            if let Ok(regs) = vm.get_regs() {
+                                if regs.gprs.rbx == 0x4641_4952_5449_4d45 {
+                                    println!(
+                                        "FAIR_TIMING {}",
+                                        serde_json::json!({
+                                            "marker": regs.gprs.rcx,
+                                            "guest_monotonic_ns": regs.gprs.rdx,
+                                            "guest_tsc": exit.emulated_tsc,
+                                            "tsc_frequency": exit.tsc_frequency,
+                                            "host_seconds": host_seconds,
+                                        })
+                                    );
+                                    let _ = io::stdout().flush();
+                                }
+                            }
+                        }
                         info!("VM ready (VMCALL hypercall) at tsc {}", exit.emulated_tsc);
                         continue;
                     }
