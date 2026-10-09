@@ -1,0 +1,34 @@
+diff --git a/arch/x86/lib/delay.c b/arch/x86/lib/delay.c
+index 6e5526a..78a395b 100644
+--- a/arch/x86/lib/delay.c
++++ b/arch/x86/lib/delay.c
+@@ -15,6 +15,7 @@
+ #include <linux/export.h>
+ #include <linux/sched.h>
+ #include <linux/timex.h>
++#include <linux/init.h>
+ #include <linux/preempt.h>
+ #include <linux/delay.h>
+ 
+@@ -171,8 +172,20 @@ static void delay_halt(u64 __cycles)
+ 	}
+ }
+ 
++static bool bedrock_loop_delay;
++
++static int __init bedrock_loop_delay_setup(char *unused)
++{
++	bedrock_loop_delay = true;
++	return 0;
++}
++early_param("bedrock_loop_delay", bedrock_loop_delay_setup);
++
+ void __init use_tsc_delay(void)
+ {
+-	if (delay_fn == delay_loop)
++	/* Bedrock's instruction-count TSC makes a polling RDTSC exit on every
++	 * iteration. Keep the calibrated loop delay when requested by the guest.
++	 */
++	if (!bedrock_loop_delay && delay_fn == delay_loop)
+ 		delay_fn = delay_tsc;
+ }

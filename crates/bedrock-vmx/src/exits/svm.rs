@@ -159,12 +159,25 @@ fn prepare_random_exit_with_window<C: VmContext>(
             0
         };
         len += 1;
-        byte = fetch(len)?;
+        byte = match fetch(len) {
+            Ok(byte) => byte,
+            Err(_) => return Ok(false),
+        };
     }
-    if byte != 0x0f || fetch(len + 1)? != 0xc7 {
+    if byte != 0x0f {
         return Ok(false);
     }
-    let modrm = fetch(len + 2)?;
+    let second = match fetch(len + 1) {
+        Ok(byte) => byte,
+        Err(_) => return Ok(false),
+    };
+    if second != 0xc7 {
+        return Ok(false);
+    }
+    let modrm = match fetch(len + 2) {
+        Ok(byte) => byte,
+        Err(_) => return Ok(false),
+    };
     let operation = (modrm >> 3) & 7;
     if modrm & 0xc0 != 0xc0 || !(operation == 6 || operation == 7) {
         return Ok(false);
@@ -348,15 +361,25 @@ pub(crate) fn prepare_instruction_exit<
             0
         };
         prefix_len += 1;
-        opcode = fetch(prefix_len)?;
+        opcode = match fetch(prefix_len) {
+            Ok(byte) => byte,
+            Err(_) => return Ok(false),
+        };
     }
     if opcode == 0x8e {
-        return prepare_mov_ss_register(ctx, fetch(prefix_len + 1)?, rex, prefix_len + 2);
+        let modrm = match fetch(prefix_len + 1) {
+            Ok(byte) => byte,
+            Err(_) => return Ok(false),
+        };
+        return prepare_mov_ss_register(ctx, modrm, rex, prefix_len + 2);
     }
     if opcode != 0x0f {
         return Ok(false);
     }
-    let operation = fetch(prefix_len + 1)?;
+    let operation = match fetch(prefix_len + 1) {
+        Ok(byte) => byte,
+        Err(_) => return Ok(false),
+    };
     if !matches!(operation, 0x05 | 0x07) {
         return Ok(false);
     }
@@ -910,5 +933,32 @@ mod tests {
                 .unwrap(),
             (2 << 11) | (10 << 3)
         );
+    }
+
+    #[test]
+    fn random_decoder_defers_cross_page_fetch_fault_to_guest() {
+        let mut ctx = context();
+        ctx.set_guest_rip(0x1fff);
+        ctx.vmcs_setup()
+            .set_field32(VmcsField32::VmEntryInterruptionInfo, 0);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr0, 1 << 31);
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0x3000);
+        ctx.vmcs_setup()
+            .write64(VmcsField64::GuestIa32Efer, 1 << 10)
+            .unwrap();
+        for (address, entry) in [
+            (0x3000, 0x4007u64),
+            (0x4000, 0x5007),
+            (0x5000, 0x6007),
+            (0x6008, 0x1007),
+        ] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        for opcode in [0x66, 0x0f] {
+            ctx.memory[0x1fff] = opcode;
+            assert!(!prepare_random_exit(&ctx).unwrap());
+        }
     }
 }

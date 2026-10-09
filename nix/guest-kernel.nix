@@ -33,6 +33,7 @@ let
       # writable; a stale read-only entry otherwise causes a spurious fault
       # that shifts the instruction count (oss-garage/bedrock#59).
       ../guest/patches/0006-x86-mm-flush-after-pte-write.patch
+      ../guest/patches/0007-x86-delay-bedrock-loop-param.patch
     ];
   };
 
