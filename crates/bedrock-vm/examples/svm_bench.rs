@@ -82,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     test_repeat()?;
     test_guest_xmm_across_entries()?;
+    test_guest_xmm_across_many_exits()?;
     test_rep_cached_code_write()?;
     test_paged_stores()?;
     test_read_modify_write_stores()?;
@@ -215,6 +216,47 @@ fn test_guest_xmm_across_entries() -> Result<(), Box<dyn std::error::Error>> {
     }
     assert_eq!(host_x87, 1.0);
     println!("SVM_GUEST_XMM_PERSISTENCE_PASS");
+    Ok(())
+}
+
+fn test_guest_xmm_across_many_exits() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4027u64), (0x4000, 0x5027), (0x5000, 0xe7)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    let mut code = vec![
+        0xb8, 0x78, 0x56, 0x34, 0x12, // mov eax,0x12345678
+        0x66, 0x0f, 0x6e, 0xc0, // movd xmm0,eax
+        0x41, 0xb8, 0x40, 0x01, 0x00, 0x00, // mov r8d,320
+    ];
+    let loop_start = code.len();
+    code.extend([0x31, 0xc0, 0x0f, 0xa2, 0x41, 0xff, 0xc8, 0x75, 0]);
+    let loop_end = code.len();
+    code[loop_end - 1] = (loop_start as isize - loop_end as isize) as i8 as u8;
+    code.extend([0x66, 0x0f, 0x7e, 0x07, 0x8b, 0x07, 0x0f, 0x01, 0xd9]);
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.control_regs.cr4 = Cr4::new((1 << 5) | (1 << 9));
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rdi = 0x7000;
+    vm.set_regs(&regs)?;
+    unsafe { core::arch::asm!("fninit", "fld1") };
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert!(matches!(exit.exit_reason, 18 | 258));
+        break;
+    }
+    assert_eq!(&vm.memory()?[0x7000..0x7004], &0x12345678u32.to_le_bytes());
+    assert!(vm.get_exit_stats()?.cpuid.count >= 320);
+    let mut host_x87 = 0f64;
+    unsafe { core::arch::asm!("fstp qword ptr [{out}]", out = in(reg) &mut host_x87) };
+    assert_eq!(host_x87, 1.0);
+    println!("SVM_GUEST_XMM_ROTATION_PASS");
     Ok(())
 }
 

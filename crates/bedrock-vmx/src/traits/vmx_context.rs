@@ -63,9 +63,15 @@ pub struct VmxContext {
     pub guest_cr2: u64,
 
     // AMD SVM guest save: 0 = unsupported/uninitialized, 1 = first full XSAVE
-    // pending, 2 = XSAVEOPT permitted (offset 288). The host still uses XSAVE.
+    // pending, 2 = XSAVEOPT permitted (offset 288).
     pub svm_guest_xsaveopt: u64,
+
+    // A kernel FPU reservation protects host state across a short SVM run
+    // group, allowing assembly to omit its per-entry host XSAVE/XRSTOR.
+    pub svm_host_fpu_reserved: u64,
 }
+
+const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
 
 impl Default for VmxContext {
     fn default() -> Self {
@@ -114,6 +120,7 @@ impl VmxContext {
             host_xcr0: 0,
             guest_cr2: 0,
             svm_guest_xsaveopt: 0,
+            svm_host_fpu_reserved: 0,
         }
     }
 }

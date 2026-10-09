@@ -9,6 +9,12 @@ use super::vmcs::RealVmcs;
 use super::vmx::{VmEntryError, VmRunner};
 
 extern "C" {
+    // Both symbols are GPL exports on x86. A reservation saves the current
+    // task's FPU state and prevents hard IRQs from borrowing the registers.
+    fn kernel_fpu_begin_mask(mask: u32);
+    fn kernel_fpu_end();
+    fn irq_fpu_usable() -> bool;
+
     /// Save host GPRs, load guest GPRs from `ctx`, and VMLAUNCH/VMRESUME; on
     /// exit, save guest GPRs and restore host. Returns 0 on VM exit, -1 on
     /// VM entry failure (check VMCS error fields).
@@ -55,6 +61,9 @@ impl VmxContextExt for VmxContext {
 pub(crate) struct RealVmRunner {
     batch: Option<super::vmx::InstructionBatch>,
     completed: Option<u64>,
+    svm_fpu_entries: u8,
+    svm_fpu_active: bool,
+    svm_fpu_started_tsc: u64,
 }
 
 impl RealVmRunner {
@@ -62,6 +71,9 @@ impl RealVmRunner {
         Self {
             batch: None,
             completed: None,
+            svm_fpu_entries: 0,
+            svm_fpu_active: false,
+            svm_fpu_started_tsc: 0,
         }
     }
 }
@@ -83,6 +95,47 @@ impl VmRunner for RealVmRunner {
 
     fn can_guard_page_tables(&self) -> bool {
         super::svm::supported() && super::svm::features() & (1 << 21) != 0
+    }
+
+    fn begin_run(&mut self, ctx: &mut VmxContext) {
+        if super::svm::supported() && ctx.xcr0_mask != 0 && unsafe { irq_fpu_usable() } {
+            // Begin and end with interrupts enabled so the kernel's FPU API
+            // balances its softirq lock. The outer VM_RUN pins this CPU.
+            unsafe { kernel_fpu_begin_mask(2) }; // KFPU_MXCSR
+            ctx.svm_host_fpu_reserved = 1;
+            self.svm_fpu_active = true;
+            self.svm_fpu_entries = 0;
+            self.svm_fpu_started_tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        }
+    }
+
+    fn host_irq_window(&mut self, _ctx: &mut VmxContext, host_tsc: u64) {
+        if self.svm_fpu_active {
+            self.svm_fpu_entries += 1;
+        }
+        // Also bound softirq deferral for long hardware batches. The TSC
+        // threshold is about a millisecond or less on supported AMD hosts.
+        if self.svm_fpu_active
+            && (self.svm_fpu_entries == 64
+                || host_tsc.saturating_sub(self.svm_fpu_started_tsc) >= 2_000_000)
+        {
+            // Guest state is already saved and host XCR0/MSRs are restored.
+            // Briefly release the reservation so pending softirqs can run.
+            unsafe { kernel_fpu_end() };
+            unsafe { kernel_fpu_begin_mask(2) };
+            self.svm_fpu_entries = 0;
+            self.svm_fpu_started_tsc = host_tsc;
+        }
+    }
+
+    fn finish_run(&mut self, ctx: &mut VmxContext) {
+        if self.svm_fpu_active {
+            ctx.svm_host_fpu_reserved = 0;
+            unsafe { kernel_fpu_end() };
+            self.svm_fpu_active = false;
+            self.svm_fpu_entries = 0;
+            self.svm_fpu_started_tsc = 0;
+        }
     }
 
     fn saved_guest_msr(&self, vmcs: &Self::Vmcs, index: u32) -> Option<u64> {
@@ -109,8 +162,7 @@ impl VmRunner for RealVmRunner {
         if super::svm::supported() {
             use super::vmx::VirtualMachineControlStructure;
             let v = unsafe { &mut *(vmcs.vmcs_region_ptr().cast::<super::svm_core::vmcb::Vmcb>()) };
-            let completed =
-                unsafe { super::svm::run(ctx, v, vmcs.svm_phys_addr(), self.batch.as_ref()) }?;
+            let completed = unsafe { super::svm::run(ctx, v, vmcs.svm_phys_addr(), self.batch.as_ref()) }?;
             self.completed = Some(completed);
             return Ok(());
         }

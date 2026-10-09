@@ -120,8 +120,11 @@ where
     // Otherwise single-stepping would only start at the first exit.
     update_mtf_state(ctx).map_err(VmRunError::ExitHandler)?;
 
+    ctx.sync_gprs_to_vmx_ctx();
+    runner.begin_run(&mut ctx.state_mut().vmx_ctx);
     // SAFETY: Caller guarantees VMCS is properly configured
     let result = unsafe { run_loop(ctx, runner, machine, allocator, host_kernel_gs_base) };
+    runner.finish_run(&mut ctx.state_mut().vmx_ctx);
 
     let clear_result = ctx.state().vmcs.clear();
 
@@ -583,6 +586,7 @@ where
             let _irq_window = ReverseIrqGuard::new(machine.kernel());
             let count = ctx.state().instruction_counter.read();
             ctx.state_mut().last_instruction_count = count;
+            runner.host_irq_window(&mut ctx.state_mut().vmx_ctx, pre_irq_tsc);
         }
         let post_irq_tsc = rdtsc();
         ctx.state_mut().exit_stats.irq_window_cycles += post_irq_tsc.saturating_sub(pre_irq_tsc);

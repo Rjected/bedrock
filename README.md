@@ -331,6 +331,22 @@ Linux boot and fork replay: none had guest CR0.TS or CR0.EM set, and the guest
 XCR0 was `0x7` versus the box host's `0x2e7`. Skipping FPU state switching
 only while the guest disables FPU access, or skipping redundant XCR0 changes,
 therefore cannot improve this workload. The diagnostic was removed.
+An isolated assembly profile measured about 800 million cycles in FPU state
+switching over the first 800,000 Linux SVM entries, or roughly 1,000 cycles per
+entry. The SVM runner now reserves the host FPU state across at most 64 run-loop
+iterations or two million host TSC ticks. It still saves and restores guest
+XSTATE on every entry and restores host XCR0 before each host IRQ window. The
+reservation begins and ends with host interrupts enabled; a window rotation
+briefly releases it so softirqs can run. On the same EPYC 4245P box, six nearby
+clean-branch Linux boot/two-fork runs had a 2.585-second median versus 2.454
+seconds for six runs with the reservation (about 5.1% faster). Median SVM
+runner cycles fell from 4.80 to 4.38 billion while exit counts stayed near
+845,000. All runs matched snapshot TSC `499445737` and RAM hash
+`dd6a53449a59f0aa`. The hardware suite, a 320-CPUID guest XMM/host x87
+isolation check, two fresh Linux boots, and a 38.659-billion-instruction memory
+workload passed. The memory workload remained near native speed: 3.158 seconds
+guest versus 3.153 seconds native. General near-native AMD execution remains
+unfinished because most Linux time still comes from VM exits and batch planning.
 A box-only stage profile of the same Linux boot and two forks attributed about
 2.73–2.84 billion cycles over roughly 1.05 million entries to batch planning,
 versus 0.43–0.48 billion each for global-tree refresh, instruction-window

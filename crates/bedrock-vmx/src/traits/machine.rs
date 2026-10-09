@@ -312,6 +312,17 @@ pub trait VmRunner {
         false
     }
 
+    /// Called with host interrupts enabled before and after a VM_RUN loop.
+    /// Backends may reserve host FPU state across short groups of entries.
+    fn begin_run(&mut self, _ctx: &mut super::VmxContext) {}
+
+    /// Called in the host IRQ window after the guest's state is saved and
+    /// host MSRs are restored.
+    fn host_irq_window(&mut self, _ctx: &mut super::VmxContext, _host_tsc: u64) {}
+
+    /// Paired with begin_run, including when the loop returns an error.
+    fn finish_run(&mut self, _ctx: &mut super::VmxContext) {}
+
     /// Exact count captured by a software-counted backend, including exits
     /// before a batch's endpoint. None when the instruction-counter object
     /// already reads its hardware accounting directly.
