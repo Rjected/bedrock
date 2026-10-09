@@ -270,6 +270,12 @@ every one, mostly at `memcpy_fromio`. The snapshot count and RAM hash matched
 in every A/B run. The full suite, including the REP exact-deadline regression,
 passed; an earlier unsafe experiment that made whole REP pages executable
 failed that regression.
+A box-only diagnostic disabled the counted-region IRET intercept to estimate
+its cost. Linux exits fell to 746,479 and wall time to 2.58 seconds, but the
+snapshot TSC changed from 499,445,737 to 499,419,858 and the RAM hash
+changed. That variant is incorrect and was reverted. It confirms that
+removing IRET replay needs a precise retirement correction, not just a faster
+control path.
 An isolated diagnostic that skipped code-byte rechecks for rejected pages
 changed the five-run median only from 2.89 to 2.85 seconds on that box;
 skipping rechecks for accepted pages failed the REP code-write regression.
