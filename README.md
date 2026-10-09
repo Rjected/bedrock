@@ -305,6 +305,16 @@ another 1,024 checkpoint replays pass. Later boot phases still invalidate
 these plans frequently, leaving planning as the main measured cost.
 VM entry setup remains the largest measured cost; the near-native register-loop
 benchmark does not represent general Linux boot overhead.
+On a later `m4-metal-small` AMD box running Linux 7.0.0-38, the experimental
+global gate initially repeated an unretired intercepted instruction during
+early Linux boot. Forcing a scalar step at that boundary lets the same guest
+boot and fork successfully; two fresh roots matched in one repeat test.
+The fixed gate took 18.08 and 17.76 seconds per root with about 1.34 million
+exits, while the pre-gate branch took 17.48 and 17.49 seconds with about
+0.87 million exits on the same box and guest artifacts. The gate caused about
+584,000 nested-page violations versus 8,500 before it. It is currently a
+Linux performance regression, despite near-native results for the narrow
+register-loop benchmark.
 This backend requires SVM and nested paging.
 
 For one-hour remote AMD bare-metal boxes, use the

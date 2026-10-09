@@ -76,11 +76,15 @@ scp "$VMLINUX" "ubuntu@$BOX:/home/ubuntu/bedrock-vmlinux"
 scp "$INITRD" "ubuntu@$BOX:/home/ubuntu/bedrock-initrd"
 ssh "ubuntu@$BOX" 'set -o pipefail; cd /home/ubuntu/bedrock && \
   /home/ubuntu/.cargo/bin/cargo build --release -p bedrock-vm --example svm_linux && \
-  sudo timeout 1200 target/release/examples/svm_linux \
+  sudo env BEDROCK_SVM_EXIT_STATS=1 timeout 1200 target/release/examples/svm_linux \
     /home/ubuntu/bedrock-vmlinux /home/ubuntu/bedrock-initrd \
-    | tee /tmp/bedrock-linux.log'
+    2>&1 | tee /tmp/bedrock-linux.log'
 contrib/run-boxctl-svm.sh collect "$BOX"
 ```
+
+Append `repeat` to the `svm_linux` arguments to compare two fresh boots. The
+exit statistics in the log help distinguish VM-entry cost from exit handling
+and nested-page faults. Compare changes on the same box and guest artifacts.
 
 Use `svm_bench` with the same two files for a bounded instruction
 checkpoint; the main README lists its deadline and replay arguments. The
