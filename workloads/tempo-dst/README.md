@@ -47,6 +47,11 @@ merges all files by timestamp into `/bedrock/out/assertions.jsonl`, the host's
 (`{source, kind, container, guest_time_ns, detail}`). The `start` hook
 installs its config as `/bedrock/in/config.json`.
 
+The primary and reference Tempo containers set `BEDROCK_ASSERTIONS_PATH` to
+`/bedrock/assertions/tempo.jsonl` and `/bedrock/assertions/tempo-ref.jsonl`,
+respectively. The initrd bind-mounts that directory into every container, so
+instrumented nodes can write assertions directly to the guest's collector.
+
 ## Workload contract
 
 `bedrock-dst` is workload-agnostic: it boots, warms, checkpoints, branches
