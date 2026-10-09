@@ -83,8 +83,11 @@ SYM_FUNC_START(svm_run_guest)
  sti
  mov %dr7, %rax
  mov %rax, 32(%rsp)
+ cmp $0x400, %rax
+ je .Lsvm_host_dr7_disabled
  mov $0x400, %rax
  mov %rax, %dr7
+.Lsvm_host_dr7_disabled:
  /* Only enabled guest execution breakpoints need an address-register swap.
   * DR7 is disabled here, so unused host DR0-DR3 remain untouched. */
  movzbl 0x560(%r9), %eax

@@ -212,6 +212,10 @@ registers. On the same EPYC box, a five-run Linux baseline median of 2.888
 seconds compared with 2.846 and 2.855 seconds in two modified five-run passes;
 all runs matched the snapshot and RAM hash. This reduces per-entry debug-state
 work but does not address the repeated faults on hazardous code pages.
+Skipping the host DR7 disable write when DR7 is already `0x400` reduced a
+same-box five-run median from 2.862 to 2.805 seconds; a second modified pass
+was 2.837 seconds. Both used the selective DR0-DR3 swap and matched replay
+state. The host DR7 value is still restored after each entry.
 A boxctl EPYC 4245P profile classified the first 350,000 nested-page faults
 in the Linux boot/fork run: 326,702 (93.3%) selected scalar execution on an
 untrusted code page, 18,464 released a page-table write guard, 3,587 trusted a
