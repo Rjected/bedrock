@@ -335,3 +335,28 @@ it was below the deadline budget. A partial transfer-phase `perf` sample
 still put 34% in breakpoint collection and 9.86% in alias visitation. This
 broader region path is **rejected** and was not merged. The known-good module
 was restored and passed the box smoke and REP/RF tests again.
+
+A third bounded diagnostic separated alias-cache misses by proof state. In
+20 seconds after marker 1, there were **2,210,196** collector calls,
+**2,121,528** full walks, and **88,668** cache hits. Only **11,196** of
+those misses found *any* valid cached alias proof; all of those had the
+same CR3, and only 5,495 covered the primary hazardous page. The tree
+proof was valid on 2,210,019 calls. During the same window, the tree path
+cleared alias proofs **317,522** times and the code-hazard path cleared them
+**292,586** times. This identifies frequent whole-cache invalidation as the
+dominant explanation for the miss rate. Enlarging or indexing the alias
+cache alone cannot address it. A safe optimization must distinguish writes
+that can create a new executable alias of a hazardous page from unrelated
+page-table activity before retaining its proof.
+
+A conservative leaf-only prototype kept an alias proof through a released
+leaf table only when the resulting executable PTEs did not name any of its
+hazardous physical pages. It withheld reuse while the gate was dirty and
+retained the existing full invalidation for upper-table changes, host writes,
+and failed rearm. All 243 library tests, box SVM smoke, and REP/RF regression
+passed. The exact 10,000-transfer run still had no end marker or report more
+than two host minutes after marker 1, with guest virtual time only reaching
+62.846 s. A 20-second transfer profile put 32.51% in breakpoint collection
+and 8.98% in alias visitation, near the baseline. This prototype was not
+merged; its limited effect suggests the leaf-only path may be too rare or
+another invalidation path may clear proofs before reuse.
