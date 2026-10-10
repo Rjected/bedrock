@@ -323,3 +323,15 @@ the counters do not distinguish those causes. A 20-second transfer-phase
 `perf` sample from the first diagnostic run put 30.81% in
 `collect_page_breakpoints` and 10.81% in `visit_alias_entry`. Both diagnostic
 runs were stopped after marker 1 rather than allowed to run indefinitely.
+
+A focused experiment tried the reachable-code proof for every hazardous page
+while the global gate was ready, before adding speculative code pages. All
+242 library tests and box-only SVM smoke and REP/RF tests passed, but the
+10,000-transfer guest failed about 30 host seconds after fair marker 1.
+The kernel reported `SVM PMU exceeded budget: count=14 budget=753403
+code=0x41`, then returned a VM-entry error; no second marker or transfer
+report exists. Here `count` exceeded the verified batch count, even though
+it was below the deadline budget. A partial transfer-phase `perf` sample
+still put 34% in breakpoint collection and 9.86% in alias visitation. This
+broader region path is **rejected** and was not merged. The known-good module
+was restored and passed the box smoke and REP/RF tests again.
