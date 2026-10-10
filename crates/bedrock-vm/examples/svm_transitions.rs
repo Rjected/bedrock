@@ -3,6 +3,9 @@
 use bedrock_vm::{Cr3, Efer, Gdtr, Idtr, RdrandConfig, Regs, SegmentRegister, Vm};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("SVM_CASE").as_deref() == Ok("rep-rf") {
+        return test_repeated_store_with_rf();
+    }
     if std::env::var("SVM_CASE").as_deref() == Ok("page-fault") {
         return test_page_fault();
     }
@@ -21,6 +24,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_page_fault()?;
     test_guest_debug_trap()?;
     test_guest_breakpoint_trap()?;
+    test_repeated_store_with_rf()?;
+    Ok(())
+}
+
+fn test_repeated_store_with_rf() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x1007].copy_from_slice(&[
+        0xf3, 0xaa, // REP STOSB
+        0x31, 0xc0, // XOR EAX, EAX
+        0x0f, 0x01, 0xd9, // VMMCALL shutdown
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.rflags |= 1 << 16; // RF from an interrupted string instruction.
+    regs.gprs.rax = 0x5a;
+    regs.gprs.rcx = 5000;
+    regs.gprs.rdi = 0x7ff0; // Cross a destination-page boundary early.
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(1000))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259, "REP missed its exact deadline");
+        assert_eq!(exit.emulated_tsc, 1000);
+        let stopped = vm.get_regs()?;
+        assert_eq!(stopped.rip, 0x1000);
+        assert_eq!(stopped.gprs.rcx, 4000);
+        assert_eq!(stopped.gprs.rdi, 0x7ff0 + 1000);
+        assert_ne!(stopped.rflags & (1 << 16), 0, "interrupted REP lost RF");
+        assert!(vm.memory()?[0x7ff0..0x7ff0 + 1000].iter().all(|&b| b == 0x5a));
+        vm.set_stop_at_tsc(None)?;
+        break;
+    }
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 258, "REP did not reach shutdown");
+        let finished = vm.get_regs()?;
+        assert_eq!(finished.gprs.rcx, 0);
+        assert_eq!(finished.gprs.rdi, 0x7ff0 + 5000);
+        assert_eq!(finished.rflags & (1 << 16), 0, "completed REP retained RF");
+        assert!(vm.memory()?[0x7ff0..0x7ff0 + 5000].iter().all(|&b| b == 0x5a));
+        println!("SVM_REP_RF_PASS: exact deadline, page boundary, resumed RF");
+        break;
+    }
     Ok(())
 }
 
