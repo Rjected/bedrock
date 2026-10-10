@@ -212,5 +212,11 @@ had the same guest RIP (`0x7fce5a47848a`) and CR3 (`0x10296b000`). Two
 consecutive 20-sample stretches at that address each spanned 4,980,641
 monitor-trap exits. The guest TSC advanced only 16.8–18.6 million ticks in
 those stretches. This identifies one repeated instruction as a major source
-of scalar exits. The diagnostic did not record its opcode, so the instruction
-class and the correct batching change remain to be verified.
+of scalar exits. A second complete 100-transfer run with opcode sampling
+identified the same address offset (`0x48a`) as **`REP STOSB` (`f3 aa`)**:
+69 of 126 distinct sampled monitor-trap exits during the transfer phase
+had that exact RIP and opcode. Its fair-marker interval was 123.717 host
+seconds, and the command again reported 100 successful transfers. The
+repeat-batch planner already recognizes this instruction; the problem is
+that it often falls back to scalar execution. A page-bounded destination
+proof is now being tested in a separate box.
