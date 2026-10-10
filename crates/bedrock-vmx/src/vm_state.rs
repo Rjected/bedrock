@@ -17,6 +17,8 @@ type DeviceStatesBox = HeapBox<DeviceStates>;
 type ExitStatsBox = HeapBox<AllExitStats>;
 
 pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
+pub(crate) const SVM_HAZARD_MEMO_CAPACITY: usize = 256;
+pub(crate) const SVM_HAZARD_LOOKUP_CAPACITY: usize = 1024;
 pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
 pub(crate) const SVM_ALIAS_EDGE_CAPACITY: usize = 2048;
 pub(crate) const SVM_ALIAS_WALK_CAPACITY: usize = 2048;
@@ -58,8 +60,11 @@ pub(crate) struct SvmGuardScratch {
     pub code: [SvmCodeProof; SVM_CODE_PAGE_CAPACITY],
     pub code_count: usize,
     pub code_cursor: usize,
-    pub hazard_memos: [SvmHazardMemo; SVM_CODE_PAGE_CAPACITY],
+    pub hazard_memos: [SvmHazardMemo; SVM_HAZARD_MEMO_CAPACITY],
     pub hazard_memo_cursor: usize,
+    // One-based memo index. The pointed-to page is checked before every hit,
+    // so hash collisions and evictions only lose acceleration opportunities.
+    pub hazard_lookup: [u16; SVM_HAZARD_LOOKUP_CAPACITY],
     pub translations: [(u64, u64); SVM_CODE_PAGE_CAPACITY],
     pub translation_count: usize,
     pub translation_cursor: usize,

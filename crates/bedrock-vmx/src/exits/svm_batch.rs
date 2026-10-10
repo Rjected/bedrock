@@ -1642,16 +1642,30 @@ struct PageHazards {
     count: usize,
 }
 
+fn hazard_memo_lookup<C: VmContext>(ctx: &C, physical: u64) -> (usize, Option<usize>) {
+    let cache = &ctx.state().svm_guard;
+    let key = ((physical >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+        & (super::super::vm_state::SVM_HAZARD_LOOKUP_CAPACITY - 1);
+    let hinted = cache.hazard_lookup[key].checked_sub(1).map(usize::from);
+    let valid = |index: usize| {
+        let memo = &cache.hazard_memos[index];
+        (memo.valid || memo.guarded) && memo.proof.page == physical
+    };
+    let found = hinted.filter(|&index| valid(index))
+        .or_else(|| cache.hazard_memos.iter().position(|memo| {
+            (memo.valid || memo.guarded) && memo.proof.page == physical
+        }));
+    (key, found)
+}
+
 fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHazards> {
     // Unguarded pages always compare exact bytes before reusing a scan.
     // Recurrent guarded pages can skip that comparison while the NPT mapping
     // stays fixed: guest writes fault, and host writes invalidate the memo.
-    let memo = ctx
-        .state()
-        .svm_guard
-        .hazard_memos
-        .iter()
-        .position(|memo| (memo.valid || memo.guarded) && memo.proof.page == physical);
+    let (key, memo) = hazard_memo_lookup(ctx, physical);
+    if let Some(index) = memo {
+        ctx.state_mut().svm_guard.hazard_lookup[key] = (index + 1) as u16;
+    }
     let unchanged = memo.is_some_and(|index| {
         let memo = &ctx.state().svm_guard.hazard_memos[index];
         let mapping_unchanged = memo.guarded_mapping_generation
@@ -1704,6 +1718,7 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
         count: hazards.map_or(0, |hazards| hazards.count),
     };
     cache.hazard_memos[index].valid = true;
+    cache.hazard_lookup[key] = (index + 1) as u16;
     if memo.is_none() {
         cache.hazard_memo_cursor = (index + 1) % cache.hazard_memos.len();
     }
@@ -1904,9 +1919,8 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
     physical: u64,
 ) {
     let cache = &ctx.state().svm_guard;
-    let Some(index) = cache.hazard_memos.iter().position(|memo| {
-        memo.valid && memo.proof.page == physical
-    }) else {
+    let (_, index) = hazard_memo_lookup(ctx, physical);
+    let Some(index) = index.filter(|&index| cache.hazard_memos[index].valid) else {
         return;
     };
     if cache.hazard_memos[index].guarded {
@@ -1948,9 +1962,8 @@ pub(crate) fn release_recurrent_code_write<C: VmContext, A: CowAllocator<C::CowP
     allocator: &A,
     physical: u64,
 ) -> bool {
-    let Some(index) = ctx.state().svm_guard.hazard_memos.iter()
-        .position(|memo| memo.guarded && memo.proof.page == physical)
-    else {
+    let (_, index) = hazard_memo_lookup(ctx, physical);
+    let Some(index) = index.filter(|&index| ctx.state().svm_guard.hazard_memos[index].guarded) else {
         return false;
     };
     let write_guard = ctx.state().svm_guard.hazard_memos[index].write_guard;
@@ -5783,6 +5796,25 @@ mod tests {
         ctx.memory[0x1ffd..0x2000].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         ctx.state_mut().svm_guard.valid = false;
         assert!(cached_page_hazards(&mut ctx, 0x1000).is_none());
+    }
+
+    #[test]
+    fn hazard_memos_keep_a_larger_working_set_and_recover_from_stale_hints() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory.resize(0x800000, 0x90);
+        for page in 1..=96u64 {
+            assert_eq!(page_hazards_memo(&mut ctx, page * 4096).unwrap().count, 0);
+        }
+        let (key, Some(index)) = hazard_memo_lookup(&ctx, 0x1000) else {
+            panic!("first page was evicted");
+        };
+        let revision = ctx.state().svm_guard.hazard_memos[index].revision;
+        // An index hint can be replaced by a colliding page, but the full
+        // lookup must still find the original memo and restore the hint.
+        ctx.state_mut().svm_guard.hazard_lookup[key] = 96;
+        assert_eq!(page_hazards_memo(&mut ctx, 0x1000).unwrap().count, 0);
+        assert_eq!(ctx.state().svm_guard.hazard_memos[index].revision, revision);
+        assert_eq!(ctx.state().svm_guard.hazard_lookup[key], (index + 1) as u16);
     }
 
     #[test]
