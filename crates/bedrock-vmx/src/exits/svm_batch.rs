@@ -1670,8 +1670,6 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
             count: memo.proof.count,
         });
     }
-    let hazards = page_hazards(ctx, physical);
-    let mut bytes = [0u8; 512];
     let index = if let Some(index) = memo {
         index
     } else {
@@ -1680,10 +1678,13 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
             .map(|step| (cache.hazard_memo_cursor + step) % cache.hazard_memos.len())
             .find(|&index| !cache.hazard_memos[index].guarded)
         else {
-            return hazards;
+            return page_hazards(ctx, physical, None).flatten();
         };
         index
     };
+    // A scan already reads the entire guest page. Save those bytes as each
+    // chunk arrives instead of reading all 4 KB again to populate the memo.
+    let hazards = page_hazards(ctx, physical, Some(index))?;
     let cache = &mut ctx.state_mut().svm_guard;
     cache.code_epoch = cache.code_epoch.wrapping_add(1);
     // Region proofs are keyed by page and revision, not by memo slot. Use a
@@ -1692,12 +1693,6 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
     cache.hazard_memos[index].valid = false;
     if memo.is_none() {
         cache.hazard_memos[index].hits = 0;
-    }
-    for offset in (0..4096).step_by(bytes.len()) {
-        ctx.read_guest_memory(GuestPhysAddr::new(physical + offset as u64), &mut bytes)
-            .ok()?;
-        ctx.state_mut().svm_guard.hazard_memos[index].bytes[offset..offset + bytes.len()]
-            .copy_from_slice(&bytes);
     }
     let cache = &mut ctx.state_mut().svm_guard;
     cache.hazard_memos[index].rejected = hazards.is_none();
@@ -1794,7 +1789,13 @@ fn hazardous_entry(bytes: &[u8]) -> bool {
     false
 }
 
-fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
+// The outer Option reports a failed guest-memory read; the inner Option
+// reports a fully read page that cannot use a global hazard proof.
+fn page_hazards<C: VmContext>(
+    ctx: &mut C,
+    physical: u64,
+    memo_index: Option<usize>,
+) -> Option<Option<PageHazards>> {
     // Amortize guest-memory translation without placing a full code page on
     // the kernel stack. The carry covers every legal instruction prefix chain.
     const CHUNK: usize = 512;
@@ -1804,6 +1805,7 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
         offsets: [0; 4],
         count: 0,
     };
+    let mut too_many_hazards = false;
     let mut bytes = [0u8; CHUNK + 16];
     for offset in (0..4096).step_by(CHUNK) {
         ctx.read_guest_memory(
@@ -1811,10 +1813,17 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
             &mut bytes[16..],
         )
         .ok()?;
+        if let Some(index) = memo_index {
+            ctx.state_mut().svm_guard.hazard_memos[index].bytes[offset..offset + CHUNK]
+                .copy_from_slice(&bytes[16..]);
+        }
+        if too_many_hazards {
+            continue;
+        }
         if offset == 0 {
             result.boundary[..16].copy_from_slice(&bytes[16..32]);
         }
-        for index in 0..bytes.len() {
+        'scan: for index in 0..bytes.len() {
             let position = offset as i64 + index as i64 - 16;
             let byte = bytes[index];
             let marker = (byte == 0x0f
@@ -1846,13 +1855,19 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
                     continue;
                 }
                 if result.count == result.offsets.len() {
-                    return None;
+                    // Finish copying the remaining chunks into the memo so a
+                    // rejected page can still be recognized by exact bytes.
+                    too_many_hazards = true;
+                    break 'scan;
                 }
                 result.offsets[result.count] = position;
                 result.count += 1;
             }
         }
         bytes.copy_within(CHUNK..CHUNK + 16, 0);
+    }
+    if too_many_hazards {
+        return Some(None);
     }
     // Wrapping aliases and crossings to other permitted pages stay on the
     // conservative path. Interior hazards are covered at every prefix entry.
@@ -1862,9 +1877,9 @@ fn page_hazards<C: VmContext>(ctx: &C, physical: u64) -> Option<PageHazards> {
         || forbidden_page_bytes(&result.boundary[16..])
         || !hazard_boundary_safe(&result, &result)
     {
-        return None;
+        return Some(None);
     }
-    Some(result)
+    Some(Some(result))
 }
 
 /// A globally executable page must be safe at every entry byte, including
@@ -5823,7 +5838,7 @@ mod tests {
             ] {
                 ctx.memory[0x1000..0x2000].fill(0x90);
                 ctx.memory[0x1000 + offset..0x1000 + offset + bytes.len()].copy_from_slice(bytes);
-                let hazards = page_hazards(&ctx, 0x1000).unwrap();
+                let hazards = page_hazards(&mut ctx, 0x1000, None).unwrap().unwrap();
                 assert_eq!(hazards.count, expected.len());
                 for &prefix in expected {
                     assert!(hazards.offsets[..hazards.count].contains(&((offset + prefix) as u16)));

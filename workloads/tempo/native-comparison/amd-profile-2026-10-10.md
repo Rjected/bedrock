@@ -518,3 +518,38 @@ reduced its fault benefit without recovering the entry cost (452.32 billion
 preparation cycles). Both variants remain experimental and were not merged.
 The next optimization needs to lower entry work per attempted code-page set,
 or use a different mechanism to prevent execute faults.
+
+## Reuse code-page reads during hazard scans
+
+The next same-box experiment used `amd-paired-profile-1010` and the same
+10,000-transfer guest, timing boundaries, HWE kernel, and EPYC 4245P CPU.
+Previously, a hazard scan read a 4 KB guest code page in 512-byte chunks, then
+read the entire page again to populate its exact-byte memo. The retained
+change copies each chunk into the memo during the scan. A page rejected for
+having more than four hazard entries still finishes copying the page, so a
+later exact-byte comparison can recognize that rejection. Guest-memory read
+failures do not create a valid memo.
+
+| Same box, run order | Fair marker interval | VM exits | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Paired-page baseline | 203.980055998 s | 49,299,371 | 34,270,456 | 443.08 billion |
+| Scan/memo single read | 196.617210180 s | 48,353,466 | 33,624,186 | 424.58 billion |
+| Single read plus 16 retained write guards (discarded) | 200.261186882 s | 48,521,369 | 33,754,210 | 434.60 billion |
+| Paired-page baseline repeat | 199.208063192 s | 48,372,680 | 33,370,122 | 431.09 billion |
+| Scan/memo single-read repeat | 193.645588692 s | 47,884,360 | 33,239,015 | 418.82 billion |
+
+The two baseline intervals average **201.594 seconds**; the two single-read
+intervals average **195.131 seconds**, a **3.2%** same-box improvement. All five
+runs emitted `TEMPO_TXGEN_PASS`. The candidate also passed the box SVM smoke
+and REP/RF transition tests and all 251 VMX and 40 VM library tests. A
+30-second transfer-phase `perf` sample placed `page_hazards` at 11.07% of
+sampled cycles in the baseline and 9.41% in the single-read candidate. The
+16-guard variant did not improve the complete workload and remains unmerged.
+Logs, marker/end snapshots, and perf reports are retained in ignored
+`target/boxctl-evidence/amd-paired-profile-1010/`.
+
+This change removes repeated host work but does not change the underlying
+exit pattern: the retained build still averages about **8.1×** the historical
+Intel Bedrock 24.087-second interval, with roughly 33 million nested-page
+faults per transfer phase. Substantially closer timing requires reducing the
+execute-fault and entry-preparation work further.
