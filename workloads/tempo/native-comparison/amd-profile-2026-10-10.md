@@ -72,3 +72,67 @@ transaction generation. A 20-second `perf` sample in that stretch placed
 and 6.61% in `add_translation_child`. The indexed lookup removed its targeted
 linear-search hotspot but did not make the whole path consistently faster.
 The experiment cannot yet be presented as a reliable application speedup.
+
+## Follow-up diagnostics
+
+A repeat of the box-e7 baseline checkpoint used 35.57 billion host cycles
+and 816,152 exits from marker 1 to vt 60.960 s. Repeating the indexed run
+with a sampled RIP logger used 39.59 billion cycles and 991,886 exits over
+that checkpoint. The earlier 35-fold regression therefore did not reproduce;
+an arbitrary virtual-time stop can land in a very different guest instruction
+sequence. A later host `perf` sample with the index still placed roughly 60%
+of cycles in `collect_translation_tree_pages` and 25% in `__pi_memcpy`.
+
+The global guarded page-table tree is frequently unusable while a pending
+scalar instruction prevents its refresh. Of 62 spaced tree-scan samples in
+one run to vt 61.100 s, 45 had a dirty global guard and 26 had a different
+guarded CR3. The maximum guarded tree in that run was 498 of 512 pages, with
+no capacity failure. The code then recomputes the translation tree while
+preparing individual exits.
+
+A local experiment skipped bounded-batch planning whenever that global guard
+was unusable. Against the repeated box-e7 baseline checkpoint, it raised
+marker-to-vt-60.960 cycles from 35.57 to 63.13 billion and monitor-trap
+exits to 9.907 million. Boot to marker also increased from 651.71 to 720.14
+seconds. That approach was discarded because it traded expensive scans for
+more single-step exits.
+
+The deeper box-9df run to vt 61.300 s exposed another limit: a send-phase
+process's translation tree reached the 512-page workspace capacity. The
+diagnostic logger observed more than 140,000 capacity failures. Over the
+marker-to-vt-61.300 interval, the indexed plus scalar-guard variant executed
+73.728 million monitor-trap exits and used 311.82 billion host cycles. It
+reached that virtual-time stop 86.04 host seconds after marker 1; it did not
+complete the `bench send` command. A larger workspace is being tested
+separately. The capacity failure is a concrete optimization target, but this
+combined run cannot isolate its cost from the scalar-guard regression.
+
+In the next two runs to the same vt 61.300 stop, the 512-page build took
+650.05 seconds total and the 1,024-page build took 678.65 seconds total.
+Both had sent 100 transactions and reached txpool-drain, but neither had
+completed the benchmark. The 512-page run had **no** capacity failures, so
+the failures are guest-state dependent and the larger workspace cannot yet
+be called a speedup. These total times include boot; the timing environment
+flag was accidentally omitted, so they do not isolate the application
+interval. The following rerun uses marker snapshots.
+
+The timed 1,024-page rerun reached the same vt 61.300 stop **36.54 host
+seconds** after marker 1. That interval contained 2.930 million VM exits,
+including 2.425 million monitor-trap exits, and 139.21 billion host cycles.
+VM-entry preparation used 84.6% of those cycles. A 12-second host `perf`
+sample after marker 1 placed 42.06% of sampled cycles in
+`collect_page_breakpoints`, 11.02% in `__pi_memcpy`, and 6.84% in
+`svm_run_guest`. The 100-transfer command had sent all 100 transactions but
+was waiting for the txpool to drain at this stop.
+
+A separate diagnostic variant rearmed the global table guard after the next
+VM entry reported at least one retired instruction. In box-9df68301, its
+marker-to-vt-61.300 interval used 14.10 host seconds, 1.155 million exits,
+and 54.16 billion cycles; total tree scans through that run dropped to about
+310,000, versus about 750,000 in the prior 512-page run in the same box.
+This is a performance probe, **not a correctness-ready change**: an injected
+interrupt could retire an instruction before the trapped store does. A stricter
+candidate that checks the faulting store's next RIP passes library tests but
+has not yet been run in a box. The guest states in these runs differ, so the
+14.10-versus-36.54-second comparison is directional, not a controlled speedup
+ratio.

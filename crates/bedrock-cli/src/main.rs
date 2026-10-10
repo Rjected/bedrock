@@ -439,8 +439,9 @@ fn run() -> io::Result<()> {
 
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
-    let fair_timing = std::env::var_os("BEDROCK_FAIR_TIMING").is_some();
     let fair_profile_prefix = std::env::var("BEDROCK_FAIR_PROFILE_PREFIX").ok();
+    let fair_timing = std::env::var_os("BEDROCK_FAIR_TIMING").is_some()
+        || fair_profile_prefix.is_some();
     let timeout_duration = args
         .wall_clock_timeout
         .map(std::time::Duration::from_secs_f64);
