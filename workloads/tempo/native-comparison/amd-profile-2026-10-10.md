@@ -387,3 +387,16 @@ in `collect_page_breakpoints`, **13.76%** in `visit_alias_entry`, and only
 alias walk and is not merged. It also confirms that faster guest setup
 does not imply faster transfer execution. The experiment's log, first
 marker, and profile are retained under ignored `target/boxctl-evidence`.
+
+A combined-patch diagnostic counted the alias cache during the exact 10,000-
+transfer guest. In the first 20 seconds after fair marker 1, the collector
+received **1,601,159 calls** and found **254,094 cached proofs**. Only
+**52,797** calls that reached the proof lookup found any valid proof but no
+matching one. The global tree refreshed fully **614** times, and those
+refreshes invalidated alias proofs **614** times. Leaf-only rearm succeeded
+**2,196** times. The collector observed **zero** dirty-gate calls, and the
+code-hazard path invalidated proofs **zero** times in this interval. These
+measurements isolate complete guarded-tree refresh as the main source of
+proof invalidation during transfers. The collector-call count includes
+hazard-free early returns, so calls minus cache hits is not an exact count
+of full alias walks; the next diagnostic instruments walks separately.
