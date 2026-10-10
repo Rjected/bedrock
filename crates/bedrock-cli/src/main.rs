@@ -440,6 +440,7 @@ fn run() -> io::Result<()> {
     info!("Starting VM...");
     let wall_clock_start = std::time::Instant::now();
     let fair_timing = std::env::var_os("BEDROCK_FAIR_TIMING").is_some();
+    let fair_profile_prefix = std::env::var("BEDROCK_FAIR_PROFILE_PREFIX").ok();
     let timeout_duration = args
         .wall_clock_timeout
         .map(std::time::Duration::from_secs_f64);
@@ -548,10 +549,11 @@ fn run() -> io::Result<()> {
                         if let Some(host_seconds) = exit_wall_seconds {
                             if let Ok(regs) = vm.get_regs() {
                                 if regs.gprs.rbx == 0x4641_4952_5449_4d45 {
+                                    let marker = regs.gprs.rcx;
                                     println!(
                                         "FAIR_TIMING {}",
                                         serde_json::json!({
-                                            "marker": regs.gprs.rcx,
+                                            "marker": marker,
                                             "guest_monotonic_ns": regs.gprs.rdx,
                                             "guest_tsc": exit.emulated_tsc,
                                             "tsc_frequency": exit.tsc_frequency,
@@ -559,6 +561,21 @@ fn run() -> io::Result<()> {
                                         })
                                     );
                                     let _ = io::stdout().flush();
+                                    if let Some(prefix) = fair_profile_prefix.as_ref() {
+                                        match vm.get_exit_stats().and_then(|stats| {
+                                            let data = serde_json::to_vec_pretty(&stats)
+                                                .map_err(io_error)?;
+                                            std::fs::write(
+                                                format!("{prefix}-marker{marker}.json"),
+                                                data,
+                                            )
+                                        }) {
+                                            Ok(()) => {}
+                                            Err(e) => {
+                                                warn!("Failed to save fair profile marker: {e}")
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
