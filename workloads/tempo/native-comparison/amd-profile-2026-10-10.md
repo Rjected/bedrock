@@ -132,10 +132,10 @@ and 54.16 billion cycles; total tree scans through that run dropped to about
 310,000, versus about 750,000 in the prior 512-page run in the same box.
 This is a performance probe, **not a correctness-ready change**: an injected
 interrupt could retire an instruction before the trapped store does. A stricter
-candidate that checks the faulting store's next RIP passes library tests but
-has not yet been run in a box. The guest states in these runs differ, so the
-14.10-versus-36.54-second comparison is directional, not a controlled speedup
-ratio.
+candidate that checks the faulting store's next RIP was run subsequently;
+its complete-command result is below. The guest states differed across runs,
+so the 14.10-versus-36.54-second comparison is directional, not a
+controlled speedup ratio.
 
 ## Complete 100-transfer command
 
@@ -178,3 +178,22 @@ A 20-second host `perf` sample after `bench send` began put 43.52% of cycles
 in `collect_page_breakpoints`, 11.83% in `visit_alias_entry`, and 4.72% in
 `svm_run_guest`. Repeated alias and page-breakpoint proof work is now the
 dominant measured bottleneck for this exact workload.
+
+## Batch-path sampling
+
+A box-only diagnostic sampled one in every 256 VM entries and printed
+cumulative batch-path counts at 4.194-million-entry intervals. Subtracting
+the samples nearest the two 100-transfer timing markers yielded 131,071
+sampled entries: **73.8% scalar**, 14.1% page batches, 6.0% bounded batches,
+5.5% global batches, and 0.6% other paths. No sampled entry failed while
+protecting an already prepared batch. This identifies prolonged scalar
+execution as the main source of the monitor-trap volume in that run; the
+precise mix can vary with guest state. The instrumented complete command
+took 133.706 host seconds.
+
+Another local candidate indexed lookups in the global guarded-table set to
+avoid a linear search during alias traversal. All 241 library tests and the
+box SVM smoke test passed, but its complete 100-transfer command took
+**135.555 host seconds** with 30.394 million exits. The pushed build's
+127.304 seconds and 28.048 million exits remain the better result. The
+global-index candidate was not merged.
