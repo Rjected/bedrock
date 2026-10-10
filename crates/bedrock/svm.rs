@@ -486,6 +486,10 @@ pub(crate) unsafe fn run(
             }
             if rip == batch.endpoint() && ctx.guest_rcx != 0 {
                 v.write(o::RIP, 8, batch.start);
+                // A native interruption of an unfinished string instruction
+                // resumes with RF set. The artificial chunk boundary must
+                // preserve that state before exposing a timer or interrupt.
+                v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) | (1 << 16));
             }
             completed
         } else if let Some(counted) = batch.counted_loop {

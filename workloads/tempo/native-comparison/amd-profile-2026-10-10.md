@@ -232,3 +232,27 @@ diagnostic run observed `REP STOSB` with a mapped current destination and
 unmapped next page, including cases whose remaining count fit within the
 current page. The next test is identifying the planner condition that rejects
 these batches.
+
+The planner probe found the missing condition: at repeated `REP STOSB`
+entries it reported `prepared=false`, despite `can_loop=true`,
+`can_guard_page_tables=true`, and budgets above 1.5 million instructions.
+Guest RFLAGS was `0x10213` or `0x10217`, so RF (bit 16) was set. The old
+planner rejected all RF entries. AMD's [Architecture Programmer's Manual,
+Volume 2](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2) documents that
+an interrupted string instruction can retain RF until it successfully
+completes. The new planner permits RF only for recognized bounded REP MOVS
+and STOS chunks; it keeps the conservative check for other instructions.
+When an artificial chunk ends before the original count is exhausted, the
+runner restores RF along with RCX and RIP before exposing a timer or
+interrupt boundary.
+
+The RF-aware, page-bounded candidate completed the 100-transfer command in
+**117.036 host seconds**, with 100 sent and 100 successful transfers. It
+made **11.612 million exits, including 9.962 million monitor-trap exits**,
+versus 29.488 million exits and 27.840 million monitor-trap exits in the
+opcode-logging control. No transfer-phase sample hit `REP STOSB` in the
+candidate. The fair-marker wall time improved modestly from 123.717
+seconds in that control and 127.304 seconds in the pushed uninstrumented
+build. VM-entry preparation still consumed **82.1%** of the candidate's
+measured host cycles, so removing this scalar hotspot alone does not solve
+the application performance gap.

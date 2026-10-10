@@ -2577,14 +2577,19 @@ fn prepare_verified<C: VmContext>(
     let state = ctx.state();
     let v = &state.vmcs;
     let flags = v.read_natural(VmcsFieldNatural::GuestRflags).ok()?;
-    if flags & ((1 << 8) | (1 << 16)) != 0
+    let cs = v.read32(VmcsField32::GuestCsAccessRights).ok()?;
+    let long = cs & (1 << 13) != 0;
+    // A restarted REP may carry RF until the whole string operation retires.
+    // Its bounded chunk finishes before the endpoint breakpoint, clearing
+    // RF in hardware. Keep the conservative RF rule for other instructions.
+    let repeat_entry = long && repeat_len(&window.bytes).is_some();
+    if flags & (1 << 8) != 0
+        || (flags & (1 << 16) != 0 && !repeat_entry)
         || state.mtf_enabled
         || v.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
     {
         return None;
     }
-    let cs = v.read32(VmcsField32::GuestCsAccessRights).ok()?;
-    let long = cs & (1 << 13) != 0;
     let default32 = cs & (1 << 14) != 0;
     let rip = v.read_natural(VmcsFieldNatural::GuestRip).ok()?;
     let linear = rip.checked_add(v.read_natural(VmcsFieldNatural::GuestCsBase).ok()?)?;
@@ -2704,7 +2709,21 @@ fn prepare_verified<C: VmContext>(
     if long {
         if let Some(length) = repeat_len(&bytes[..available]) {
             let original_count = state.gprs.rcx;
-            let iterations = original_count.min(limit as u64);
+            let width = match bytes[length - 1] {
+                0xa4 | 0xaa => 1u64,
+                _ if bytes[..length].iter().any(|b| b & 0xf8 == 0x48) => 8,
+                _ if bytes[..length].contains(&0x66) => 2,
+                _ => 4,
+            };
+            let offset = state.gprs.rdi & 4095;
+            // The next destination page may be unmapped or CoW. Run the
+            // current mapped page as a bounded chunk, then replan.
+            let page_iterations = if flags & (1 << 10) != 0 {
+                if offset + width > 4096 { 0 } else { offset / width + 1 }
+            } else {
+                (4096 - offset) / width
+            };
+            let iterations = original_count.min(limit as u64).min(page_iterations);
             if iterations < 2 {
                 return None;
             }
@@ -4611,6 +4630,24 @@ mod tests {
             assert!(prepare(&mut ctx, true, true, &window).is_none());
             assert!(!ctx.state().svm_rejected_pages.contains(&0x1000));
         }
+    }
+
+    #[test]
+    fn resumed_rep_can_batch_while_other_rf_instructions_stay_scalar() {
+        let mut ctx = paged_context(&[0xf3, 0xaa]);
+        ctx.memory[0x6040..0x6048].fill(0); // Next destination page is unmapped.
+        ctx.state_mut().gprs.rdi = 0x7ff0;
+        ctx.state_mut().gprs.rcx = 5000;
+        ctx.set_guest_rflags(2 | (1 << 16));
+        assert!(super::super::svm::physical(&ctx, 0x8000).is_err());
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(batch.repeat.unwrap().iterations, 16);
+        assert!(batch.validated_stores);
+
+        ctx.memory[0x1000..0x1002].copy_from_slice(&[0x90, 0x90]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(prepare(&mut ctx, true, true, &window).is_none());
     }
 
     #[test]
