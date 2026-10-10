@@ -703,3 +703,28 @@ not improve the application test on the same box:
 This candidate remains isolated. The diagnostic counts show a common
 replanning pattern, but retaining the scalar page did not reduce the
 application's total fault or cycle count in this A/B run.
+
+### Follow-up: composing independent alias proofs
+
+A three-page global batch can reuse exact singleton alias proofs under the
+same guarded CR3. The breakpoint union covers every executable alias of all
+selected pages and must still fit four hardware slots. A focused unit test
+confirmed composition without a new combined translation-tree walk. Local
+EPT, VMX, and VM tests passed; box SVM smoke, REP/RF transitions, the short
+`svm_workload`, and all full Tempo runs passed on an EPYC 4245P HWE box.
+
+| Same box, run order | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Stable | 166.647476747 s | 31,334,765 | 332.29 billion |
+| Singleton composition | 164.615981879 s | 25,570,486 | 354.83 billion |
+| Singleton composition repeat | 170.655158863 s | 26,351,647 | 368.02 billion |
+| Stable repeat | 175.857047558 s | 32,528,856 | 353.75 billion |
+| Singleton composition third run | 188.958072817 s | 28,716,660 | 411.30 billion |
+
+The two stable intervals averaged **171.252 seconds**. The three candidate
+intervals averaged **174.743 seconds**, with a much wider spread. The fault
+reduction is real, but extra and variable VM-entry preparation has not shown
+a reliable application speedup. A transfer-phase CPU sample from the earlier
+three-page variant attributed 13.95% of samples to
+`collect_page_breakpoints`, versus 8.60% in the stable diagnostic sample.
+The composition candidate remains isolated.
