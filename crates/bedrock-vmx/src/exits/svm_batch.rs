@@ -2017,7 +2017,28 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
     batch.pages[0] = page;
     if !trusted {
         let hazard = cached_page_hazards(ctx, page)?;
-        if hazard.count == 0 || hazard.edge & 15 != 15
+        if hazard.count == 0 {
+            // A page first fetched while the translation gate was dirty can
+            // remain on the scalar path after the gate becomes usable. The
+            // exact-byte proof is already available here: promote it just as
+            // the execute-fault handler would, so later entries can run
+            // across this page without another fetch fault or scan.
+            // A write fault on previously trusted code retries at this same
+            // RIP. Re-protecting the page before that store retires would
+            // fault forever, so promote only a proven non-store entry.
+            if safe_len(&window.bytes, true, false).is_some_and(|(_, _, writes)| !writes)
+                && hazard.edge & 15 == 15
+                && hazard.boundary[31] != 0x0f
+                && hazard.boundary[30..] != [0x0f, 0xc7]
+                && ctx.state_mut().ept
+                    .trust_npt_code_4k(allocator, GuestPhysAddr::new(page))
+                    .is_some()
+            {
+                return Some(batch);
+            }
+            return None;
+        }
+        if hazard.edge & 15 != 15
             || hazard.boundary[31] == 0x0f
             || hazard.boundary[30..] == [0x0f, 0xc7]
             || hazard.offsets[..hazard.count].contains(&((window.physical.as_u64() & 4095) as u16))
@@ -3836,6 +3857,56 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn global_counter_promotes_a_safe_scalar_page_with_a_write_guard() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator,
+            bedrock_ept::PageTableFormat::AmdNpt,
+        )
+        .unwrap();
+        ctx.state_mut()
+            .ept
+            .map_4k(
+                &mut allocator,
+                GuestPhysAddr::new(0x1000),
+                HostPhysAddr::new(0x101000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            )
+            .unwrap();
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert!(batch.global_execution);
+        assert_eq!(batch.page_breakpoint_count, 0);
+        assert!(ctx.state().ept.npt_trusted_code_4k(&allocator, GuestPhysAddr::new(0x1000)));
+        assert_eq!(
+            ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x1000)).unwrap().1,
+            bedrock_ept::EptPermissions::READ_EXECUTE,
+        );
+        ctx.state_mut()
+            .ept
+            .invalidate_npt_code_4k(&allocator, GuestPhysAddr::new(0x1000))
+            .unwrap();
+        assert!(!ctx.state().ept.npt_trusted_code_4k(&allocator, GuestPhysAddr::new(0x1000)));
+        assert_eq!(
+            ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x1000)).unwrap().1,
+            bedrock_ept::EptPermissions::READ_WRITE,
+        );
+        // A faulted store to this code page must retire before the write
+        // guard can be rearmed, even though the page has no code hazards.
+        ctx.memory[0x1000..0x1002].copy_from_slice(&[0x89, 0x07]);
+        ctx.state_mut().svm_guard.valid = false;
+        let store = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(safe_len(&store.bytes, true, false).is_some_and(|(_, _, writes)| writes));
+        assert!(prepare_global(&mut ctx, &allocator, true, true, &store).is_none());
+        assert!(!ctx.state().ept.npt_trusted_code_4k(&allocator, GuestPhysAddr::new(0x1000)));
     }
 
     #[test]

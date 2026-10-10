@@ -553,3 +553,36 @@ exit pattern: the retained build still averages about **8.1×** the historical
 Intel Bedrock 24.087-second interval, with roughly 33 million nested-page
 faults per transfer phase. Substantially closer timing requires reducing the
 execute-fault and entry-preparation work further.
+
+## Promote safe zero-hazard code pages
+
+An instrumented 10,000-transfer run on `amd-hazard-diag-1010` classified
+15,605,578 rejected global batches. Of those, 8,868,972 (56.8%) were on
+pages whose exact-byte scan found no hazardous instruction; only 19,661 of
+5,670,181 page scans overflowed the four-breakpoint hazard budget. This
+pointed to pages left on the scalar path after the translation gate became
+ready, rather than hazard overflow, as a likely source of avoidable work.
+
+When a zero-hazard page is encountered with the gate ready, the retained
+change promotes it to NPT write-guarded executable code and starts a global
+counter batch. It requires a proven non-store instruction at the current RIP.
+Without that condition, a store replaying after a write fault can rearm the
+guard before it retires and loop forever; an initial candidate exhibited that
+failure during Linux boot. A unit test now covers promotion, invalidation,
+and the store-replay guard. The corrected build passed 252 VMX and 40 VM
+library tests, the box SVM smoke and REP/RF transition suite, and both full
+Tempo runs below.
+
+| Same AMD box, 10,000 transfers | Fair marker interval | VM exits | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Safe-page promotion | 201.250429609 s | 47,819,010 | 33,967,858 | 413.50 billion |
+| Existing branch, after promotion run | 207.501964282 s | 47,747,211 | 33,181,612 | 435.56 billion |
+
+Promotion improved this paired run by **6.25 seconds (3.0%)** and saved
+22.06 billion measured VM-entry preparation cycles, despite more nested-page
+faults. This is one same-box pair, so the size of the gain is less certain
+than the earlier repeated single-read comparison. The promoted run remains
+**8.4×** the historical Intel 24.087-second interval, and about 34 million
+nested-page faults remain. Guest logs and marker snapshots are retained under
+ignored `target/boxctl-evidence/amd-promotion-1010/`; all kernel work ran on
+the disposable box with the 7.0 HWE kernel.
