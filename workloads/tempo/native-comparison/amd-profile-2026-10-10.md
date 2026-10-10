@@ -360,3 +360,16 @@ than two host minutes after marker 1, with guest virtual time only reaching
 and 8.98% in alias visitation, near the baseline. This prototype was not
 merged; its limited effect suggests the leaf-only path may be too rare or
 another invalidation path may clear proofs before reuse.
+
+A follow-up box-only counter run found why: in a 20-second 10,000-transfer
+window, the leaf-only rearm path succeeded just **50** times and the full
+global tree rebuilt **200** times. By contrast, the refresh loop returned
+early for the selected scalar code page **4,433,410** times. During this
+window the collector still made 1,265,473 full alias walks and hit its
+proof cache only 3,674 times. The translation-tree and code-hazard paths
+cleared proofs 130,344 and 105,989 times, respectively, often repeatedly
+while the global gate remained dirty. A useful fix must distinguish the
+single trapped page-table store's replay from prolonged scalar execution on
+an untrusted code page; the latter currently blocks global refresh even
+after the store may have retired. Rearming early requires a precise store
+completion proof so an injected interrupt cannot make stale aliases usable.
