@@ -849,3 +849,26 @@ but preparation added **84.28 billion cycles** and the transfer regressed by
 **12.73 seconds**. The candidate remains isolated. Reducing page faults by
 expanding a guarded set does not pay off while its per-entry proof and
 permission work is this expensive.
+
+A 25-second transfer-phase host `perf` sample of the three-page build
+attributed **21.39%** of samples to `collect_page_breakpoints`, versus
+12.12% in the prior guarded-boundary profile. Its report and raw sample
+are saved under ignored
+`target/boxctl-evidence/amd-boundary-multipage-profile-1010/`.
+The sample explains much of the added VM-entry work but does not imply that
+alias collection is its only source.
+
+A follow-up cached the combined alias proof after composing its independently
+proved pages, allowing an exact set hit on subsequent entries. A unit test
+verified the combined proof was stored; local tests, box smoke/transitions,
+and the full Tempo workload passed. It did not improve the application run:
+
+| Same box | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Three-page composition | 127.526130457 s | 25,223,935 | 279.10 billion |
+| Three-page composition with combined proof cached | 129.837277249 s | 25,180,362 | 287.99 billion |
+| Shared branch | 114.800815318 s | 31,980,690 | 194.82 billion |
+
+Both three-page variants remain isolated. The extra proof cache write may
+evict useful singleton proofs or add cost itself; this A/B result does not
+distinguish those causes.
