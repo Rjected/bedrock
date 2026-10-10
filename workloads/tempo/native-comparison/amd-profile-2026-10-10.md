@@ -746,3 +746,21 @@ The 0.15-second difference is too small to establish a speedup. The variant
 removed 5.38 million nested-page faults but added 21.85 billion VM-entry
 preparation cycles. It remains isolated rather than merging a costlier
 execution path without an application-level gain.
+
+### Follow-up: skip non-candidate bytes in the hazard scan
+
+An isolated scanner variant skips eight code bytes at once when none are
+`0x0f`, `0xf2`, or `0xf3`, the only bytes that can start the hazardous
+patterns under inspection. The existing VMX (253) and VM (40) tests passed;
+an exhaustive marker-position test and box SVM smoke/transition checks also
+passed. Both full Tempo runs passed all transactions on the same 4245P box.
+
+| Same-box variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Eight-byte scan | 177.059517248 s | 32,841,818 | 358.57 billion |
+| Stable branch | 178.132035466 s | 33,079,366 | 360.09 billion |
+
+The 1.07-second difference is within the observed run-to-run variation. The
+scanner remains isolated. This test also bounds its likely impact: optimizing
+the byte scan alone does not address the approximately 33 million transfer
+phase execute faults or 360 billion VM-entry preparation cycles.
