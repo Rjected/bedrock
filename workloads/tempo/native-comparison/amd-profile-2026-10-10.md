@@ -413,3 +413,21 @@ run was stopped. This candidate is not merged. A follow-up diagnostic split
 the guard-prerequisite rejection into RUN-boundary distrust, changed CR3,
 and unavailable gate state so the next optimization can address the actual
 condition.
+
+An experimental root-VM RUN mode made the CLI's shared guest-RAM mapping
+read-only after loading Linux and skipped the blanket host-write distrust
+between RUN calls. A box smoke test exercised this mode and restoring a
+writable mapping; the REP/RF regression also passed. The exact 10,000-
+transfer guest reached marker 1 after **465.979 host seconds** of setup,
+faster than the previous diagnostic run's 553.159 seconds. Transfer execution
+remained slow: in 20 seconds, the collector made **1,320,157 full alias
+walks** and found **221,419 cache hits**. The tree rebuilt fully **444**
+times; **397** rejected alias-proof retention because the global gate was
+not ready, **34** because an upper table gained an executable link, and
+**13** because no valid proof remained. There were **zero** untrusted-link
+rejections and **zero** dirty-gate collector calls. A host profile put
+**54.85%** of cycles in `collect_page_breakpoints`, **15.56%** in
+`visit_alias_entry`, and **4.81%** in `svm_run_guest`. No second marker or
+completed report appeared during roughly two host minutes after marker 1,
+so this experimental mode has not met the workload target and is not merged.
+The next diagnostic counts why the global guarded tree is unavailable.
