@@ -197,3 +197,20 @@ box SVM smoke test passed, but its complete 100-transfer command took
 **135.555 host seconds** with 30.394 million exits. The pushed build's
 127.304 seconds and 28.048 million exits remain the better result. The
 global-index candidate was not merged.
+
+## Repeated-RIP sampling
+
+A separate box-only diagnostic sampled guest RIP and CR3 every 262,139
+monitor-trap exits during a complete 100-transfer run of the pushed build.
+The two fair-timing markers were 139.261 host seconds apart, and `bench send`
+reported 100 sent and 100 successful transfers. This instrumented timing is
+consistent with, but does not improve on, the uninstrumented 127.304-second
+result.
+
+After the first timing marker, 69 of 123 distinct sampled monitor-trap exits
+had the same guest RIP (`0x7fce5a47848a`) and CR3 (`0x10296b000`). Two
+consecutive 20-sample stretches at that address each spanned 4,980,641
+monitor-trap exits. The guest TSC advanced only 16.8–18.6 million ticks in
+those stretches. This identifies one repeated instruction as a major source
+of scalar exits. The diagnostic did not record its opcode, so the instruction
+class and the correct batching change remain to be verified.
