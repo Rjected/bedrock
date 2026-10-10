@@ -638,16 +638,44 @@ another virtual page, so zero interior hazards alone cannot justify globally
 enabling execution. The second diagnostic run passed all 10,000 transfers in
 169.409371830 seconds between fair markers.
 
-Two candidate changes were rejected after same-box application tests:
+The NPT leaf-cache experiment regressed on a same-box application test. An
+early four-page experiment also regressed, but that result was invalid as a
+test of the intended design: its planner selected up to four pages while the
+VM run loop enabled execution on only the second page.
 
 | Candidate | Fair transfer interval | Same-box stable interval | Result |
 | --- | ---: | ---: | --- |
 | Cached NPT leaf locations | 176.949484576 s | 168.808642488 s | 8.14 s slower; 372.50 vs 338.29 billion VM-entry preparation cycles |
-| Up to four recent hazardous pages per global counted interval | 227.320667247 s | 168.808642488 s | 58.51 s slower; 43.84 vs 31.48 million nested-page faults |
+| Incomplete four-page experiment | 227.320667247 s | 168.808642488 s | Pages three and four remained NX; 43.84 vs 31.48 million nested-page faults |
 
-The four-page candidate passed the SVM smoke and REP/RF transition tests and
-completed the full Tempo workload, but it increased faults by 12.36 million.
-Both candidates remain isolated from the shared branch. The next performance
-experiment needs to reduce execute-page transitions without broadening the
-global counted set this way; the current exact-byte and cross-page safety
-checks must remain intact.
+The multi-page design was corrected to enable and restore execute permission
+for every selected page. It passed the SVM smoke and REP/RF transition tests
+and completed the full Tempo workload in each variant. On one EPYC 4245P box
+with identical guest artifacts, the fair transfer results were:
+
+| Variant | Transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Stable branch | 176.094182025 s | 32,436,093 | 356.19 billion |
+| Corrected four-page, incremental proofs | 186.613921084 s | 25,999,264 | 432.53 billion |
+| Four-page, deferred alias proof | 179.664074404 s | 26,526,446 | 400.78 billion |
+| Three-page, deferred alias proof | 178.657330520 s | 26,173,720 | 400.91 billion |
+
+The additional pages prevent roughly six million execute faults, but their
+proof and permission work outweighs that saving. No multi-page variant was
+merged into the shared branch.
+
+A diagnostic-only physical-page transition table on the same box counted
+31,806,028 transfer-phase pairs across 8,547 entries and dropped 21,531
+events (0.07%). The hottest 32 pairs represented 12,760,568 faults; three
+self-pairs alone represented 2,282,477. The hottest self-pair was page
+`0x194f000` followed by itself 941,091 times. That page's one apparent
+`F2 A5` hazard starts in the displacement of a `CALL` at
+`0xffffffff8194f829` in `serial8250_tx_empty`. It cannot simply be ignored:
+an indirect branch could enter the displacement bytes. A 20-second transfer
+phase host sample attributed 8.60% of samples to
+`collect_page_breakpoints` and 6.64% to `page_hazards_memo`.
+
+The next experiment should explain why hot self-pair pages repeatedly fall
+back to scalar execution and then reduce that fallback with a proof that
+covers every executable alias and branch entry. Exact-byte and cross-page
+safety checks remain necessary.
