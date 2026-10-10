@@ -373,3 +373,17 @@ single trapped page-table store's replay from prolonged scalar execution on
 an untrusted code page; the latter currently blocks global refresh even
 after the store may have retired. Rearming early requires a precise store
 completion proof so an injected interrupt cannot make stale aliases usable.
+
+An experimental combined patch made that distinction for decoded scalar
+stores and also retained unaffected alias proofs across leaf-only table
+rearms. All 244 library tests passed, and the box SVM smoke and REP/RF
+tests passed. In the exact 10,000-transfer guest, fair marker 1 arrived
+after 562.730 host seconds of setup at guest virtual time 62.595 s. After
+roughly two further host minutes, there was no marker 2 or completed report;
+the latest guest log had advanced only to virtual time 62.864 s. We stopped
+the run. A 20-second transfer-phase host profile put **51.32%** of cycles
+in `collect_page_breakpoints`, **13.76%** in `visit_alias_entry`, and only
+**4.83%** in `svm_run_guest`. Thus the combination did not solve the hot
+alias walk and is not merged. It also confirms that faster guest setup
+does not imply faster transfer execution. The experiment's log, first
+marker, and profile are retained under ignored `target/boxctl-evidence`.
