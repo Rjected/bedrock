@@ -256,3 +256,13 @@ seconds in that control and 127.304 seconds in the pushed uninstrumented
 build. VM-entry preparation still consumed **82.1%** of the candidate's
 measured host cycles, so removing this scalar hotspot alone does not solve
 the application performance gap.
+
+The same RF-aware build then started the exact 10,000-transfer command. It
+reached fair marker 1 at guest virtual time 62.587 s, but had no end marker
+or benchmark report **251 host seconds later**; it was stopped to bound the
+experiment. Thus it still exceeds the historical Intel Bedrock 24.087-second
+result by more than 10.4× without completing. A 20-second, 99 Hz host `perf`
+sample during that transfer phase put 32.57% of sampled cycles in
+`collect_page_breakpoints`, 12.29% in `visit_alias_entry`, and 7.02% in
+`svm_run_guest`. Repeated alias proof work remains the largest measured
+source of host work after the REP fix.
