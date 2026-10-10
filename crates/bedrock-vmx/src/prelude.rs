@@ -71,11 +71,11 @@ pub use crate::traits::{
 // EPT (Extended Page Tables)
 #[cfg(not(feature = "cargo"))]
 pub use crate::ept::{
-    EptMemoryType, EptPageTable, EptPermissions, FrameAllocator, PageTableFormat,
+    EptMemoryType, EptPageTable, EptPermissions, FrameAllocator, NptExecuteGuard, PageTableFormat,
 };
 #[cfg(feature = "cargo")]
 pub use bedrock_ept::{
-    EptMemoryType, EptPageTable, EptPermissions, FrameAllocator, PageTableFormat,
+    EptMemoryType, EptPageTable, EptPermissions, FrameAllocator, NptExecuteGuard, PageTableFormat,
 };
 
 // Exit handling
