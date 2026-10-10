@@ -728,3 +728,21 @@ a reliable application speedup. A transfer-phase CPU sample from the earlier
 three-page variant attributed 13.95% of samples to
 `collect_page_breakpoints`, versus 8.60% in the stable diagnostic sample.
 The composition candidate remains isolated.
+
+### Follow-up: sticky proven page set
+
+An isolated variant retained the last proven physical code-page set across
+global batches under the same CR3 and code epoch. It reused singleton alias
+proofs and still revalidated current hazards and breakpoints. Local VMX (253)
+and VM (40) tests passed, as did the 4245P box's SVM smoke and transition
+checks. Both full Tempo runs passed all transactions on the same box.
+
+| Same-box variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Sticky proven page set | 173.864143326 s | 27,088,437 | 371.73 billion |
+| Stable branch | 174.016150900 s | 32,471,902 | 349.88 billion |
+
+The 0.15-second difference is too small to establish a speedup. The variant
+removed 5.38 million nested-page faults but added 21.85 billion VM-entry
+preparation cycles. It remains isolated rather than merging a costlier
+execution path without an application-level gain.
