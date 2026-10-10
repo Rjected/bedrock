@@ -2083,6 +2083,10 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         {
             return None;
         }
+        collect_page_breakpoints(ctx, &mut batch, core::slice::from_ref(&hazard))?;
+        if batch.page_breakpoint_count == 0 {
+            return None;
+        }
         // A counted global interval can cross several recently visited
         // hazardous pages without an execute fault when all executable
         // aliases fit the four hardware breakpoints. Each admitted page must
@@ -2091,6 +2095,8 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         let recent = ctx.state().svm_recent_pages;
         let mut hazards = [hazard; 4];
         let mut hazard_count = hazard.count;
+        let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
+            & 0x000f_ffff_ffff_f000;
         for previous_linear in recent {
             if hazard_count >= batch.page_breakpoints.len() || batch.code_page_count == 3 {
                 break;
@@ -2120,28 +2126,36 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
             {
                 continue;
             }
+            // Only widen a guard when this page has an independently cached
+            // proof under the same guarded tree. A fresh multi-page alias
+            // walk on every entry costs more than the faults it removes.
+            let Some(proof) = cached_single_page_alias_proof(ctx, root, previous, &other) else {
+                continue;
+            };
+            let mut breakpoints = batch.page_breakpoints;
+            let mut breakpoint_count = batch.page_breakpoint_count;
+            let mut fits = true;
+            for &address in &proof.breakpoints[..proof.breakpoint_count] {
+                if breakpoints[..breakpoint_count].contains(&address) {
+                    continue;
+                }
+                if breakpoint_count == breakpoints.len() {
+                    fits = false;
+                    break;
+                }
+                breakpoints[breakpoint_count] = address;
+                breakpoint_count += 1;
+            }
+            if !fits || breakpoint_count == batch.page_breakpoint_count {
+                continue;
+            }
+            batch.page_breakpoints = breakpoints;
+            batch.page_breakpoint_count = breakpoint_count;
             batch.pages[batch.code_page_count] = previous;
             hazards[batch.code_page_count] = other;
             batch.code_page_count += 1;
             batch.page_count += 1;
             hazard_count += other.count;
-        }
-        // Alias enumeration is the expensive part of a page proof. Try the
-        // complete candidate set once, then discard the least recent page
-        // until all hazards fit the hardware breakpoint slots.
-        loop {
-            let count = batch.code_page_count;
-            if collect_page_breakpoints(ctx, &mut batch, &hazards[..count]).is_some() {
-                break;
-            }
-            if count == 1 {
-                return None;
-            }
-            batch.code_page_count -= 1;
-            batch.page_count -= 1;
-        }
-        if batch.page_breakpoint_count == 0 {
-            return None;
         }
     }
     Some(batch)
@@ -2209,6 +2223,31 @@ fn alias_proof_item(page: u64, hazard: &PageHazards) -> u64 {
         item = item.rotate_left(11).wrapping_mul(0x94d0_49bb_1331_11eb) ^ offset as u64;
     }
     item.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(27)
+}
+
+fn cached_single_page_alias_proof<C: VmContext>(
+    ctx: &C,
+    root: u64,
+    page: u64,
+    hazard: &PageHazards,
+) -> Option<super::super::vm_state::SvmAliasProof> {
+    let guard = &ctx.state().svm_guard;
+    if guard.gate_dirty || !((guard.valid && guard.root == root)
+        || (guard.gate_ready && guard.gate_root == root)) {
+        return None;
+    }
+    let mut hash = root.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ alias_proof_item(page, hazard);
+    hash ^= hash >> 32;
+    let set = ((hash as usize) & (SVM_ALIAS_PROOF_CAPACITY / SVM_ALIAS_PROOF_WAYS - 1))
+        * SVM_ALIAS_PROOF_WAYS;
+    guard.alias_proofs[set..set + SVM_ALIAS_PROOF_WAYS]
+        .iter()
+        .find(|proof| proof.valid && proof.key_hash == hash && proof.root == root
+            && proof.page_count == 1 && proof.pages[0] == page
+            && proof.counts[0] == hazard.count
+            && proof.offsets[0][..hazard.count] == hazard.offsets[..hazard.count])
+        .copied()
 }
 
 fn alias_proof_key(root: u64, batch: &InstructionBatch, hazards: &[PageHazards]) -> u64 {
@@ -3975,27 +4014,48 @@ mod tests {
             assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
                 .unwrap().code_page_count, 1);
         }
+        for page in [0x1000, 0x2000, 0x9000] {
+            let hazard = cached_page_hazards(&mut ctx, page).unwrap();
+            assert!(cached_single_page_alias_proof(&ctx, 0x3000, page, &hazard).is_some(),
+                "missing singleton proof for {page:#x}");
+        }
         ctx.set_guest_rip(0x1000);
         ctx.state_mut().svm_recent_pages[..4]
             .copy_from_slice(&[0x1000, 0x2000, 0x9000, 0xa000]);
+        assert_eq!(cached_code_translation(&mut ctx, 0x2000), Some(0x2000));
+        assert_eq!(cached_code_translation(&mut ctx, 0x9000), Some(0x9000));
+        let first = cached_page_hazards(&mut ctx, 0x1000).unwrap();
+        for page in [0x2000, 0x9000] {
+            let other = cached_page_hazards(&mut ctx, page).unwrap();
+            assert!(hazard_boundary_safe(&first, &other));
+            assert!(hazard_boundary_safe(&other, &first));
+            assert!(!ctx.state().ept.npt_trusted_code_4k(&allocator, GuestPhysAddr::new(page)));
+            let proof = cached_single_page_alias_proof(&ctx, 0x3000, page, &other).unwrap();
+            assert_ne!(proof.breakpoints[0], 0x1100);
+        }
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        for page in [0x2000, 0x9000] {
+            let other = cached_page_hazards(&mut ctx, page).unwrap();
+            assert!(cached_single_page_alias_proof(&ctx, 0x3000, page, &other).is_some());
+        }
         assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000, 0x9000]);
         assert_eq!(batch.page_breakpoint_count, 3);
         assert!(batch.page_breakpoints[..batch.page_breakpoint_count].contains(&0x9fff));
-        assert!(ctx.state().svm_guard.alias_proof.valid);
-        assert_eq!(ctx.state().svm_guard.alias_proof.page_count, 3);
         assert!(!ctx.state().svm_guard.alias_proofs.iter()
             .any(|proof| proof.valid && proof.page_count == 3));
-        // The combined scratch hit does not depend on keeping its singleton
-        // inputs in the set-associative cache after composition.
-        for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
-            proof.valid = false;
-        }
+        // Widening can reuse the singleton proofs without a combined walk.
         let repeated = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(repeated.page_breakpoint_count, batch.page_breakpoint_count);
         assert_eq!(&repeated.page_breakpoints[..repeated.page_breakpoint_count],
             &batch.page_breakpoints[..batch.page_breakpoint_count]);
+        for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
+            if proof.page_count == 1 && proof.pages[0] != 0x1000 {
+                proof.valid = false;
+            }
+        }
+        assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
+            .unwrap().code_page_count, 1);
         let guard = protect(&mut ctx, &allocator, &batch).unwrap();
         for page in [0x1000, 0x2000, 0x9000] {
             assert_eq!(
