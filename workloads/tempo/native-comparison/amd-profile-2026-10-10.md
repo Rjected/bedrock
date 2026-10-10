@@ -136,3 +136,45 @@ candidate that checks the faulting store's next RIP passes library tests but
 has not yet been run in a box. The guest states in these runs differ, so the
 14.10-versus-36.54-second comparison is directional, not a controlled speedup
 ratio.
+
+## Complete 100-transfer command
+
+The 1,024-page indexed build completed `bench send` for 100 transfers in
+**127.304 host seconds** between the two fair timing markers. The report
+shows 100 sent, 100 successful, 100 included in one block, zero failures,
+and zero reverts. The same command took 3.216 seconds in the native AMD
+control, so this Bedrock run was about 39.6 times slower. During the command,
+Bedrock recorded 28.048 million exits, of which 26.395 million (94.1%)
+were monitor-trap exits; VM-entry preparation used 71.2% of measured host
+cycles. A later 25-second host `perf` sample placed 24.24% of cycles in
+`svm_run_guest` and 17.97% in `collect_page_breakpoints`.
+
+In a concurrent 512-page indexed plus diagnostic guard-refresh run, the same
+100-transfer command sent all 100 but had not reached its end marker after
+more than three host minutes. It stalled near vt 62.151 s after exceeding
+7.59 million guarded-tree capacity failures for one CR3. A 20-second host
+`perf` sample there put 62.96% of cycles in
+`collect_translation_tree_pages`, 21.56% in `__pi_memcpy`, and 1.30% in
+`svm_run_guest`. The earlier 512-page
+run that did not hit capacity was not representative of this tail behavior.
+The 1,024-page capacity avoids this observed failure in the completed run,
+though it does not by itself make execution fast.
+
+A stricter guard-refresh experiment waited for the trapped store's decoded
+next RIP and forced one instruction before rearming. It completed the same
+100-transfer command in **164.800 host seconds** with 30.944 million exits,
+including 29.341 million monitor-trap exits. That is slower than the pushed
+1,024-page build's 127.304 seconds and 28.048 million exits, so this guard
+change was discarded.
+
+## Exact 10,000-transfer workload
+
+The pushed 1,024-page indexed build reached marker 1 and started the same
+10,000-transfer `bench send` command used in the historical Intel comparison.
+It ran for **more than seven host minutes after marker 1 without an end
+marker**, then was stopped to bound the feedback loop. This is a lower bound,
+not a completed timing; historical Intel Bedrock completed in 24.087 seconds.
+A 20-second host `perf` sample after `bench send` began put 43.52% of cycles
+in `collect_page_breakpoints`, 11.83% in `visit_alias_entry`, and 4.72% in
+`svm_run_guest`. Repeated alias and page-breakpoint proof work is now the
+dominant measured bottleneck for this exact workload.
