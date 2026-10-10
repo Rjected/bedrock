@@ -1637,6 +1637,7 @@ fn page_safe<C: VmContext>(ctx: &C, physical: u64) -> Option<()> {
 #[derive(Clone, Copy)]
 struct PageHazards {
     boundary: [u8; 32],
+    boundary_guarded: bool,
     edge: u16,
     offsets: [u16; 4],
     count: usize,
@@ -1679,6 +1680,7 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
         memo.hits = memo.hits.saturating_add(1);
         return (!memo.rejected).then_some(PageHazards {
             boundary: memo.proof.boundary,
+            boundary_guarded: memo.proof.boundary_guarded,
             edge: memo.proof.edge,
             offsets: memo.proof.offsets,
             count: memo.proof.count,
@@ -1713,6 +1715,7 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
     cache.hazard_memos[index].proof = super::super::vm_state::SvmCodeProof {
         page: physical,
         boundary: hazards.map_or([0; 32], |hazards| hazards.boundary),
+        boundary_guarded: hazards.is_some_and(|hazards| hazards.boundary_guarded),
         edge: hazards.map_or(0, |hazards| hazards.edge),
         offsets: hazards.map_or([0; 4], |hazards| hazards.offsets),
         count: hazards.map_or(0, |hazards| hazards.count),
@@ -1757,6 +1760,7 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
     {
         return Some(PageHazards {
             boundary: proof.boundary,
+            boundary_guarded: proof.boundary_guarded,
             edge: proof.edge,
             offsets: proof.offsets,
             count: proof.count,
@@ -1776,6 +1780,7 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
     cache.code[index] = super::super::vm_state::SvmCodeProof {
         page: physical,
         boundary: hazards.boundary,
+        boundary_guarded: hazards.boundary_guarded,
         edge: hazards.edge,
         offsets: hazards.offsets,
         count: hazards.count,
@@ -1816,6 +1821,7 @@ fn page_hazards<C: VmContext>(
     const CHUNK: usize = 512;
     let mut result = PageHazards {
         boundary: [0; 32],
+        boundary_guarded: false,
         edge: 0,
         offsets: [0; 4],
         count: 0,
@@ -1904,6 +1910,7 @@ fn page_hazards<C: VmContext>(
         result.offsets[result.count] = position;
         result.count += 1;
     }
+    result.boundary_guarded = true;
     result.edge = summarize_edge(&result.boundary);
     if forbidden_page_bytes(&result.boundary[..16])
         || forbidden_page_bytes(&result.boundary[16..])
@@ -2068,7 +2075,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
             return None;
         }
-        if !boundary_starts_covered(&hazard)
+        if !hazard.boundary_guarded
             || hazard.offsets[..hazard.count].contains(&((window.physical.as_u64() & 4095) as u16))
         {
             return None;
@@ -2098,7 +2105,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
                 {
                     if let Some(other) = cached_page_hazards(ctx, previous) {
                         if other.count != 0
-                            && boundary_starts_covered(&other)
+                            && other.boundary_guarded
                             && hazard.count + other.count <= batch.page_breakpoints.len()
                             && hazard_boundary_safe(&hazard, &other)
                             && hazard_boundary_safe(&other, &hazard)
@@ -2569,13 +2576,6 @@ fn boundary_start_hazard(last: &[u8], start: usize) -> bool {
             && suffix[..suffix.len() - 2].iter().all(|&byte| edge_prefix(byte)))
 }
 
-fn boundary_starts_covered(hazard: &PageHazards) -> bool {
-    (2..16).all(|start| {
-        !boundary_start_hazard(&hazard.boundary[16..], start)
-            || hazard.offsets[..hazard.count].contains(&((4080 + start) as u16))
-    })
-}
-
 // Cache the first opcode after leading prefixes and the distance to the
 // nearest REP prefix in the trailing prefix chain. Fifteen means no usable
 // trailing REP or a leading chain too long to continue a legal instruction.
@@ -2598,7 +2598,7 @@ fn summarize_edge(boundary: &[u8; 32]) -> u16 {
 }
 
 fn hazard_boundary_safe(left: &PageHazards, right: &PageHazards) -> bool {
-    if boundary_starts_covered(left) {
+    if left.boundary_guarded {
         return true;
     }
     // Each half was scanned when its page proof was built. Only opcodes or
@@ -2952,6 +2952,7 @@ pub(crate) fn prepare<C: VmContext>(
     // Alias proofs follow the guarded tree; cross-page bytes are checked anew.
     let mut hazards = [PageHazards {
         boundary: [0; 32],
+        boundary_guarded: false,
         edge: 0,
         offsets: [0; 4],
         count: 0,
@@ -3950,7 +3951,7 @@ mod tests {
         ctx.memory[0x1ffe..0x2000].copy_from_slice(&[0x66, 0xf3]);
         let hazards = page_hazards(&mut ctx, 0x1000, None).unwrap().unwrap();
         assert_eq!(&hazards.offsets[..hazards.count], &[4094, 4095]);
-        assert!(boundary_starts_covered(&hazards));
+        assert!(hazards.boundary_guarded);
 
         ctx.memory[0x1ffb..0x2000].copy_from_slice(&[0x66, 0x67, 0x2e, 0xf2, 0xf3]);
         assert!(page_hazards(&mut ctx, 0x1000, None).unwrap().is_none());
@@ -4879,6 +4880,7 @@ mod tests {
         let check = |suffix: &[u8], prefix: &[u8]| {
             let mut left = PageHazards {
                 boundary: [0x90; 32],
+                boundary_guarded: false,
                 edge: 0,
                 offsets: [0; 4],
                 count: 0,

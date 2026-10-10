@@ -220,6 +220,7 @@ pub(crate) struct SvmAliasWalk {
 pub(crate) struct SvmCodeProof {
     pub page: u64,
     pub boundary: [u8; 32],
+    pub boundary_guarded: bool,
     pub edge: u16,
     pub offsets: [u16; 4],
     pub count: usize,
