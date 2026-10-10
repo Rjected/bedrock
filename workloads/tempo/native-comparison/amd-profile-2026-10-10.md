@@ -980,3 +980,27 @@ preparation fell about 11 billion cycles. All four runs completed and passed
 the same guest workload on the same box. Logs and marker snapshots are under
 ignored `target/boxctl-evidence/amd-cached-multipage-1010/`. The AMD interval
 is still about **3.7×** the historical Intel 24.087-second result.
+
+### Hazard guard limit and fault diagnosis
+
+On another EPYC 4245P box, diagnostic builds compared the existing eight-page
+recurrent-code guard limit with 16 and 32 pages. Each completed the full
+10,000-transfer workload. The fair intervals were **88.262 s** (eight),
+**88.330 s** (32), and **86.781 s / 89.029 s** (16, two runs). The 16-page
+variation straddled the baseline and 32 pages increased nested-page faults;
+there is no repeatable speedup to merge. The hazard lookup hint hit on over
+99.8% of lookups, but the eight-page run still did about 334 million page-byte
+comparisons. Increasing the limit to 32 reduced that to about 268 million
+while adding roughly 750,000 nested-page faults, offsetting the gain.
+
+A separate instrumented NPF run passed in **86.897 s** with **24,906,008**
+transfer-phase nested-page faults and **7,516,588** monitor-trap exits. Across
+the run, the NPF diagnostic counted 83.9 million faults, of which 82.1 million
+(97.8%) were instruction fetches; almost every fetch took the scalar path.
+These diagnostic counts include boot and setup, while the transfer-phase counts
+above come from the exact fair-timing markers. The remaining bottleneck is
+therefore executing across hazardous code pages, not page-table writes or
+hazard-hint misses. Logs, marker JSON and diagnostic dmesg are in the ignored
+`target/boxctl-evidence/amd-hazard-guard-limit-1010/` and
+`target/boxctl-evidence/amd-npf-diag-1010/` directories. The diagnostic
+instrumentation and guard-limit variants remain in isolated worktrees.
