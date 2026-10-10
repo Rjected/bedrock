@@ -15,6 +15,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("SVM_CASE").as_deref() == Ok("mov-ss") {
         return test_mov_ss_deadline();
     }
+    if std::env::var("SVM_CASE").as_deref() == Ok("boundary-prefix") {
+        return test_boundary_rep_prefix();
+    }
+    if std::env::var("SVM_CASE").as_deref() == Ok("boundary-rdrand") {
+        return test_boundary_rdrand();
+    }
     test_mov_ss_random_interception()?;
     test_mov_ss_deadline()?;
     test_syscall(false)?;
@@ -25,7 +31,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_guest_debug_trap()?;
     test_guest_breakpoint_trap()?;
     test_repeated_store_with_rf()?;
+    test_boundary_rep_prefix()?;
+    test_boundary_rdrand()?;
     Ok(())
+}
+
+fn test_boundary_rdrand() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x1ffe].fill(0x90);
+    memory[0x1ffe..0x2008].copy_from_slice(&[
+        0x0f, 0xc7, 0xf0, // RDRAND EAX straddles the page boundary.
+        0x89, 0xc3, // MOV EBX, EAX preserves the provided random value.
+        0x31, 0xc0, // XOR EAX, EAX selects the shutdown hypercall.
+        0x0f, 0x01, 0xd9, // VMMCALL shutdown.
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    let mut random_exits = 0;
+    loop {
+        let exit = vm.run()?;
+        match exit.exit_reason {
+            256 => continue,
+            57 => {
+                random_exits += 1;
+                vm.set_rdrand_value(0x1234)?;
+            }
+            258 => {
+                assert_eq!(random_exits, 1, "cross-page RDRAND escaped interception");
+                assert_eq!(vm.get_regs()?.gprs.rbx, 0x1234);
+                let exits = vm.get_exit_stats()?.total_exit_count();
+                assert!(exits < 500, "cross-page RDRAND missed acceleration: {exits} exits");
+                println!("SVM_BOUNDARY_RDRAND_PASS exits={exits}");
+                return Ok(());
+            }
+            reason => return Err(format!("Unexpected cross-page RDRAND exit: {reason}").into()),
+        }
+    }
+}
+
+fn test_boundary_rep_prefix() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x1fff].fill(0x90);
+    memory[0x1fff..0x2005].copy_from_slice(&[
+        0xf3, 0xa4, // REP MOVSB straddles the executable page boundary.
+        0x31, 0xc0, // XOR EAX, EAX
+        0x0f, 0x01, // VMMCALL continues at 0x2005.
+    ]);
+    memory[0x2005] = 0xd9;
+    memory[0x7000] = 0x5a;
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rcx = 1;
+    regs.gprs.rsi = 0x7000;
+    regs.gprs.rdi = 0x7100;
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 258, "cross-page REP did not reach shutdown");
+        let finished = vm.get_regs()?;
+        assert_eq!(finished.gprs.rcx, 0);
+        assert_eq!(finished.gprs.rsi, 0x7001);
+        assert_eq!(finished.gprs.rdi, 0x7101);
+        assert_eq!(vm.memory()?[0x7100], 0x5a);
+        let exits = vm.get_exit_stats()?.total_exit_count();
+        assert!(exits < 500, "cross-page REP missed accelerated execution: {exits} exits");
+        println!("SVM_BOUNDARY_PREFIX_PASS exits={exits}");
+        return Ok(());
+    }
 }
 
 fn test_repeated_store_with_rf() -> Result<(), Box<dyn std::error::Error>> {

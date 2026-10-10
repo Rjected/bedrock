@@ -1884,9 +1884,26 @@ fn page_hazards<C: VmContext>(
     if too_many_hazards {
         return Some(None);
     }
-    // Wrapping aliases and crossings to other permitted pages stay on the
-    // conservative path. Interior hazards are covered at every prefix entry.
+    // Interior hazards are covered at every prefix entry. Add breakpoint
+    // entries for any partial instruction at the physical page boundary.
     result.boundary[16..].copy_from_slice(&bytes[..16]);
+    // A prefix or partial opcode at the end of a page can become hazardous
+    // when the next virtual page is fetched. Stop at every possible entry
+    // into such a suffix, before the cross-page instruction can execute.
+    for start in 2..16 {
+        if !boundary_start_hazard(&result.boundary[16..], start) {
+            continue;
+        }
+        let position = (4080 + start) as u16;
+        if result.offsets[..result.count].contains(&position) {
+            continue;
+        }
+        if result.count == result.offsets.len() {
+            return Some(None);
+        }
+        result.offsets[result.count] = position;
+        result.count += 1;
+    }
     result.edge = summarize_edge(&result.boundary);
     if forbidden_page_bytes(&result.boundary[..16])
         || forbidden_page_bytes(&result.boundary[16..])
@@ -2051,9 +2068,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
             return None;
         }
-        if hazard.edge & 15 != 15
-            || hazard.boundary[31] == 0x0f
-            || hazard.boundary[30..] == [0x0f, 0xc7]
+        if !boundary_starts_covered(&hazard)
             || hazard.offsets[..hazard.count].contains(&((window.physical.as_u64() & 4095) as u16))
         {
             return None;
@@ -2083,6 +2098,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
                 {
                     if let Some(other) = cached_page_hazards(ctx, previous) {
                         if other.count != 0
+                            && boundary_starts_covered(&other)
                             && hazard.count + other.count <= batch.page_breakpoints.len()
                             && hazard_boundary_safe(&hazard, &other)
                             && hazard_boundary_safe(&other, &hazard)
@@ -2540,6 +2556,26 @@ fn edge_prefix(byte: u8) -> bool {
     )
 }
 
+fn boundary_start_hazard(last: &[u8], start: usize) -> bool {
+    let suffix = &last[start..];
+    if suffix.len() > 14 {
+        return false;
+    }
+    (suffix.iter().all(|&byte| edge_prefix(byte))
+        && suffix.iter().any(|&byte| matches!(byte, 0xf2 | 0xf3)))
+        || (suffix.ends_with(&[0x0f])
+            && suffix[..suffix.len() - 1].iter().all(|&byte| edge_prefix(byte)))
+        || (suffix.ends_with(&[0x0f, 0xc7])
+            && suffix[..suffix.len() - 2].iter().all(|&byte| edge_prefix(byte)))
+}
+
+fn boundary_starts_covered(hazard: &PageHazards) -> bool {
+    (2..16).all(|start| {
+        !boundary_start_hazard(&hazard.boundary[16..], start)
+            || hazard.offsets[..hazard.count].contains(&((4080 + start) as u16))
+    })
+}
+
 // Cache the first opcode after leading prefixes and the distance to the
 // nearest REP prefix in the trailing prefix chain. Fifteen means no usable
 // trailing REP or a leading chain too long to continue a legal instruction.
@@ -2562,6 +2598,9 @@ fn summarize_edge(boundary: &[u8; 32]) -> u16 {
 }
 
 fn hazard_boundary_safe(left: &PageHazards, right: &PageHazards) -> bool {
+    if boundary_starts_covered(left) {
+        return true;
+    }
     // Each half was scanned when its page proof was built. Only opcodes or
     // REP prefix chains straddling the boundary need to be checked here.
     let first = right.boundary[0];
@@ -3873,6 +3912,51 @@ mod tests {
     }
 
     #[test]
+    fn global_counter_guards_a_trailing_rep_prefix() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1fff] = 0xf3;
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator,
+            bedrock_ept::PageTableFormat::AmdNpt,
+        )
+        .unwrap();
+        ctx.state_mut().ept.map_4k(
+            &mut allocator,
+            GuestPhysAddr::new(0x1000),
+            HostPhysAddr::new(0x101000),
+            bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+            bedrock_ept::EptMemoryType::WriteBack,
+        ).unwrap();
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(batch.page_breakpoint_count, 1);
+        assert_eq!(batch.page_breakpoints[0], 0x1fff);
+        assert!(!ctx.state().ept.npt_trusted_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)));
+        let guard = protect(&mut ctx, &allocator, &batch).unwrap();
+        assert_eq!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x1000))
+            .unwrap().1.bits() & 2, 0);
+        guard.restore(&mut ctx, &allocator);
+    }
+
+    #[test]
+    fn boundary_prefixes_use_one_breakpoint_per_possible_entry() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1ffe..0x2000].copy_from_slice(&[0x66, 0xf3]);
+        let hazards = page_hazards(&mut ctx, 0x1000, None).unwrap().unwrap();
+        assert_eq!(&hazards.offsets[..hazards.count], &[4094, 4095]);
+        assert!(boundary_starts_covered(&hazards));
+
+        ctx.memory[0x1ffb..0x2000].copy_from_slice(&[0x66, 0x67, 0x2e, 0xf2, 0xf3]);
+        assert!(page_hazards(&mut ctx, 0x1000, None).unwrap().is_none());
+    }
+
+    #[test]
     fn global_counter_promotes_a_safe_scalar_page_with_a_write_guard() {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
@@ -4638,19 +4722,17 @@ mod tests {
         let b = prepare(&mut ctx, true, true, &window).unwrap();
         assert_eq!(b.code_page_count, 2);
         assert_eq!(&b.pages[..2], &[0x1000, 0x2000]);
-        // Each page is safe alone, but either virtual adjacency could execute
-        // RDRAND across their physical boundary. Exclude the optional page.
+        // A breakpoint on the partial opcode stops either virtual adjacency
+        // before RDRAND can execute across the physical boundary.
         ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x1ffe..0x2000].copy_from_slice(&[0x0f, 0xc7]);
         ctx.memory[0x2000] = 0xf0;
         assert!(page_safe(&ctx, 0x1000).is_some());
         assert!(page_safe(&ctx, 0x2000).is_some());
-        assert_eq!(
-            prepare(&mut ctx, true, true, &window)
-                .unwrap()
-                .code_page_count,
-            1
-        );
+        let guarded = prepare(&mut ctx, true, true, &window).unwrap();
+        assert_eq!(guarded.code_page_count, 2);
+        assert!(guarded.page_breakpoints[..guarded.page_breakpoint_count]
+            .contains(&0x1ffe));
         ctx.state_mut().svm_guard.valid = false;
         ctx.memory[0x1ffe..0x2003].fill(0x90);
         ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
