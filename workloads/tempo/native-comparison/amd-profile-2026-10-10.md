@@ -266,3 +266,19 @@ sample during that transfer phase put 32.57% of sampled cycles in
 `collect_page_breakpoints`, 12.29% in `visit_alias_entry`, and 7.02% in
 `svm_run_guest`. Repeated alias proof work remains the largest measured
 source of host work after the REP fix.
+
+When the global page-table guard is dirty, the next candidate tries the
+existing reachable-code proof before enumerating every executable alias of
+a hazardous code page. It retains the full alias walk as fallback. All 242
+library tests, the box SVM smoke test, and the hardware REP/RF deadline
+regression passed. The complete 100-transfer command took **96.319 host
+seconds**, with 100 successful and included transfers. It made **9.754
+million exits**, including 8.176 million monitor-trap exits, and spent
+292.55 billion host cycles in VM-entry preparation. That compares with
+117.036 seconds, 11.612 million exits, and 367.06 billion preparation
+cycles for the RF-aware build before this change. A 20-second transfer-phase
+`perf` sample on the new build put 25.00% in `collect_page_breakpoints`,
+3.33% in `visit_alias_entry`, and 9.58% in `svm_run_guest`. These are
+samples from the 100-transfer run and should not be equated directly with
+the separate 10,000-transfer profile above. VM-entry preparation remains
+79.5% of this run's measured host cycles.

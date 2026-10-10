@@ -2424,10 +2424,13 @@ pub(crate) fn prepare<C: VmContext>(
             state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
             return prepare_verified(ctx, can_loop, false, false, window);
         }
-        // Once a page has a reachable-region proof, use it before enumerating
-        // every executable alias again. The region proof rechecks outgoing
-        // translations and is tied to the validated physical code bytes.
+        // When the global table guard is dirty, a full alias walk cannot be
+        // reused. Try the bounded reachable-code proof first for a hazardous
+        // page; it checks outgoing translations and validated code bytes.
         if (hazards[0].count == batch.page_breakpoints.len()
+            || (hazards[0].count != 0
+                && ctx.state().svm_guard.gate_ready
+                && ctx.state().svm_guard.gate_dirty)
             || ctx
                 .state()
                 .svm_guard
@@ -4559,6 +4562,23 @@ mod tests {
         ctx.memory[0x1000..0x1005].copy_from_slice(&[0xe9, 0xfb, 0x7f, 0, 0]);
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         assert!(!prepare(&mut ctx, true, true, &window).is_some_and(|b| b.page_execution));
+    }
+
+    #[test]
+    fn dirty_global_gate_prefers_reachable_proof_over_alias_enumeration() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1000..0x1003].copy_from_slice(&[0x90, 0xeb, 0x2e]);
+        ctx.memory[0x1020..0x1022].copy_from_slice(&[0xf3, 0xa4]);
+        ctx.memory[0x1031] = 0xc3;
+        ctx.memory[0x1100..0x1102].copy_from_slice(&[0xf3, 0xa4]);
+        ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(batch.page_execution);
+        assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1031]);
     }
 
     #[test]
