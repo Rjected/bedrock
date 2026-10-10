@@ -2013,6 +2013,44 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         if batch.page_breakpoint_count == 0 {
             return None;
         }
+        // A counted global interval can cross a second hazardous page without
+        // an execute fault when all of its executable aliases fit the same
+        // four hardware breakpoints. Only try the most recently visited page:
+        // scanning many candidates here would make ordinary guest setup slow.
+        let current_linear = window.linear & !4095;
+        let recent = ctx.state().svm_recent_pages;
+        if let Some(previous_linear) = recent
+            .into_iter()
+            .find(|&linear| linear != u64::MAX && linear != current_linear)
+        {
+            if let Some(previous) = cached_code_translation(ctx, previous_linear) {
+                if previous != page
+                    && !ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
+                        .contains(&previous)
+                    && !ctx
+                        .state()
+                        .ept
+                        .npt_trusted_code_4k(allocator, GuestPhysAddr::new(previous))
+                {
+                    if let Some(other) = cached_page_hazards(ctx, previous) {
+                        if other.count != 0
+                            && hazard.count + other.count <= batch.page_breakpoints.len()
+                            && hazard_boundary_safe(&hazard, &other)
+                            && hazard_boundary_safe(&other, &hazard)
+                        {
+                            let single = batch;
+                            batch.pages[1] = previous;
+                            batch.code_page_count = 2;
+                            batch.page_count = 2;
+                            if collect_page_breakpoints(ctx, &mut batch, &[hazard, other]).is_none()
+                            {
+                                batch = single;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     Some(batch)
 }
@@ -3498,17 +3536,28 @@ pub(crate) fn protect<C: VmContext, A: CowAllocator<C::CowPage>>(
     };
     if batch.global_execution {
         if batch.page_breakpoint_count != 0 {
-            let page = batch.pages[0];
-            match ctx.state_mut().ept.restrict_write_4k(
-                allocator, GuestPhysAddr::new(page)) {
-                Ok(Some(write_guard)) => {
-                    ctx.state_mut().svm_guard.saved[0] = super::super::vm_state::SvmGuardSaved {
-                        guest: page, write_guard, valid: true,
-                    };
-                    guard.saved_count = 1;
+            for &page in &batch.pages[..batch.code_page_count] {
+                match ctx
+                    .state_mut()
+                    .ept
+                    .restrict_write_4k(allocator, GuestPhysAddr::new(page))
+                {
+                    Ok(Some(write_guard)) => {
+                        let slot = guard.saved_count;
+                        ctx.state_mut().svm_guard.saved[slot] =
+                            super::super::vm_state::SvmGuardSaved {
+                                guest: page,
+                                write_guard,
+                                valid: true,
+                            };
+                        guard.saved_count += 1;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        guard.restore(ctx, allocator);
+                        return None;
+                    }
                 }
-                Ok(None) => {}
-                Err(_) => return None,
             }
         }
         return Some(guard);
@@ -3711,6 +3760,67 @@ mod tests {
     fn planned(ctx: &MockVmContext) -> Option<InstructionBatch> {
         let window = super::super::svm::InstructionWindow::read(ctx).unwrap();
         prepare_verified(ctx, true, false, false, &window)
+    }
+
+    #[test]
+    fn global_counter_can_guard_two_recent_hazardous_pages() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        for page in [0x1000, 0x2000] {
+            ctx.memory[page + 0x100..page + 0x103]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        ctx.state_mut().svm_recent_pages[..2].copy_from_slice(&[0x1000, 0x2000]);
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator,
+            bedrock_ept::PageTableFormat::AmdNpt,
+        )
+        .unwrap();
+        for page in [0x1000, 0x2000] {
+            ctx.state_mut()
+                .ept
+                .map_4k(
+                    &mut allocator,
+                    GuestPhysAddr::new(page as u64),
+                    HostPhysAddr::new(page as u64 + 0x100000),
+                    bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                    bedrock_ept::EptMemoryType::WriteBack,
+                )
+                .unwrap();
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000]);
+        assert_eq!(batch.page_breakpoint_count, 2);
+        let guard = protect(&mut ctx, &allocator, &batch).unwrap();
+        for page in [0x1000, 0x2000] {
+            assert_eq!(
+                ctx.state()
+                    .ept
+                    .lookup(&allocator, GuestPhysAddr::new(page))
+                    .unwrap()
+                    .1
+                    .bits()
+                    & 2,
+                0
+            );
+        }
+        guard.restore(&mut ctx, &allocator);
+        for page in [0x1000, 0x2000] {
+            assert_ne!(
+                ctx.state()
+                    .ept
+                    .lookup(&allocator, GuestPhysAddr::new(page))
+                    .unwrap()
+                    .1
+                    .bits()
+                    & 2,
+                0
+            );
+        }
     }
 
     #[test]

@@ -514,6 +514,18 @@ where
         if batch.is_some() && guard.is_none() {
             batch = None;
         }
+        let paired_execute = batch
+            .as_ref()
+            .filter(|batch| batch.global_execution && batch.code_page_count == 2)
+            .map(|batch| {
+                ctx.state_mut()
+                    .ept
+                    .allow_npt_execute_4k(allocator, GuestPhysAddr::new(batch.pages[1]))
+                    .ok_or(VmRunError::ExitHandler(
+                        super::super::exits::ExitError::Fatal("SVM paired code page is unmapped"),
+                    ))
+            })
+            .transpose()?;
         if Ctx::V::uses_nested_paging() {
             super::super::exits::retain_translation_cache(
                 ctx,
@@ -586,6 +598,9 @@ where
                 force_single_step = true;
             }
         }
+        if let Some(execute) = paired_execute {
+            execute.restore(&mut ctx.state_mut().ept, allocator);
+        }
         if let Some(execute) = scalar_next_execute {
             execute.restore(&mut ctx.state_mut().ept, allocator);
         }
@@ -611,6 +626,28 @@ where
             // skips the redundant fetch fault and full-page hazard scan
             // before the next instruction on that page. A trusted page
             // returns to the global gate after its one scalar replay.
+        }
+        if run_result.is_ok()
+            && batch
+                .as_ref()
+                .is_some_and(|batch| batch.global_execution && batch.code_page_count == 2)
+            && !force_single_step
+        {
+            if let Some(page) = super::super::exits::InstructionWindow::read_cached(ctx)
+                .ok()
+                .map(|window| window.physical.as_u64() & !4095)
+            {
+                if batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.pages[..2].contains(&page))
+                    && !ctx
+                        .state()
+                        .ept
+                        .npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
+                {
+                    ctx.state_mut().svm_gate_scalar_page = Some(page);
+                }
+            }
         }
 
         if pebs_armed_this_iter {

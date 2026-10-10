@@ -476,3 +476,33 @@ million candidates for code-byte hazards. The next speed improvement needs
 to reduce these code-page transition faults while preserving deterministic
 delivery at unsafe instruction boundaries. The verified changes here meet
 the workload-completion target, but do not yet meet Intel's timing.
+
+## Paired hazardous-page global batches
+
+A follow-up same-box comparison on `amd-hazardguard-1010` tested two changes
+against the pushed baseline. First, write-guarding recurrent pages whose
+hazard scan was rejected completed the workload but **regressed** from
+212.690508815 to 231.712092349 seconds between fair markers. Its transfer
+phase had 51,467,969 nested-page faults, versus 48,754,449 for the baseline.
+That rejected-page change was discarded.
+
+The retained change lets a counted global batch execute on the current
+hazardous code page and one recently visited hazardous page when their
+combined executable-alias breakpoints fit the four hardware slots. Both
+pages are write-guarded for the batch, and the second page's temporary NPT
+execute permission is restored immediately after VM exit. Other pages still
+fault on fetch. A box SVM smoke test, REP/RF transition suite, 251 VMX library
+tests, and the full guest workload passed.
+
+| Same AMD box, 10,000 transfers | Fair marker interval | VM exits | Nested-page faults |
+| --- | ---: | ---: | ---: |
+| Pushed baseline | 212.690508815 s | 64,372,078 | 48,754,449 |
+| Rejected-page guard (discarded) | 231.712092349 s | 66,989,977 | 51,467,969 |
+| Paired-page global batch | **194.128301083 s** | 48,120,595 | 33,455,083 |
+
+The paired-page change improved elapsed transfer time by **8.7%** and cut
+nested-page faults by **31.4%** against the same-box baseline. The guest again
+reported `TEMPO_TXGEN_PASS`. At **8.1 times** the historical Intel Bedrock
+24.087-second interval, it is progress toward the application target rather
+than parity. Paired and baseline logs plus marker/end JSON snapshots are
+retained under ignored `target/boxctl-evidence/amd-hazardguard-1010/`.
