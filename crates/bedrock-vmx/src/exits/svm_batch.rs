@@ -14,6 +14,7 @@ use bedrock_ept::NptExecutionGuard;
 
 const _: () = assert!(SVM_CODE_PAGE_CAPACITY <= NptExecutionGuard::MAX_PAGES);
 const _: () = assert!(SVM_TABLE_CAPACITY % 64 == 0);
+const _: () = assert!(SVM_TABLE_CAPACITY.is_power_of_two() && SVM_TABLE_CAPACITY <= u16::MAX as usize);
 
 /// Unknown instructions and control transfers terminate a batch. The flags
 /// distinguish memory access from stores, including implicit stack accesses.
@@ -462,23 +463,30 @@ fn add_translation_child<C: VmContext>(
         return None;
     }
     let scratch = &mut ctx.state_mut().svm_guard;
-    let index = if let Some(index) = scratch.tables[..scratch.count]
-        .iter()
-        .position(|&page| page == child)
-    {
-        if scratch.levels[index] != level - 1 {
-            return None;
+    let mask = scratch.table_index.len() - 1;
+    let shift = 64 - scratch.table_index.len().trailing_zeros();
+    let mut slot = ((child >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize;
+    let index = loop {
+        let entry = scratch.table_index[slot];
+        if entry == 0 {
+            if scratch.count == scratch.tables.len() {
+                return None;
+            }
+            let index = scratch.count;
+            scratch.tables[index] = child;
+            scratch.levels[index] = level - 1;
+            scratch.count += 1;
+            scratch.table_index[slot] = (index + 1) as u16;
+            break index;
         }
-        index
-    } else {
-        if scratch.count == scratch.tables.len() {
-            return None;
+        let index = usize::from(entry - 1);
+        if scratch.tables[index] == child {
+            if scratch.levels[index] != level - 1 {
+                return None;
+            }
+            break index;
         }
-        let index = scratch.count;
-        scratch.tables[index] = child;
-        scratch.levels[index] = level - 1;
-        scratch.count += 1;
-        index
+        slot = (slot + 1) & mask;
     };
     scratch.children[parent][index / 64] |= 1u64 << (index % 64);
     Some(())
@@ -543,6 +551,10 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     scratch.tables[0] = root;
     scratch.levels[0] = 4;
     scratch.count = 1;
+    scratch.table_index.fill(0);
+    let shift = 64 - scratch.table_index.len().trailing_zeros();
+    let root_slot = ((root >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize;
+    scratch.table_index[root_slot] = 1;
     scratch.upper_count = 0;
     let mut cursor = 0;
     let mut bytes = [0u8; 512];
@@ -4032,7 +4044,7 @@ mod tests {
     #[test]
     fn page_execution_accepts_large_trees_and_falls_back_at_workspace_capacity() {
         let mut ctx = paged_context(&[0x90]);
-        ctx.memory.resize(4 * 1024 * 1024, 0);
+        ctx.memory.resize(8 * 1024 * 1024, 0);
         ctx.memory[0x1000..0x2000].fill(0x90);
         for index in 1..150 {
             let table = 0x7000 + index * 4096;
@@ -4049,9 +4061,15 @@ mod tests {
         assert!(ctx.state().svm_guard.tables[..94].contains(&(0x7000 + 90 * 4096)));
         // Simulate returning to userspace before changing RAM.
         ctx.state_mut().svm_guard.valid = false;
-        for index in 150..(SVM_TABLE_CAPACITY - 2) {
+        for index in 150..512 {
             let table = 0x7000 + index * 4096;
             ctx.memory[0x5000 + index * 8..0x5008 + index * 8]
+                .copy_from_slice(&(table as u64 | 7).to_le_bytes());
+        }
+        ctx.memory[0x4008..0x4010].copy_from_slice(&0x300007u64.to_le_bytes());
+        for index in 0..512 {
+            let table = 0x400000 + index * 4096;
+            ctx.memory[0x300000 + index * 8..0x300008 + index * 8]
                 .copy_from_slice(&(table as u64 | 7).to_le_bytes());
         }
         assert!(

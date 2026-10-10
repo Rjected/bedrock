@@ -19,8 +19,10 @@ type ExitStatsBox = HeapBox<AllExitStats>;
 pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
 pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
 pub(crate) const SVM_ALIAS_EDGE_CAPACITY: usize = 2048;
-pub(crate) const SVM_TABLE_CAPACITY: usize = 512;
+// Tempo's send-phase address space can exceed 512 reachable page-table pages.
+pub(crate) const SVM_TABLE_CAPACITY: usize = 1024;
 pub(crate) const SVM_TABLE_WORDS: usize = SVM_TABLE_CAPACITY / 64;
+pub(crate) const SVM_TABLE_INDEX_CAPACITY: usize = SVM_TABLE_CAPACITY * 2;
 
 #[derive(Clone, Copy)]
 pub(crate) struct SvmAliasEdge {
@@ -33,6 +35,9 @@ pub(crate) struct SvmAliasEdge {
 pub(crate) struct SvmGuardScratch {
     pub tables: [u64; SVM_TABLE_CAPACITY],
     pub levels: [u8; SVM_TABLE_CAPACITY],
+    // One-based indices into `tables` for the current translation-tree walk.
+    // Kept in this preallocated workspace so VM-entry planning never allocates.
+    pub table_index: [u16; SVM_TABLE_INDEX_CAPACITY],
     // Direct child links in the last walk, indexed by this walk's table set.
     pub children: [[u64; SVM_TABLE_WORDS]; SVM_TABLE_CAPACITY],
     pub upper_edges: [SvmAliasEdge; SVM_ALIAS_EDGE_CAPACITY],
