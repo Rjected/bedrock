@@ -282,3 +282,20 @@ cycles for the RF-aware build before this change. A 20-second transfer-phase
 samples from the 100-transfer run and should not be equated directly with
 the separate 10,000-transfer profile above. VM-entry preparation remains
 79.5% of this run's measured host cycles.
+
+The region-first build also ran the exact 10,000-transfer command on the
+same disposable AMD box. It reached fair marker 1 after 662.451 host
+seconds of setup at guest virtual time 62.587 s. Four host minutes after
+that marker, it had reached only guest virtual time 62.947 s and had no
+second marker or completed transfer report, so the run was stopped. Its
+marker-to-marker time is therefore **more than 240 seconds**, already more
+than **10×** the historical Intel Bedrock 24.087-second result, without a
+completed workload. A 20-second, 99 Hz host sample during this interval put
+34.61% of cycles in `collect_page_breakpoints`, 10.04% in
+`visit_alias_entry`, and 6.48% in `svm_run_guest`. Disassembly annotated
+against the box's module identifies the collector's hottest loop as the
+linear `gate_tables` lookup at `svm_batch.rs:1745`. The earlier global
+guarded-table hash-index candidate regressed the 100-transfer workload
+before the RF and region fixes; the current profile motivates revisiting
+that lookup with a focused benchmark, but does not establish a faster
+replacement yet.
