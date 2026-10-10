@@ -624,3 +624,30 @@ ignored `target/boxctl-evidence/amd-next-profile-1010/`. The remaining
 ~32 million execute faults leave AMD about **7.5×** the historical Intel
 24.087-second workload; reducing hazardous-page transitions is the main
 remaining performance problem.
+
+### Follow-up: hot-page boundaries and rejected NPT experiments
+
+On the same HWE 7.0.0-38 AMD box, an exact transfer-phase execute-fault
+diagnostic recorded 31,782,276 faults across 2,129 physical pages, with no
+dropped samples. The hottest 32 pages accounted for 22,212,343 faults. Eight
+of those 32 pages had no interior instruction hazards yet failed the global
+safe-page rule, accounting for 4,257,788 faults. A second run logged their
+page-edge bytes: all seven zero-interior-hazard pages in that run ended in
+`F2`, `F3`, or `0F`. Those bytes may begin an instruction that crosses into
+another virtual page, so zero interior hazards alone cannot justify globally
+enabling execution. The second diagnostic run passed all 10,000 transfers in
+169.409371830 seconds between fair markers.
+
+Two candidate changes were rejected after same-box application tests:
+
+| Candidate | Fair transfer interval | Same-box stable interval | Result |
+| --- | ---: | ---: | --- |
+| Cached NPT leaf locations | 176.949484576 s | 168.808642488 s | 8.14 s slower; 372.50 vs 338.29 billion VM-entry preparation cycles |
+| Up to four recent hazardous pages per global counted interval | 227.320667247 s | 168.808642488 s | 58.51 s slower; 43.84 vs 31.48 million nested-page faults |
+
+The four-page candidate passed the SVM smoke and REP/RF transition tests and
+completed the full Tempo workload, but it increased faults by 12.36 million.
+Both candidates remain isolated from the shared branch. The next performance
+experiment needs to reduce execute-page transitions without broadening the
+global counted set this way; the current exact-byte and cross-page safety
+checks must remain intact.
