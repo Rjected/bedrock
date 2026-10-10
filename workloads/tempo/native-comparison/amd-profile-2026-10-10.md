@@ -872,3 +872,16 @@ and the full Tempo workload passed. It did not improve the application run:
 Both three-page variants remain isolated. The extra proof cache write may
 evict useful singleton proofs or add cost itself; this A/B result does not
 distinguish those causes.
+
+A further isolated variant held the composed proof in the single scratch slot
+instead of inserting it into the set-associative cache. That let repeated
+three-page sets hit without evicting singleton proofs. A focused unit test
+verified the scratch hit still works after clearing the singleton entries;
+the full VMX suite (255 tests), box SVM smoke and transitions, and the Tempo
+transfer all passed. Its fair transfer interval was **126.414743403 seconds**,
+with **24,965,933** nested-page faults, **7,497,750** monitor-trap exits, and
+**276.81 billion** VM-entry overhead cycles. This is modestly better than the
+127.53–129.84-second multi-page variants but remains **11.61 seconds slower**
+than the same-box shared build at 114.80 seconds. Proof-cache eviction is
+therefore part of the cost, but avoiding it alone does not make the wider
+execution guard profitable. This variant remains isolated too.
