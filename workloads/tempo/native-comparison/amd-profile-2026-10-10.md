@@ -903,3 +903,41 @@ under ignored `target/boxctl-evidence/amd-stable-profile-1010/`. The
 breakpoint collector remains the largest software preparation hotspot in
 the fast branch. The three-page tests above show that reducing faults alone
 does not help when alias-proof work grows on each entry.
+
+### Reuse singleton proofs when widening the global guard
+
+The earlier three-page experiment tried a combined alias walk when its cache
+missed, which made fewer execute faults more expensive overall. The new
+candidate first proves the current hazardous page, then admits up to two
+recently executed hazardous pages only when each already has an exact,
+independently cached alias proof under the guarded CR3. It unions their
+virtual breakpoints within the four hardware slots and retains the existing
+page-boundary compatibility checks. Missing proofs keep the single-page
+guard; they never trigger a multi-page walk. A focused unit test covers
+three-page composition, a boundary prefix, and the missing-proof fallback.
+Local VMX (255) and VM (40) tests and box SVM smoke and transitions passed.
+
+The exact 10,000-transfer workload passed in an A/B/A sequence on the same
+EPYC 4245P box with HWE 7.0.0-38:
+
+| Same box, run order | Fair transfer interval | Nested-page faults | Monitor-trap exits | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Cached singleton composition | 92.269159825 s | 25,166,260 | 7,541,192 | 142.37 billion |
+| Shared branch | 119.303314462 s | 32,966,515 | 7,509,387 | 203.58 billion |
+| Cached singleton composition repeat | 91.286394400 s | 24,926,763 | 7,501,610 | 140.19 billion |
+
+The candidate averaged **91.78 seconds**, **23.1% faster** than the same-box
+shared-branch run, and about **3.8×** the historical Intel 24.087-second
+interval. Both candidate runs reduced nested-page faults by about 7.8–8.0
+million and VM-entry preparation by more than 61 billion cycles, without
+adding material monitor-trap exits. Logs and timing snapshots are under
+ignored `target/boxctl-evidence/amd-cached-multipage-1010/`.
+
+Using the fourth breakpoint slot to admit a fourth hazardous page passed the
+focused unit test, box smoke/transitions, and all 10,000 transfers. Its
+same-box fair interval was **92.734263188 seconds**, with **24,248,853**
+nested-page faults, **7,541,298** monitor-trap exits, and **148.81 billion**
+VM-entry preparation cycles. It removed another 0.68–0.92 million faults
+relative to the two three-page runs but added 6–9 billion preparation cycles
+and was slightly slower. The four-page variant remains isolated; three pages
+are the best measured limit for this workload.
