@@ -310,3 +310,16 @@ run accidentally omitted the `BEDROCK_FAIR_TIMING=1` environment flag
 required by the box's CLI binary, so it has no fair transfer markers and
 cannot establish the index's transfer-only effect. The full-run regression
 and earlier 100-transfer regression do not justify merging the index.
+
+A box-only diagnostic counted alias decisions during a bounded 10,000-transfer
+run. In a 20-second interval after fair marker 1, the collector was called
+**3,045,595** times: **2,881,353 full alias walks** and **164,242 cached
+proof hits**. Its translation-tree proof was valid on 3,045,228 of those
+calls; the global gate was ready throughout and its CR3 matched on 2,960,637
+calls. Dirty-gate calls were 326,203. This rules out an absent translation
+guard as the general explanation for the 95% alias-proof miss rate. Frequent
+proof churn, invalidation, and changing hazardous-page sets remain possible;
+the counters do not distinguish those causes. A 20-second transfer-phase
+`perf` sample from the first diagnostic run put 30.81% in
+`collect_page_breakpoints` and 10.81% in `visit_alias_entry`. Both diagnostic
+runs were stopped after marker 1 rather than allowed to run indefinitely.
