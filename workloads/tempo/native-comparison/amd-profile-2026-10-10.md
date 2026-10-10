@@ -400,3 +400,16 @@ measurements isolate complete guarded-tree refresh as the main source of
 proof invalidation during transfers. The collector-call count includes
 hazard-free early returns, so calls minus cache hits is not an exact count
 of full alias walks; the next diagnostic instruments walks separately.
+
+A later 20-second transfer-phase run counted the actual full walks:
+**876,936** out of **1,530,287** collector calls, with **321,719** cache
+hits. The guarded tree rebuilt fully **688** times. Selective retention
+rejected all of them: **637** failed the existing global-guard prerequisite,
+**44** had a newly executable upper-table link, and **7** had no valid proof
+to retain. The selective full-rebuild candidate still put **44.92%** of host
+cycles in `collect_page_breakpoints`, **11.04%** in `visit_alias_entry`, and
+**4.40%** in `svm_run_guest`; it did not reach marker 2 before the bounded
+run was stopped. This candidate is not merged. A follow-up diagnostic split
+the guard-prerequisite rejection into RUN-boundary distrust, changed CR3,
+and unavailable gate state so the next optimization can address the actual
+condition.
