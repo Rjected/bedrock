@@ -586,3 +586,41 @@ than the earlier repeated single-read comparison. The promoted run remains
 nested-page faults remain. Guest logs and marker snapshots are retained under
 ignored `target/boxctl-evidence/amd-promotion-1010/`; all kernel work ran on
 the disposable box with the 7.0 HWE kernel.
+
+## Retain a larger exact-byte hazard working set
+
+On `amd-next-profile-1010`, a transfer-phase `perf` sample of the promoted
+build still spent 9.28% of host cycles scanning 4 KB code pages in
+`page_hazards` and 6.95% checking the hazard memo. A box-only diagnostic
+reset its execute-fault map at fair marker 1, then tracked 32,586,065
+execute faults over the transfer phase with only 15 dropped hash entries.
+The 32 hottest guest-physical pages caused 22,781,745 faults (69.9%); all
+were classified as hazardous with the global translation gate ready. Safe
+page promotion alone cannot eliminate those page transitions.
+
+The retained change expands the exact-byte hazard memo from 64 to 256 pages.
+A 1,024-entry hint table points to likely memo slots, but every hint is
+checked against the physical page and validity before use. Collisions and
+evictions fall back to the complete lookup; they cannot reuse another page's
+hazard proof. A unit test covers a 96-page working set and a stale hint.
+The VMX library's 253 tests, VM library's 40 tests, box SVM smoke, and REP/RF
+transition suite passed. All four full guest runs below emitted
+`TEMPO_TXGEN_PASS`.
+
+| Same AMD box, run order | Fair transfer interval | VM exits | Nested-page faults |
+| --- | ---: | ---: | ---: |
+| Existing branch | 186.262105229 s | 45,673,029 | 31,958,002 |
+| 256-page memo | 176.206401302 s | 46,557,454 | 32,541,501 |
+| Existing branch repeat | 184.731231701 s | — | — |
+| 256-page memo repeat | 182.816336905 s | — | — |
+
+The two existing-branch intervals averaged **185.497 seconds**, and the two
+expanded-memo intervals averaged **179.511 seconds**, a **3.2%** improvement.
+In matched 30-second transfer samples, `page_hazards` fell from 9.28% to
+1.21% of sampled host cycles. Measured exit-handler cycles fell from 48.85
+to 26.05 billion in the first pair, despite 0.58 million more nested-page
+faults. Guest logs, marker snapshots, and perf reports are saved under
+ignored `target/boxctl-evidence/amd-next-profile-1010/`. The remaining
+~32 million execute faults leave AMD about **7.5×** the historical Intel
+24.087-second workload; reducing hazardous-page transitions is the main
+remaining performance problem.
