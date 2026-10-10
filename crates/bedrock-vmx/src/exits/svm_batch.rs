@@ -2098,7 +2098,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
             & 0x000f_ffff_ffff_f000;
         for previous_linear in recent {
-            if hazard_count >= batch.page_breakpoints.len() || batch.code_page_count == 3 {
+            if hazard_count >= batch.page_breakpoints.len() || batch.code_page_count == 4 {
                 break;
             }
             if previous_linear == u64::MAX || previous_linear == current_linear {
@@ -3973,7 +3973,7 @@ mod tests {
     }
 
     #[test]
-    fn global_counter_can_guard_three_recent_hazardous_pages() {
+    fn global_counter_can_guard_four_recent_hazardous_pages() {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x3000].fill(0x90);
         ctx.memory[0x9000..0xb000].fill(0x90);
@@ -4008,13 +4008,13 @@ mod tests {
                 .unwrap();
         }
         ctx.state_mut().svm_recent_pages.fill(u64::MAX);
-        for page in [0x1000, 0x2000, 0x9000] {
+        for page in [0x1000, 0x2000, 0x9000, 0xa000] {
             ctx.set_guest_rip(page);
             let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
             assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
                 .unwrap().code_page_count, 1);
         }
-        for page in [0x1000, 0x2000, 0x9000] {
+        for page in [0x1000, 0x2000, 0x9000, 0xa000] {
             let hazard = cached_page_hazards(&mut ctx, page).unwrap();
             assert!(cached_single_page_alias_proof(&ctx, 0x3000, page, &hazard).is_some(),
                 "missing singleton proof for {page:#x}");
@@ -4025,7 +4025,7 @@ mod tests {
         assert_eq!(cached_code_translation(&mut ctx, 0x2000), Some(0x2000));
         assert_eq!(cached_code_translation(&mut ctx, 0x9000), Some(0x9000));
         let first = cached_page_hazards(&mut ctx, 0x1000).unwrap();
-        for page in [0x2000, 0x9000] {
+        for page in [0x2000, 0x9000, 0xa000] {
             let other = cached_page_hazards(&mut ctx, page).unwrap();
             assert!(hazard_boundary_safe(&first, &other));
             assert!(hazard_boundary_safe(&other, &first));
@@ -4035,15 +4035,15 @@ mod tests {
         }
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
-        for page in [0x2000, 0x9000] {
+        for page in [0x2000, 0x9000, 0xa000] {
             let other = cached_page_hazards(&mut ctx, page).unwrap();
             assert!(cached_single_page_alias_proof(&ctx, 0x3000, page, &other).is_some());
         }
-        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000, 0x9000]);
-        assert_eq!(batch.page_breakpoint_count, 3);
+        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000, 0x9000, 0xa000]);
+        assert_eq!(batch.page_breakpoint_count, 4);
         assert!(batch.page_breakpoints[..batch.page_breakpoint_count].contains(&0x9fff));
         assert!(!ctx.state().svm_guard.alias_proofs.iter()
-            .any(|proof| proof.valid && proof.page_count == 3));
+            .any(|proof| proof.valid && proof.page_count == 4));
         // Widening can reuse the singleton proofs without a combined walk.
         let repeated = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(repeated.page_breakpoint_count, batch.page_breakpoint_count);
@@ -4057,7 +4057,7 @@ mod tests {
         assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
             .unwrap().code_page_count, 1);
         let guard = protect(&mut ctx, &allocator, &batch).unwrap();
-        for page in [0x1000, 0x2000, 0x9000] {
+        for page in [0x1000, 0x2000, 0x9000, 0xa000] {
             assert_eq!(
                 ctx.state()
                     .ept
