@@ -798,3 +798,33 @@ and transition checks passed, including new hardware regressions that execute
 VM exits respectively. The AMD transfer remains about **5.2×** the
 historical Intel 24.087-second interval; the roughly 32 million execute
 faults per transfer are the next major performance target.
+
+### Cache the boundary proof result
+
+A 25-second transfer-phase host CPU sample of the guarded-boundary build
+attributed 22.15% of samples to `svm_run_guest`, 12.12% to
+`collect_page_breakpoints`, 5.75% to `page_hazards_memo`, and 3.69% to
+`boundary_start_hazard`. The sample is saved in ignored
+`target/boxctl-evidence/amd-boundary-profile-1010/`. The last check was
+recomputing the same trailing-entry decision on repeated VM entries even
+though the code-page proof had not changed.
+
+The proof now records whether all possible trailing entries are guarded,
+and that bit travels with the hazard memo and code cache. It is set only
+after the exact-byte scan has added every required breakpoint; stale code
+proofs are still invalidated on writes. Local VMX (255) and VM (40) tests,
+box SVM smoke and transitions, and the cross-page REP and RDRAND hardware
+regressions passed. Both full Tempo runs passed all transactions.
+
+| Same-box variant | Fair transfer interval | Nested-page faults | Monitor-trap exits | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Guarded boundary entries | 124.300178238 s | 32,517,450 | 7,532,646 | 226.93 billion |
+| Guarded boundary entries repeat | 126.668687370 s | 32,307,997 | 7,491,880 | 238.06 billion |
+| Cached boundary proof | 115.139916261 s | 32,320,316 | 7,473,493 | 192.42 billion |
+| Cached boundary proof repeat | 116.194837839 s | 32,515,813 | 7,495,768 | 195.67 billion |
+
+The cached variant averaged **115.67 seconds**, **7.8% faster** than the
+two guarded-boundary runs on this box. It is still about **4.8×** the
+historical Intel 24.087-second interval. Alias breakpoint collection and
+roughly 32 million nested-page faults per transfer are the largest remaining
+opportunities visible in this profile.
