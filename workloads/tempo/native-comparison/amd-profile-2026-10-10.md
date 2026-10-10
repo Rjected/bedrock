@@ -764,3 +764,37 @@ The 1.07-second difference is within the observed run-to-run variation. The
 scanner remains isolated. This test also bounds its likely impact: optimizing
 the byte scan alone does not address the approximately 33 million transfer
 phase execute faults or 360 billion VM-entry preparation cycles.
+
+### Guard hazardous page-boundary entries
+
+Several hot code pages have no hazardous opcode wholly inside the page, but
+end in a REP prefix or partial `0F` opcode. The global counter path rejected
+them because the following virtual page could complete a REP string opcode,
+SYSRET, or RDRAND/RDSEED. The new proof adds a hardware execution breakpoint
+at every possible entry into that trailing suffix. It rejects the page if
+those entries exceed the four hardware slots, and the existing alias walk
+still covers every executable virtual mapping. Code writes still revoke the
+proof. The global path can now count through these pages while trapping
+before an uncertain cross-page instruction executes.
+
+On one EPYC 4245P box with HWE 7.0.0-38 and identical guest artifacts, all
+three full Tempo runs passed all transactions:
+
+| Same box, run order | Fair transfer interval | Nested-page faults | Monitor-trap exits | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Guarded boundary entries | 124.300178238 s | 32,517,450 | 7,532,646 | 226.93 billion |
+| Stable branch | 176.986204669 s | 33,121,850 | 10,901,402 | 354.14 billion |
+| Guarded boundary entries repeat | 126.668687370 s | 32,307,997 | 7,491,880 | 238.06 billion |
+
+The candidate's two transfer intervals average **125.48 seconds**, about
+**29% faster** than the same-box stable run. Nested-page faults changed
+little; fewer monitor-trap exits and substantially less VM-entry preparation
+explain the measured gain. The candidate also reached the first fair marker
+at 270.29 and 270.31 host seconds, versus 316.66 for stable.
+
+Local VMX (255) and VM (40) tests passed. On the disposable box, SVM smoke
+and transition checks passed, including new hardware regressions that execute
+`REP MOVSB` and intercept `RDRAND` across a code-page boundary in 7 and 8
+VM exits respectively. The AMD transfer remains about **5.2×** the
+historical Intel 24.087-second interval; the roughly 32 million execute
+faults per transfer are the next major performance target.
