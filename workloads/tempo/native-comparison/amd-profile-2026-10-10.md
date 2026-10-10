@@ -941,3 +941,42 @@ VM-entry preparation cycles. It removed another 0.68–0.92 million faults
 relative to the two three-page runs but added 6–9 billion preparation cycles
 and was slightly slower. The four-page variant remains isolated; three pages
 are the best measured limit for this workload.
+
+A 25-second transfer-phase `perf` sample of the three-page build captured
+2,502 samples with none lost. Its complete 10,000-transfer run passed in
+**92.055585282 seconds**; the interval had **24,699,672** nested-page
+faults and **143.68 billion** VM-entry preparation cycles. The sample put
+**24.99%** of cycles in `svm_run_guest`, **9.80%** in `page_hazards_memo`,
+**6.21%** in `slice_contains`, **3.36%** in `prepare_global`, and **2.83%**
+in `collect_page_breakpoints`. The latter fell from 12.10% in the earlier
+fast-branch profile, confirming that cached singleton composition removed
+the expensive repeated alias walk. The profile and timing snapshots are
+saved under the same ignored evidence directory. Remaining software work is
+concentrated in hazard lookup and membership checks; roughly 25 million
+nested-page faults still dominate the exit pattern.
+
+### Index the guarded table set
+
+The three-page profile spent 6.21% of host CPU samples in slice membership
+checks, chiefly while the global planner checked whether a code page was one
+of roughly 1,024 guarded page-table frames. An exact, open-addressed index
+of the active guarded tree now replaces that linear scan. It is built once
+after a complete guarded-tree installation and invalidated before rebuild or
+teardown; while unavailable, lookup uses the original exact scan. A unit
+test covers a hash collision and fallback during rebuild. The 256 VMX and
+40 VM library tests, box SVM smoke and transition suite, and both full Tempo
+runs passed.
+
+| Same EPYC 4245P box | Fair 10,000-transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Three-page build, unprofiled | 92.269159825 s | 25,166,260 | 142.37 billion |
+| Three-page build, unprofiled repeat | 91.286394400 s | 24,926,763 | 140.19 billion |
+| Indexed guarded tables | 88.547379967 s | 24,992,535 | 129.46 billion |
+| Indexed guarded tables repeat | 88.925999722 s | 25,022,687 | 130.07 billion |
+
+The indexed variant averaged **88.74 seconds**, about **3.3% faster** than
+the preceding three-page pair. Fault counts were similar, while VM-entry
+preparation fell about 11 billion cycles. All four runs completed and passed
+the same guest workload on the same box. Logs and marker snapshots are under
+ignored `target/boxctl-evidence/amd-cached-multipage-1010/`. The AMD interval
+is still about **3.7×** the historical Intel 24.087-second result.
