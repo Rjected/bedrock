@@ -218,5 +218,17 @@ identified the same address offset (`0x48a`) as **`REP STOSB` (`f3 aa`)**:
 had that exact RIP and opcode. Its fair-marker interval was 123.717 host
 seconds, and the command again reported 100 successful transfers. The
 repeat-batch planner already recognizes this instruction; the problem is
-that it often falls back to scalar execution. A page-bounded destination
-proof is now being tested in a separate box.
+that it often falls back to scalar execution.
+
+A candidate limited each `REP STOSB`/`REP MOVS*` batch to the current
+destination page. This avoids rejecting a safe prefix just because the
+following destination page is unmapped. The focused mock test used an
+unmapped next page, all 241 library tests passed, and the box SVM smoke
+test passed. In the complete 100-transfer workload, however, the candidate
+took **151.477 host seconds**, with 29.931 million exits including 28.295
+million monitor-trap exits. It did not improve the pushed build's 127.304
+seconds and 28.048 million exits, so it was not merged. A separate partial
+diagnostic run observed `REP STOSB` with a mapped current destination and
+unmapped next page, including cases whose remaining count fit within the
+current page. The next test is identifying the planner condition that rejects
+these batches.
