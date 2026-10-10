@@ -514,18 +514,32 @@ where
         if batch.is_some() && guard.is_none() {
             batch = None;
         }
-        let paired_execute = batch
-            .as_ref()
-            .filter(|batch| batch.global_execution && batch.code_page_count == 2)
-            .map(|batch| {
-                ctx.state_mut()
-                    .ept
-                    .allow_npt_execute_4k(allocator, GuestPhysAddr::new(batch.pages[1]))
-                    .ok_or(VmRunError::ExitHandler(
+        let mut paired_execute: [Option<NptExecuteGuard>; 3] = [None, None, None];
+        if let Some(batch) = batch.as_ref().filter(|batch| batch.global_execution) {
+            for index in 1..batch.code_page_count {
+                let Some(execute) = ctx.state_mut().ept.allow_npt_execute_4k(
+                    allocator,
+                    GuestPhysAddr::new(batch.pages[index]),
+                ) else {
+                    for execute in paired_execute.into_iter().flatten() {
+                        execute.restore(&mut ctx.state_mut().ept, allocator);
+                    }
+                    if let Some(execute) = scalar_next_execute {
+                        execute.restore(&mut ctx.state_mut().ept, allocator);
+                    }
+                    if let Some(execute) = scalar_execute {
+                        execute.restore(&mut ctx.state_mut().ept, allocator);
+                    }
+                    if let Some(guard) = guard {
+                        guard.restore(ctx, allocator);
+                    }
+                    return Err(VmRunError::ExitHandler(
                         super::super::exits::ExitError::Fatal("SVM paired code page is unmapped"),
-                    ))
-            })
-            .transpose()?;
+                    ));
+                };
+                paired_execute[index - 1] = Some(execute);
+            }
+        }
         if Ctx::V::uses_nested_paging() {
             super::super::exits::retain_translation_cache(
                 ctx,
@@ -598,7 +612,7 @@ where
                 force_single_step = true;
             }
         }
-        if let Some(execute) = paired_execute {
+        for execute in paired_execute.into_iter().flatten() {
             execute.restore(&mut ctx.state_mut().ept, allocator);
         }
         if let Some(execute) = scalar_next_execute {
