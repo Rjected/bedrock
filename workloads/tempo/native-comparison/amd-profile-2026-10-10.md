@@ -499,6 +499,8 @@ tests, and the full guest workload passed.
 | Pushed baseline | 212.690508815 s | 64,372,078 | 48,754,449 |
 | Rejected-page guard (discarded) | 231.712092349 s | 66,989,977 | 51,467,969 |
 | Paired-page global batch | **194.128301083 s** | 48,120,595 | 33,455,083 |
+| Three recent pages (discarded) | 199.249994797 s | 44,299,836 | 29,582,422 |
+| Third page only with a guarded memo (discarded) | 205.272250077 s | 47,901,162 | 33,010,146 |
 
 The paired-page change improved elapsed transfer time by **8.7%** and cut
 nested-page faults by **31.4%** against the same-box baseline. The guest again
@@ -506,3 +508,13 @@ reported `TEMPO_TXGEN_PASS`. At **8.1 times** the historical Intel Bedrock
 24.087-second interval, it is progress toward the application target rather
 than parity. Paired and baseline logs plus marker/end JSON snapshots are
 retained under ignored `target/boxctl-evidence/amd-hazardguard-1010/`.
+
+The two three-page variants also completed all 10,000 transfers and passed
+the SVM smoke and transition suite, but neither beat the paired-page build.
+The unrestricted third page cut another 3.87 million nested-page faults;
+VM-entry preparation rose from 415.35 to 455.02 billion cycles, more than
+offsetting that saving. Requiring a write-guarded memo for the third page
+reduced its fault benefit without recovering the entry cost (452.32 billion
+preparation cycles). Both variants remain experimental and were not merged.
+The next optimization needs to lower entry work per attempted code-page set,
+or use a different mechanism to prevent execute faults.
