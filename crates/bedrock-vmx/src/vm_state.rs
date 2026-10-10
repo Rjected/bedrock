@@ -88,6 +88,10 @@ pub(crate) struct SvmGuardScratch {
     pub gate_host_write_count: usize,
     pub gate_host_write_all: bool,
     pub gate_tables: [u64; SVM_TABLE_CAPACITY],
+    /// One-based indices into the active guarded tree. Built only after all
+    /// table pages are installed; an invalid index falls back to a full scan.
+    pub gate_table_index: [u16; SVM_TABLE_INDEX_CAPACITY],
+    pub gate_table_index_valid: bool,
     pub gate_guards: [SvmGuardSaved; SVM_TABLE_CAPACITY],
     pub retained_guards: [SvmGuardSaved; SVM_RETAINED_GUARD_CAPACITY],
     pub retained_guard_count: usize,

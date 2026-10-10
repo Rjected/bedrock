@@ -534,6 +534,53 @@ fn add_translation_child<C: VmContext>(
     Some(())
 }
 
+fn gate_table_contains(guard: &super::super::vm_state::SvmGuardScratch, page: u64) -> bool {
+    if !guard.gate_table_index_valid {
+        return guard.gate_tables[..guard.gate_count].contains(&page);
+    }
+    let index = &guard.gate_table_index;
+    let mask = index.len() - 1;
+    let shift = 64 - index.len().trailing_zeros();
+    let mut slot = ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize;
+    for _ in 0..index.len() {
+        let entry = index[slot];
+        if entry == 0 {
+            return false;
+        }
+        if guard.gate_tables[usize::from(entry - 1)] == page {
+            return true;
+        }
+        slot = (slot + 1) & mask;
+    }
+    // A full table should be impossible at a 50% maximum load. Preserve the
+    // original exact check if an unexpected state nevertheless reaches here.
+    guard.gate_tables[..guard.gate_count].contains(&page)
+}
+
+fn index_gate_tables(guard: &mut super::super::vm_state::SvmGuardScratch) {
+    guard.gate_table_index_valid = false;
+    guard.gate_table_index.fill(0);
+    let mask = guard.gate_table_index.len() - 1;
+    let shift = 64 - guard.gate_table_index.len().trailing_zeros();
+    for index in 0..guard.gate_count {
+        let page = guard.gate_tables[index];
+        let mut slot = ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize;
+        let mut inserted = false;
+        for _ in 0..guard.gate_table_index.len() {
+            if guard.gate_table_index[slot] == 0 {
+                guard.gate_table_index[slot] = (index + 1) as u16;
+                inserted = true;
+                break;
+            }
+            slot = (slot + 1) & mask;
+        }
+        if !inserted {
+            return;
+        }
+    }
+    guard.gate_table_index_valid = true;
+}
+
 fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64]) -> Option<()> {
     let root = ctx
         .state()
@@ -730,6 +777,7 @@ fn restore_global_table_guards<C: VmContext, A: CowAllocator<C::CowPage>>(
     let guard = &mut ctx.state_mut().svm_guard;
     guard.retained_guard_count = 0;
     guard.gate_count = 0;
+    guard.gate_table_index_valid = false;
     guard.gate_ready = false;
     guard.gate_dirty = false;
     guard.gate_links_untrusted = true;
@@ -746,6 +794,7 @@ fn retained_guard_for(guard: &super::super::vm_state::SvmGuardScratch, page: u64
 fn forget_active_global_tree<C: VmContext>(ctx: &mut C) {
     let guard = &mut ctx.state_mut().svm_guard;
     guard.gate_count = 0;
+    guard.gate_table_index_valid = false;
     guard.gate_ready = false;
     guard.gate_dirty = false;
     guard.gate_links_untrusted = true;
@@ -1153,6 +1202,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         return;
     }
     let count = ctx.state().svm_guard.count;
+    ctx.state_mut().svm_guard.gate_table_index_valid = false;
     for index in 0..count {
         let page = ctx.state().svm_guard.tables[index];
         let gpa = GuestPhysAddr::new(page);
@@ -1209,6 +1259,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         guard.gate_upper_edges[index] = guard.upper_edges[index];
     }
     guard.gate_count = count;
+    index_gate_tables(guard);
     guard.gate_root = root;
     guard.gate_mapping_generation = mapping_generation;
     guard.retained_mapping_generation = mapping_generation;
@@ -2017,7 +2068,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         || !ctx.state().svm_guard.gate_ready
         || ctx.state().svm_guard.gate_dirty
         || (!trusted && !allow_unsafe)
-        || ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count].contains(&page)
+        || gate_table_contains(&ctx.state().svm_guard, page)
         || ctx.state().mtf_enabled
         || ctx.state().vmcs.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
         || ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0
@@ -2108,8 +2159,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
                 continue;
             };
             if batch.pages[..batch.code_page_count].contains(&previous)
-                || ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
-                    .contains(&previous)
+                || gate_table_contains(&ctx.state().svm_guard, previous)
                 || ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(previous))
             {
                 continue;
@@ -3918,6 +3968,31 @@ impl BatchGuard {
 mod tests {
     use super::*;
     use crate::tests::MockVmContext;
+
+    #[test]
+    fn guarded_table_index_handles_collisions_and_falls_back_while_rebuilding() {
+        let mut ctx = MockVmContext::new();
+        let guard = &mut ctx.state_mut().svm_guard;
+        let first = 0x1000u64;
+        let slot = |page: u64| {
+            let shift = 64 - guard.gate_table_index.len().trailing_zeros();
+            ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize
+        };
+        let collision = (2..8192).map(|n| n * 4096)
+            .find(|&page| slot(page) == slot(first)).unwrap();
+        guard.gate_tables[..3].copy_from_slice(&[first, collision, 0x3000]);
+        guard.gate_count = 3;
+        index_gate_tables(guard);
+        assert!(guard.gate_table_index_valid);
+        for page in [first, collision, 0x3000] {
+            assert!(gate_table_contains(guard, page));
+        }
+        assert!(!gate_table_contains(guard, 0x4000));
+        guard.gate_table_index_valid = false;
+        guard.gate_tables[1] = 0x5000;
+        assert!(gate_table_contains(guard, 0x5000));
+        assert!(!gate_table_contains(guard, collision));
+    }
 
     #[test]
     fn naturally_trapped_endpoints_exclude_bitmap_dependent_msrs_and_rng() {
