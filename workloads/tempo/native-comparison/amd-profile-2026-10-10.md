@@ -679,3 +679,27 @@ The next experiment should explain why hot self-pair pages repeatedly fall
 back to scalar execution and then reduce that fallback with a proof that
 covers every executable alias and branch entry. Exact-byte and cross-page
 safety checks remain necessary.
+
+### Follow-up: same-page global planning
+
+A diagnostic-only breakdown for the hottest self-pair pages found that
+`0x194f000` had 947,200 accepted global plans and 947,152 calls rejected
+because the page was untrusted before its scalar execute fault was selected.
+Page `0x1000000` had 1,365,980 accepted plans; page `0x12ff000` instead had
+1,405,037 zero-hazard promotions rejected by its cross-page boundary rule.
+All counts are transfer-phase counts from a 4245P HWE box; the diagnostic run
+passed all 10,000 transfers.
+
+The run loop already reselected an untrusted code page after a two-page
+global batch. Extending that rule to one-page batches passed local VMX and VM
+tests, SVM smoke and REP/RF transitions, and the full Tempo workload. It did
+not improve the application test on the same box:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Retain scalar page after one-page global batch | 170.319390307 s | 31,496,323 | 336.59 billion |
+| Stable branch | 166.647476747 s | 31,334,765 | 332.29 billion |
+
+This candidate remains isolated. The diagnostic counts show a common
+replanning pattern, but retaining the scalar page did not reduce the
+application's total fault or cycle count in this A/B run.
