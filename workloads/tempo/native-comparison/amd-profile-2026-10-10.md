@@ -299,3 +299,14 @@ guarded-table hash-index candidate regressed the 100-transfer workload
 before the RF and region fixes; the current profile motivates revisiting
 that lookup with a focused benchmark, but does not establish a faster
 replacement yet.
+
+We retested that guarded-table hash index on top of the RF-aware,
+region-first build. All 243 library tests passed, along with box-only SVM
+smoke and REP/RF tests. The exact 100-transfer workload finished with 100
+successful and included transfers, but whole-guest wall time increased from
+**755.092 to 775.458 seconds**. VM-entry preparation rose from 1.956 to
+2.031 trillion cycles; monitor-trap exits remained near 62 million. This
+run accidentally omitted the `BEDROCK_FAIR_TIMING=1` environment flag
+required by the box's CLI binary, so it has no fair transfer markers and
+cannot establish the index's transfer-only effect. The full-run regression
+and earlier 100-transfer regression do not justify merging the index.
