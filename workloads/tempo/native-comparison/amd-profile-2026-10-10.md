@@ -828,3 +828,24 @@ two guarded-boundary runs on this box. It is still about **4.8×** the
 historical Intel 24.087-second interval. Alias breakpoint collection and
 roughly 32 million nested-page faults per transfer are the largest remaining
 opportunities visible in this profile.
+
+### Recheck three-page execution after the boundary changes
+
+The earlier three-page global counter variant was rebased onto the cached
+boundary-proof build. It reused independently proved executable aliases of
+each page, selected up to three hazardous code pages when their breakpoints
+fit the four hardware slots, and enabled/restored NPT execute permission
+for every selected page. A focused unit test includes a trailing REP prefix
+on the third page. Local VMX (255) and VM (40) tests, box SVM smoke and
+transition tests, and both full Tempo runs passed.
+
+| Same-box variant | Fair transfer interval | Nested-page faults | Monitor-trap exits | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Three-page alias-proof composition | 127.526130457 s | 25,223,935 | 7,596,236 | 279.10 billion |
+| Current shared branch | 114.800815318 s | 31,980,690 | 7,474,027 | 194.82 billion |
+
+The additional executable pages removed **6.76 million** execute faults,
+but preparation added **84.28 billion cycles** and the transfer regressed by
+**12.73 seconds**. The candidate remains isolated. Reducing page faults by
+expanding a guarded set does not pay off while its per-entry proof and
+permission work is this expensive.
