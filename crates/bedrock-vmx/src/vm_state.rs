@@ -19,8 +19,16 @@ type ExitStatsBox = HeapBox<AllExitStats>;
 pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
 pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
 pub(crate) const SVM_ALIAS_EDGE_CAPACITY: usize = 2048;
+pub(crate) const SVM_ALIAS_WALK_CAPACITY: usize = 2048;
+pub(crate) const SVM_ALIAS_PROOF_CAPACITY: usize = 2048;
+pub(crate) const SVM_ALIAS_PROOF_WAYS: usize = 4;
+pub(crate) const SVM_ALIAS_PROOF_PAGE_CAPACITY: usize = 4;
+pub(crate) const SVM_LEAF_PAGE_INDEX_CAPACITY: usize = 1024;
+pub(crate) const SVM_LEAF_SNAPSHOT_CAPACITY: usize = 4;
 // Tempo's send-phase address space can exceed 512 reachable page-table pages.
 pub(crate) const SVM_TABLE_CAPACITY: usize = 1024;
+/// Guards retained for page tables belonging to recently inactive CR3 roots.
+pub(crate) const SVM_RETAINED_GUARD_CAPACITY: usize = 4096;
 pub(crate) const SVM_TABLE_WORDS: usize = SVM_TABLE_CAPACITY / 64;
 pub(crate) const SVM_TABLE_INDEX_CAPACITY: usize = SVM_TABLE_CAPACITY * 2;
 
@@ -57,9 +65,13 @@ pub(crate) struct SvmGuardScratch {
     pub translation_cursor: usize,
     // Code pages, up to four entry-walk tables, and the guarded tree.
     pub saved: [SvmGuardSaved; SVM_TABLE_CAPACITY + SVM_CODE_PAGE_CAPACITY + 4],
-    pub aliases: [SvmAliasWalk; 512],
+    pub aliases: [SvmAliasWalk; SVM_ALIAS_WALK_CAPACITY],
     pub alias_proof: SvmAliasProof,
-    pub alias_proofs: [SvmAliasProof; 32],
+    pub alias_proofs: [SvmAliasProof; SVM_ALIAS_PROOF_CAPACITY],
+    // Exact physical-page set used while checking a released leaf table.
+    pub leaf_pages: [u64; SVM_LEAF_PAGE_INDEX_CAPACITY],
+    pub leaf_snapshots: [SvmLeafSnapshot; SVM_LEAF_SNAPSHOT_CAPACITY],
+    pub leaf_snapshot_overflow: bool,
     pub alias_cursor: usize,
     pub alias_last_hit: usize,
     pub region_proofs: [SvmRegionProof; 32],
@@ -72,6 +84,9 @@ pub(crate) struct SvmGuardScratch {
     pub gate_host_write_all: bool,
     pub gate_tables: [u64; SVM_TABLE_CAPACITY],
     pub gate_guards: [SvmGuardSaved; SVM_TABLE_CAPACITY],
+    pub retained_guards: [SvmGuardSaved; SVM_RETAINED_GUARD_CAPACITY],
+    pub retained_guard_count: usize,
+    pub retained_mapping_generation: u64,
     pub gate_levels: [u8; SVM_TABLE_CAPACITY],
     pub gate_children: [[u64; SVM_TABLE_WORDS]; SVM_TABLE_CAPACITY],
     pub gate_upper_edges: [SvmAliasEdge; SVM_ALIAS_EDGE_CAPACITY],
@@ -172,13 +187,21 @@ pub(crate) struct SvmRegionProof {
 #[derive(Clone, Copy)]
 pub(crate) struct SvmAliasProof {
     pub valid: bool,
+    pub key_hash: u64,
     pub root: u64,
-    pub pages: [u64; SVM_CODE_PAGE_CAPACITY],
-    pub offsets: [[u16; 4]; SVM_CODE_PAGE_CAPACITY],
-    pub counts: [usize; SVM_CODE_PAGE_CAPACITY],
+    pub pages: [u64; SVM_ALIAS_PROOF_PAGE_CAPACITY],
+    pub offsets: [[u16; 4]; SVM_ALIAS_PROOF_PAGE_CAPACITY],
+    pub counts: [usize; SVM_ALIAS_PROOF_PAGE_CAPACITY],
     pub page_count: usize,
     pub breakpoints: [u64; 4],
     pub breakpoint_count: usize,
+}
+
+/// Leaf PTEs before a guarded page is released for one guest store.
+pub(crate) struct SvmLeafSnapshot {
+    pub page: u64,
+    pub valid: bool,
+    pub bytes: [u8; 4096],
 }
 
 #[derive(Clone, Copy)]
@@ -989,6 +1012,14 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     /// Recent virtual code pages; immutable hazard scans live in `svm_guard`.
     pub svm_recent_pages: [u64; SVM_RECENT_PAGE_CAPACITY],
     pub svm_gate_scalar_page: Option<u64>,
+    /// A page-table store whose write guard was released but has not retired.
+    pub svm_gate_pending_write: bool,
+    /// The root caller has made its shared guest-RAM mapping read-only before
+    /// this RUN. Guest writes and kernel-mediated host writes remain tracked.
+    pub svm_host_memory_stable: bool,
+    pub svm_gate_replay_start: Option<u64>,
+    /// Decoded next RIP for a store that can be verified by one scalar step.
+    pub svm_gate_replay_rip: Option<u64>,
     pub(crate) svm_guard: VmallocBox<SvmGuardScratch>,
     /// Emulated TSC: `last_instruction_count + tsc_offset`.
     pub emulated_tsc: u64,
@@ -1243,6 +1274,10 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
             svm_gate_scalar_page: None,
+            svm_gate_pending_write: false,
+            svm_host_memory_stable: false,
+            svm_gate_replay_start: None,
+            svm_gate_replay_rip: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
@@ -2021,6 +2056,10 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
             svm_gate_scalar_page: None,
+            svm_gate_pending_write: false,
+            svm_host_memory_stable: false,
+            svm_gate_replay_start: None,
+            svm_gate_replay_rip: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0,
             emulated_tsc: 0,
@@ -2239,6 +2278,10 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_rejected_cursor: 0,
             svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
             svm_gate_scalar_page: None,
+            svm_gate_pending_write: false,
+            svm_host_memory_stable: false,
+            svm_gate_replay_start: None,
+            svm_gate_replay_rip: None,
             svm_guard: box_svm_guard(),
             last_instruction_count: 0, // Child's counter starts from 0
             emulated_tsc: parent_state.emulated_tsc,

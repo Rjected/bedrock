@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     regs.gprs.rsp = 0x8000;
     vm.set_regs(&regs)?;
     vm.set_stop_at_tsc(Some(2))?;
+    vm.seal_memory()?;
     let mut stopped = false;
     loop {
         let exit = vm.run()?;
@@ -55,6 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         break;
     }
     assert!(stopped, "missed the exact instruction deadline");
+    vm.memory_mut()?[0x2000] = 0x5a;
+    assert_eq!(vm.memory()?[0x2000], 0x5a);
     // Two children write the same shared page. Each must see its own value,
     // and the parent's page must remain zero.
     let mut parent = Vm::create(2 * 1024 * 1024)?;

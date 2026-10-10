@@ -78,10 +78,15 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
         if qual.write && super::svm_batch::release_global_table_write(ctx, allocator, page) {
-            let scalar_page = super::svm::InstructionWindow::read(ctx)
-                .ok()
-                .map(|window| window.physical.as_u64() & !4095);
+            let window = super::svm::InstructionWindow::read(ctx).ok();
+            let scalar_page = window.as_ref().map(|window| window.physical.as_u64() & !4095);
+            let replay_rip = window.as_ref()
+                .and_then(|window| super::svm_batch::scalar_table_store_next_rip(ctx, window));
             ctx.state_mut().svm_gate_scalar_page = scalar_page;
+            ctx.state_mut().svm_gate_pending_write = true;
+            ctx.state_mut().svm_gate_replay_start =
+                ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok();
+            ctx.state_mut().svm_gate_replay_rip = replay_rip;
             return ExitHandlerResult::Continue;
         }
         if qual.write && super::svm_batch::release_recurrent_code_write(ctx, allocator, page) {

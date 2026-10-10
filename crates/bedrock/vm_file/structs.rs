@@ -24,6 +24,11 @@ pub(crate) const BEDROCK_VM_SET_REGS: u32 = _IOW::<BedrockRegs>(BEDROCK_IOC_MAGI
 /// Ioctl number for RUN command - run the VM until exit.
 pub(crate) const BEDROCK_VM_RUN: u32 = _IOR::<BedrockVmExit>(BEDROCK_IOC_MAGIC, 3);
 
+/// RUN variant for callers that have made the root VM's userspace RAM mapping
+/// read-only since its previous run. Kernel-side writes remain tracked.
+pub(crate) const BEDROCK_VM_RUN_STABLE_MEMORY: u32 =
+    _IOR::<BedrockVmExit>(BEDROCK_IOC_MAGIC, 17);
+
 /// Ioctl number for SET_RDRAND_CONFIG command - configure RDRAND emulation.
 pub(crate) const BEDROCK_VM_SET_RDRAND_CONFIG: u32 =
     _IOW::<BedrockRdrandConfig>(BEDROCK_IOC_MAGIC, 4);

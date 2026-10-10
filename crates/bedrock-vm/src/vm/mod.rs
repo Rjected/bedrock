@@ -60,6 +60,7 @@ pub struct Vm {
     memory_ptr: Option<NonNull<u8>>,
     /// 0 for forked VMs.
     memory_size: usize,
+    memory_sealed: bool,
     /// `None` while the event stream is disabled.
     event_ptr: Option<NonNull<u8>>,
     event_mmap_offset: libc::off_t,
@@ -179,6 +180,7 @@ impl Vm {
             fd,
             memory_ptr,
             memory_size,
+            memory_sealed: false,
             event_ptr: None,
             event_mmap_offset,
             feedback_buffer_ptrs: Vec::new(),
@@ -217,6 +219,7 @@ impl Vm {
             fd,
             memory_ptr: None,
             memory_size: 0,
+            memory_sealed: false,
             event_ptr: None,
             event_mmap_offset,
             feedback_buffer_ptrs: Vec::new(),
@@ -260,12 +263,39 @@ impl Vm {
     /// Mutable guest memory; errors on forked VMs.
     pub fn memory_mut(&mut self) -> io::Result<&mut [u8]> {
         match self.memory_ptr {
-            Some(ptr) => Ok(unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), self.memory_size) }),
+            Some(ptr) => {
+                if self.memory_sealed {
+                    let ret = unsafe { libc::mprotect(ptr.as_ptr().cast(), self.memory_size, libc::PROT_READ | libc::PROT_WRITE) };
+                    if ret != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    self.memory_sealed = false;
+                }
+                Ok(unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), self.memory_size) })
+            }
             None => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "forked VMs do not have direct memory access",
             )),
         }
+    }
+
+    /// Make the root VM's userspace guest-RAM mapping read-only. While sealed,
+    /// RUN can retain guarded code and page-table proofs across userspace
+    /// exits. `memory_mut()` restores write access and the conservative RUN.
+    pub fn seal_memory(&mut self) -> io::Result<()> {
+        let ptr = self.memory_ptr.ok_or_else(|| io::Error::new(
+            io::ErrorKind::Unsupported,
+            "forked VMs have no direct memory mapping",
+        ))?;
+        if !self.memory_sealed {
+            let ret = unsafe { libc::mprotect(ptr.as_ptr().cast(), self.memory_size, libc::PROT_READ) };
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.memory_sealed = true;
+        }
+        Ok(())
     }
 
     /// Guest memory size; 0 for forked VMs.
@@ -406,7 +436,7 @@ impl Vm {
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
-                BEDROCK_VM_RUN as libc::c_ulong,
+                if self.memory_sealed { BEDROCK_VM_RUN_STABLE_MEMORY } else { BEDROCK_VM_RUN } as libc::c_ulong,
                 &mut exit as *mut VmExit,
             )
         };

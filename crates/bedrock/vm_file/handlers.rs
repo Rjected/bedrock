@@ -137,7 +137,7 @@ use super::super::vmcs::RealVmcs;
 ///
 /// Before each entry the page pool is refilled in sleepable context; a
 /// PoolExhausted exit drops back here to refill and re-enter.
-pub(crate) fn handle_run<F: VmFileOps>(vm_file: &mut F, arg: usize) -> isize
+pub(crate) fn handle_run<F: VmFileOps>(vm_file: &mut F, arg: usize, stable_memory: bool) -> isize
 where
     F::Vm: VmContext<Vmcs = RealVmcs>,
     for<'a> KernelFrameAllocator<'a>: CowAllocator<<F::Vm as VmContext>::CowPage>,
@@ -191,6 +191,7 @@ where
 
         let _preempt_guard = PreemptionGuard::new();
         let (vm, pool) = vm_file.vm_and_pool();
+        vm.state_mut().svm_host_memory_stable = stable_memory;
 
         if first_iteration {
             // Clear only on first entry (userspace has drained the previous

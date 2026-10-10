@@ -2,6 +2,15 @@
 
 //! VM run loop and GPR synchronization.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static PENDING_MATCH_RIP: AtomicU64 = AtomicU64::new(0);
+static PENDING_REPLAY: AtomicU64 = AtomicU64::new(0);
+static PENDING_SOFTWARE: AtomicU64 = AtomicU64::new(0);
+static PENDING_FINISHED: AtomicU64 = AtomicU64::new(0);
+static PENDING_REARM_AFTER_EXIT: AtomicU64 = AtomicU64::new(0);
+static SCALAR_LEFT: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 #[cfg(feature = "cargo")]
@@ -286,7 +295,7 @@ where
     }
 
     let mut force_single_step = false;
-    if Ctx::V::uses_nested_paging() {
+    if Ctx::V::uses_nested_paging() && !ctx.state().svm_host_memory_stable {
         // Userspace may have changed RAM between RUN calls.
         ctx.state_mut().svm_guard.valid = false;
         let mut guarded_code = false;
@@ -303,6 +312,9 @@ where
         }
         ctx.state_mut().ept.invalidate_all_npt_code(allocator);
         ctx.state_mut().svm_gate_scalar_page = None;
+        ctx.state_mut().svm_gate_pending_write = false;
+        ctx.state_mut().svm_gate_replay_start = None;
+        ctx.state_mut().svm_gate_replay_rip = None;
         ctx.state_mut().svm_guard.gate_dirty = true;
         ctx.state_mut().svm_guard.gate_links_untrusted = true;
         ctx.state_mut().svm_guard.gate_host_write_count = 0;
@@ -322,6 +334,9 @@ where
                     let page = ctx.state().svm_guard.gate_host_writes[index];
                     if ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
                         .contains(&page)
+                        || ctx.state().svm_guard.retained_guards
+                            [..ctx.state().svm_guard.retained_guard_count]
+                            .iter().any(|saved| saved.valid && saved.guest == page)
                     {
                         ctx.state_mut().svm_guard.gate_dirty = true;
                         ctx.state_mut().svm_guard.gate_links_untrusted = true;
@@ -396,9 +411,29 @@ where
                         .is_some_and(|next| next.as_u64() & !4095 == page);
                 if !split_fetch {
                     ctx.state_mut().svm_gate_scalar_page = None;
+                    SCALAR_LEFT.fetch_add(1, Ordering::Relaxed);
                     scalar_page = None;
                 }
             }
+        }
+        let replay_rip_matches = ctx.state().svm_gate_replay_start.is_some_and(|start| {
+                ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(start)
+            });
+        if ctx.state().svm_gate_pending_write && replay_rip_matches {
+            PENDING_MATCH_RIP.fetch_add(1, Ordering::Relaxed);
+        }
+        let replay_pending = ctx.state().svm_gate_pending_write
+            && replay_rip_matches
+            && ctx.state().vmcs.read32(VmcsField32::VmEntryInterruptionInfo)
+                .ok().is_some_and(|info| info & (1 << 31) == 0);
+        if replay_pending {
+            PENDING_REPLAY.fetch_add(1, Ordering::Relaxed);
+            if software_exit { PENDING_SOFTWARE.fetch_add(1, Ordering::Relaxed); }
+        }
+        let replay_expected = ctx.state().svm_gate_replay_rip;
+        let replay_single_step = replay_pending && !software_exit;
+        if replay_single_step {
+            force_single_step = true;
         }
         let mut batch = if Ctx::V::uses_nested_paging()
             && !software_exit
@@ -501,6 +536,30 @@ where
         };
         let post_guest_tsc = rdtsc();
         ctx.state_mut().exit_stats.guest_cycles += post_guest_tsc.saturating_sub(pre_guest_tsc);
+        if replay_single_step
+            && run_result.is_ok()
+            && runner.completed_instructions() == Some(1)
+            && ctx.state().vmcs.read32(VmcsField32::VmExitReason)
+                .ok().is_some_and(|reason| reason & 0xffff == 37)
+            && replay_expected.is_none_or(|rip| {
+                ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(rip)
+            })
+        {
+            PENDING_FINISHED.fetch_add(1, Ordering::Relaxed);
+            ctx.state_mut().svm_gate_pending_write = false;
+            ctx.state_mut().svm_gate_replay_start = None;
+            ctx.state_mut().svm_gate_replay_rip = None;
+        }
+        // The write guard was released for exactly one VM entry. Even if an
+        // interrupt or a fault prevented the store from retiring, rearming it
+        // is safe: a later retry will fault on the guard again. REP stores may
+        // fault on subsequent iterations, which remains conservative.
+        if !software_exit && run_result.is_ok() && ctx.state().svm_gate_pending_write {
+            PENDING_REARM_AFTER_EXIT.fetch_add(1, Ordering::Relaxed);
+            ctx.state_mut().svm_gate_pending_write = false;
+            ctx.state_mut().svm_gate_replay_start = None;
+            ctx.state_mut().svm_gate_replay_rip = None;
+        }
         if run_result.is_ok()
             && batch.as_ref().is_some_and(|batch| batch.global_execution)
             && ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)

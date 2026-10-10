@@ -446,3 +446,33 @@ the single-root guarded tree and clears alias proofs, so safe reuse across
 CR3 changes is the next performance problem. Any retained proof must remain
 protected against writes to its old root's page tables while another root
 is active.
+
+## Completed 10,000-transfer AMD comparison
+
+The guarded-root and alias-proof changes above, combined with a 2,048-entry
+alias-walk workspace, completed the exact 10,000-transfer Tempo guest on the
+AMD EPYC 4245P box. The first `FAIR_TIMING` marker was at 335.115092622 host
+seconds and the second at 549.267251625, giving **214.152159003 seconds** for
+the matched transfer phase. The guest emitted `TEMPO_TXGEN_PASS: all
+transactions admitted and included`. The historical Intel run took **24.087
+seconds** for the same workload, so AMD is currently **8.9 times slower** on
+this comparison. The box log is preserved in ignored
+`target/boxctl-evidence/box-9ecc6ad0/alias2048/alias2048-10k.log` in the
+experimental worktree.
+
+The transfer phase produced 64,535,413 VM exits, including 49,382,764
+nested-page faults (76.5%) and 11,710,235 monitor-trap exits (18.1%). In a
+20-second transfer sample, the alias collector received 4,563,687 calls,
+served 4,464,769 from its proof cache, and performed only 12,755 full walks,
+all successful. Collector work fell to 4.23% of sampled host cycles. The
+2,048-entry walker matters: with a 512-entry walker, over a million full
+walks per 20 seconds were repeatedly failing before they could be cached.
+
+Nested-page execute faults now dominate. A bounded transfer-phase sample
+counted about 3.92 million execute faults and 9,000 write faults in 20
+seconds. About 2.81 million execute faults were on a page other than the
+currently selected code page. Global-safe scanning rejected about 3.03
+million candidates for code-byte hazards. The next speed improvement needs
+to reduce these code-page transition faults while preserving deterministic
+delivery at unsafe instruction boundaries. The verified changes here meet
+the workload-completion target, but do not yet meet Intel's timing.

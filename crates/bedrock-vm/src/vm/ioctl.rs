@@ -57,6 +57,8 @@ pub(crate) const BEDROCK_CREATE_ROOT_VM: u64 =
 pub(crate) const BEDROCK_VM_GET_REGS: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 1, size_of::<Regs>());
 pub(crate) const BEDROCK_VM_SET_REGS: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 2, size_of::<Regs>());
 pub(crate) const BEDROCK_VM_RUN: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 3, size_of::<VmExit>());
+pub(crate) const BEDROCK_VM_RUN_STABLE_MEMORY: u64 =
+    ioctl_ior(BEDROCK_IOC_MAGIC, 17, size_of::<VmExit>());
 pub(crate) const BEDROCK_VM_SET_RDRAND_CONFIG: u64 =
     ioctl_iow(BEDROCK_IOC_MAGIC, 4, size_of::<RdrandConfig>());
 pub(crate) const BEDROCK_VM_SET_RDRAND_VALUE: u64 =

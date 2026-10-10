@@ -369,7 +369,8 @@ unsafe extern "C" fn bedrock_vm_ioctl(
     match cmd {
         BEDROCK_VM_GET_REGS => handlers::handle_get_regs(vm_file, arg),
         BEDROCK_VM_SET_REGS => handlers::handle_set_regs(vm_file, arg),
-        BEDROCK_VM_RUN => handlers::handle_run(vm_file, arg),
+        BEDROCK_VM_RUN => handlers::handle_run(vm_file, arg, false),
+        BEDROCK_VM_RUN_STABLE_MEMORY => handlers::handle_run(vm_file, arg, true),
         BEDROCK_VM_SET_RDRAND_CONFIG => handlers::handle_set_rdrand_config(vm_file, arg),
         BEDROCK_VM_SET_RDRAND_VALUE => handlers::handle_set_rdrand_value(vm_file, arg),
         BEDROCK_VM_SET_PREEMPT_CONFIG => handlers::handle_set_preempt_config(vm_file, arg),

@@ -434,6 +434,10 @@ fn run() -> io::Result<()> {
         );
     }
 
+    if vm.is_root() {
+        vm.seal_memory().map_err(io_error)?;
+    }
+
     // Receives files the guest stores to the host.
     let mut file_writer = FileWriter::new();
 
