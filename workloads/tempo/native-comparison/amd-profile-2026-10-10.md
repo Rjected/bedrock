@@ -885,3 +885,21 @@ with **24,965,933** nested-page faults, **7,497,750** monitor-trap exits, and
 than the same-box shared build at 114.80 seconds. Proof-cache eviction is
 therefore part of the cost, but avoiding it alone does not make the wider
 execution guard profitable. This variant remains isolated too.
+
+### Profile the current fast branch
+
+The current shared build was reinstalled on the same 4245P box and passed
+SVM smoke, transitions, and the full Tempo transfer. With a 25-second
+`perf` sample taken during the transfer, its fair interval was
+**121.634595021 seconds**; sampling overhead means the earlier unprofiled
+**114.800815318-second** run remains the timing baseline. The profiled
+interval had 33,309,597 nested-page faults, 7,583,576 monitor-trap exits,
+and 211.02 billion VM-entry overhead cycles. No samples were lost.
+
+The host CPU sample attributed **22.89%** to `svm_run_guest`, **12.10%** to
+`collect_page_breakpoints`, **6.64%** to `page_hazards_memo`, and **6.50%**
+to `__pi_memcpy`. Raw data, `perf report`, logs, and marker statistics are
+under ignored `target/boxctl-evidence/amd-stable-profile-1010/`. The
+breakpoint collector remains the largest software preparation hotspot in
+the fast branch. The three-page tests above show that reducing faults alone
+does not help when alias-proof work grows on each entry.
