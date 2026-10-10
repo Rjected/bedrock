@@ -431,3 +431,18 @@ rejections and **zero** dirty-gate collector calls. A host profile put
 completed report appeared during roughly two host minutes after marker 1,
 so this experimental mode has not met the workload target and is not merged.
 The next diagnostic counts why the global guarded tree is unavailable.
+
+That diagnostic found no tree failure in the first 20 seconds of the exact
+10,000-transfer phase: **zero** workspace-capacity failures, tree-scan
+failures, or NPT write-guard installation errors, with a maximum of **518**
+reachable table pages against the 1,024-page capacity. All **499** full
+tree refreshes succeeded. A more precise split showed **469** refreshes
+were clean CR3 switches and **50** followed dirty page-table state; none
+started from an uninitialized gate. The alias collector still made about
+**1.316 million full walks** and found **265,392** cached proofs in that
+window. Thus increasing the table capacity cannot address this particular
+10,000-transfer stall. Each clean address-space switch currently replaces
+the single-root guarded tree and clears alias proofs, so safe reuse across
+CR3 changes is the next performance problem. Any retained proof must remain
+protected against writes to its old root's page tables while another root
+is active.
