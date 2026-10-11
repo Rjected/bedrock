@@ -1546,3 +1546,30 @@ existing `svm_bench` control-flow acceleration threshold on that 4244P (about
 20,000 exits where the test expects fewer than 100). Its other initial SVM
 checks passed. That host was not used for the Tempo comparison; the baseline
 failure log is saved with the guard-32 evidence for follow-up.
+
+### Retain 64 active code write guards
+
+Doubling the active guard limit again, from 32 to 64 with eight extra slots
+for very hot rejected pages, passed the 260 VMX tests, 40 VM library tests,
+the EPYC 4245P box suite, and two full 10,000-transfer Tempo runs. On the
+same box used for the 32-guard comparison above, an interleaved A/B/A/B run
+measured:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| 64 guards | 73.148 s | 22,487,147 | 93.69 billion |
+| 32 guards | 75.524 s | 22,703,628 | 99.29 billion |
+| 64 guards, repeat | 74.185 s | 22,316,345 | 98.22 billion |
+| 32 guards, repeat | 74.040 s | 22,055,668 | 97.84 billion |
+
+The 64-guard pair averaged **73.667 s** versus **74.782 s** for the 32-guard
+controls, about **1.5% faster**. The first pair gained 2.38 s; the second
+candidate was 0.15 s slower, so the size of the gain is uncertain. Average
+VM-entry preparation fell from 98.57 to 95.96 billion cycles. Both 64-guard
+runs passed all transfers, and their startup-to-first-marker intervals were
+about two seconds shorter than the adjacent 32-guard runs. One quick native
+loop sample showed a transient 50% slowdown; after swapping modules on the
+same box, both 32 and 64 guards returned to about 0.3% overhead. Logs,
+marker snapshots, and the candidate patch are under ignored
+`target/boxctl-evidence/amd-guard64-1011/`. The Tempo interval is still about
+**3.1×** the historical Intel 24.087-second result.
