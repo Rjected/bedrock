@@ -1996,3 +1996,40 @@ Both pairs favored the short read. Mean fair interval fell from **70.741 to
 pairs. The second candidate had more exits yet still used fewer total entry
 preparation cycles. Logs and snapshots are under ignored
 `target/boxctl-evidence/amd-short-window-1011/`.
+
+### Profile the current entry path and test a PMU write shortcut
+
+After the indexed caches and short first read, a 25-second, 99 Hz host
+`perf` sample captured 2,479 samples from the actual `bedrock-cli` process
+during the fair transfer interval, with zero lost samples. That profiled run
+completed all 10,000 transfers in **69.419 s**. `svm_run_guest` remained the
+largest symbol at **32.54%** of samples, followed by breakpoint collection
+at **3.81%**, `__pi_memcpy` at **3.11%**, and code-hazard memo lookup at
+**2.78%**. Within the SVM assembly, `VMRUN` held 26.94% of samples,
+PMU-control reads/writes were visible, and XCR0, debug-register, and guest
+FPU-state switching remained substantial. These are sampled shares, not
+separate contributions to wall time. The report, annotation, and snapshots
+are under ignored `target/boxctl-evidence/amd-current-hot-1011/`.
+
+A candidate skipped the pre-`VMRUN` `IA32_PERF_GLOBAL_CTRL` write when its
+requested value already matched the saved host value, while retaining the
+post-exit host restore. It passed the in-box SVM suite and completed three
+full Tempo runs, including one on the earlier box. Two alternating runs on a
+fresh EPYC 4245P box gave:
+
+| Run order | Variant | Fair interval | VM exits | VM runner and guest cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Conditional entry write | 69.983 s | 29,141,800 | 5,534 |
+| 2 | Unchanged | 69.294 s | 28,668,206 | 5,578 |
+| 3 | Conditional entry write | 68.555 s | 28,619,524 | 5,566 |
+| 4 | Unchanged | 70.305 s | 29,044,184 | 5,560 |
+
+The candidate averaged **69.269 s** versus **69.799 s**, but each pair's
+faster run also had fewer exits, and runner cycles per exit did not improve
+consistently. A host `IA32_PERF_GLOBAL_CTRL` read on CPU 1 after the control
+test returned `0x3f`; the requested counted-guest mask contains only the one
+perf-owned counter bit, so the shortcut cannot fire while the host value is
+`0x3f`. The candidate was reverted. Logs and snapshots are under ignored
+`target/boxctl-evidence/amd-pmu-entry-1011/`. The assembly path still needs
+a larger architectural reduction in per-exit switching or in the number of
+execute-fault transitions.
