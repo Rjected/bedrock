@@ -1474,3 +1474,43 @@ seconds**, slightly slower than the unchanged control mean. The code added
 substantial cache state for no reliable application-level gain, so it was
 reverted. Logs, marker snapshots, and the final candidate patch remain in
 ignored `target/boxctl-evidence/amd-global-plan-cache-1011/`.
+
+### Check code-hazard memo lookup indexing
+
+The code-hazard lookup uses a direct-mapped hint and scans up to 256 resident
+proofs when the hint misses. A four-way hint set passed 260 VMX tests and the
+box suite, then passed all 10,000 transfers in **77.397 s**. The unchanged
+module took **76.537 s** on that same box. This was a regression, so the
+four-way variant was reverted. Its logs and patch are under ignored
+`target/boxctl-evidence/amd-hazard-fourway-1011/`.
+
+A second experiment replaced the full scan with linked hash buckets containing
+every resident proof. Collision and eviction tests, all 260 VMX tests, 40 VM
+library tests, the box suite, and all 10,000 transfers passed. Its fair
+interval was **75.898 s**, bracketed by unchanged runs at **76.537 s** and
+**74.682 s**. The candidate is slower than the two-control mean of **75.610
+s**; the differences are smaller than run-to-run variation. It was reverted.
+Logs, marker snapshots, and the patch are under ignored
+`target/boxctl-evidence/amd-hazard-index-1011/`.
+
+Temporary kernel counters on the unchanged module explained both negative
+results. Of **410 million** code-hazard memo lookups during one complete
+10,000-transfer run, **409.20 million (99.81%)** hit the direct hint; about
+567,000 found a memo by scanning and 230,000 found none. The diagnostic
+workload passed. Logs and dmesg are under ignored
+`target/boxctl-evidence/amd-hazard-lookup-diagnostic-1011/`. The extra
+diagnostic atomics and logging were removed.
+
+The alias-breakpoint collector had a similar shape. In a passing diagnostic
+run, **79.65 million of 80 million calls (99.56%)** reused cached proofs;
+about 351,000 walked page tables. A compact hash-tag array was then tested so
+set misses could reject unrelated large proof records without reading them.
+It passed all 260 VMX tests, the box suite, and all 10,000 transfers. Its fair
+interval was **75.552 s** versus **77.617 s** for the immediately following
+unchanged control. Earlier unchanged controls on this same box were **76.537
+s** and **74.682 s**. The candidate and paired control had nearly identical
+VM-entry preparation cycles (103.05 versus 103.23 billion), while guest cycles
+and nested-page faults varied substantially. There is no evidence that the
+tag lookup caused the timing difference, so it was reverted. Diagnostic logs,
+marker snapshots, and the candidate patch are under ignored
+`target/boxctl-evidence/amd-alias-tag-1011/`.
