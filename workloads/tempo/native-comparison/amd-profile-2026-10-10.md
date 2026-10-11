@@ -2340,3 +2340,72 @@ The candidate had about **1.7%** fewer preparation cycles per exit in
 aggregate but **2.2%** more exits and was **0.65 s slower** in each pair.
 Because it did not improve elapsed time, this change remains unmerged.
 Marker snapshots are under ignored `target/boxctl-evidence/amd-lazy-bloom-1011/`.
+
+### Classify the remaining nested-page faults
+
+An isolated diagnostic build counted fault outcomes, global-safety proof
+reasons, hazard counts, and recent physical fault-page reuse. It passed all
+262 VMX tests, the in-box SVM suite, and three full Tempo runs. The diagnostic
+code was kept out of the shared branch because its atomic counters and page
+history scans perturb timing.
+
+In the third run, subtracting the nearest million-fault log snapshots around
+the fair markers gives approximately **21.0 million** nested-page faults:
+**20.91 million** scalar execute faults, about **66 thousand** guarded
+page-table writes, and **20 thousand** MMIO faults. Every scalar fault in
+that window had a ready, clean translation gate. The global code proof found
+at least one hazardous entry on **20.89 million** of those pages; only about
+**22 thousand** lacked a bounded hazard proof. This confirms the earlier
+scalar-path diagnosis on the current 256-bit-filter branch.
+
+Among those scalar faults, roughly **11.05 million (53%)** involved a page
+with one hazardous entry and **6.76 million (32%)** involved two; **2.57
+million (12%)** involved three or four. The recent-fault history found about
+**60%** of scalar faults revisited a physical page seen within the preceding
+eight scalar faults, while about **20%** missed a 32-page history. These are
+reuse distances among *faulting* pages, not the full instruction stream or a
+measure of how many breakpoint slots an executable batch needs. The existing
+planner already admits three or four code pages before most transfer-phase
+faults, so this observation alone does not justify another recency predictor.
+The log and marker snapshots are under ignored
+`target/boxctl-evidence/amd-npfdiag-1011/`.
+
+### Test 2 KiB AMD breakpoint masks
+
+An isolated candidate allowed the four debug-register masks to cover up to
+2 KiB instead of 1 KiB when merging hazardous entries. All 262 VMX tests,
+the in-box SVM suite, and the full Tempo workload passed. One same-box pair
+gave **60.583 s** for the wider mask versus **60.419 s** unchanged. The
+candidate had **21,497,437** nested-page faults and **49,003** debug
+exceptions, versus **21,402,839** faults and **44,767** debug exceptions
+for the control. It also spent slightly more VM-entry preparation cycles
+(69.19 versus 69.05 billion). With no reduction in either exit class or
+elapsed time, the 2 KiB mask was not merged. Marker snapshots are under
+ignored `target/boxctl-evidence/amd-mask2k-1011/`.
+
+### Use the guarded-table index in the execute-fault handler
+
+Every execute fault checked whether its physical page belonged to the
+write-guarded translation tree, but the fault handler scanned up to 1,024
+table pages linearly. The global planner already maintains an exact hash
+index for that guarded set. The fault handler now calls the same indexed
+membership helper; it retains the helper's linear fallback when the index is
+invalid or unexpectedly full. Existing collision and fallback tests plus
+all 262 VMX tests and the in-box SVM suite passed.
+
+Two alternating same-box EPYC 4245P pairs completed all 10,000 transfers.
+The first unchanged run was also the control for the preceding mask test:
+
+| Run order | Variant | Fair interval | VM exits | Nested-page faults | Fault-handler cycles/fault |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Unchanged | 60.419 s | 29,043,387 | 21,402,839 | 321 |
+| 2 | Indexed fault path | 59.337 s | 28,745,087 | 21,154,513 | 169 |
+| 3 | Indexed fault path | 60.353 s | 29,328,405 | 21,602,738 | 176 |
+| 4 | Unchanged | 61.662 s | 29,113,163 | 21,370,696 | 470 |
+
+Mean fair interval fell from **61.040 to 59.845 s**, about **2.0%**. The
+second candidate had more exits than its adjacent control yet finished
+faster; its normalized nested-page-fault handling cost remained much lower.
+The two controls differed in handler cost, so the table gives a range rather
+than a single fixed cycles-per-fault saving. Marker snapshots are under
+ignored `target/boxctl-evidence/amd-npf-index-1011/`.
