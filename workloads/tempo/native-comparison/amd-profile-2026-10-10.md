@@ -1819,3 +1819,41 @@ under ignored `target/boxctl-evidence/amd-early-mask-1011/`.
 These results show that admitting more pages can reduce execute faults yet
 lose more time in preparation and VM running. Future page-selection changes
 need full transfer timings and phase-cycle counts, not fault counts alone.
+
+### Check AMD breakpoint-mask MSR swap cost
+
+The SVM entry assembly saves, writes, and restores all four address-mask
+MSRs when any page breakpoint has a nonzero mask. A disposable second EPYC
+4245P box (`box-af826965`) with the same HWE kernel, guest kernel, initrd,
+and Tempo images tested three alternatives. All in-box SVM suites and full
+10,000-transfer runs passed.
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Skip zero-mask slots | 69.394 s | 21,353,473 | 89.18 billion |
+| Swap enabled DR7 slots | 72.132 s | 21,762,075 | 92.47 billion |
+| Swap only masks differing from host | 70.260 s | 21,332,015 | 91.18 billion |
+| Unchanged control | 70.471 s | 21,211,125 | 89.48 billion |
+| Host/guest comparison plus early masking | 77.276 s | 19,762,837 | 115.38 billion |
+
+Skipping every zero-mask slot is not generally correct: an enabled exact
+breakpoint still needs a zero guest mask if the host's MSR is nonzero. The
+safe variants either selected enabled slots from guest DR7 or read the host
+value and wrote/restored a slot only when it differed. Neither demonstrated
+a useful standalone gain. The host/guest comparison recovered part of the
+early-masking regression but remained **6.8 s slower** than the same-box
+control, despite **1.45 million** fewer nested-page faults. All assembly
+and early-masking experiments were reverted.
+
+The saved perf recordings were resolved against reproducibly rebuilt module
+build IDs (`e61a9d63` for the unchanged module and `cffac844` for early
+masking). In 25-second samples, inclusive `prepare_global` share rose from
+**17.77%** to **21.08%**, while `svm_run_guest` self share rose from
+**30.97%** to **33.58%**. The samples cover different progress through the
+guest workload, so these shares locate candidate costs but cannot apportion
+the full-run regression precisely. The dominant measured change is the
+**25.9-billion-cycle** increase in VM-entry preparation for the combined
+variant. Logs, snapshots, perf recordings, and rebuilt modules are under
+ignored `target/boxctl-evidence/amd-mask-msr-1011/`,
+`target/boxctl-evidence/amd-multipage-scalar-1011/`, and
+`target/boxctl-evidence/amd-early-mask-1011/`.
