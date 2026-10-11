@@ -1609,3 +1609,43 @@ not improve the application interval on the same second EPYC 4245P box:
 
 The 192-guard cap was reverted. Its patch, logs, and marker snapshots are
 under ignored `target/boxctl-evidence/amd-guard192-1011/`.
+
+### Attribute the remaining nested-page faults
+
+A temporary box-only diagnostic counted execution-fault outcomes and the
+reason a page could not become globally executable. The EPYC 4245P box passed
+the SVM quick suite and a full 10,000-transfer Tempo run. Its instrumented
+fair interval was **74.570 s**, with **22,660,292 nested-page faults**; the
+added counters make this a diagnostic run rather than a new timing baseline.
+At the final 75-million-fault log point, 73,158,342 faults (97.5%) had taken
+the scalar execute path. All of those scalar outcomes had a ready, clean
+translation gate and were on code pages that failed the global safety proof;
+none were attributed to an unready gate, dirty gate, or guarded page table.
+The first kernel-log snapshot from the preceding probe was taken after its
+first workload marker, which explains why subtracting that log from a later
+one disagreed with the marker JSON counters. The diagnostic source was
+removed after collecting the evidence. Logs and marker snapshots are under
+ignored `target/boxctl-evidence/amd-scalar-reasons-1011/`.
+
+The remaining fast-path target is hazardous-page transition frequency and
+the cost of preparing those transitions. In the instrumented fair interval,
+VM-entry preparation consumed 95.79 billion aggregate cycles, compared with
+10.60 billion cycles in nested-page-fault handlers. The following
+transfer-phase host profile shows where the current build spends cycles.
+
+That fresh profile used the uninstrumented 128-guard build and collected 2,478
+host `perf` samples at 99 Hz for 25 seconds after marker 1, with zero lost
+samples. The full run passed all 10,000 transfers in **72.372 s** between
+markers, with **22,560,124 nested-page faults**, **4,448,673 monitor-trap
+exits**, and **91.25 billion VM-entry preparation cycles**. Sampling affected
+the timing, so the earlier unprofiled pair remains the comparison baseline.
+`svm_run_guest` led the sample report at **30.63%**, followed by `__pi_memcpy`
+at **4.12%**, `collect_page_breakpoints` at **3.61%**, and
+`page_hazards_memo` at **3.23%**. Assembly annotation attributed 27.49% of
+samples *within* `svm_run_guest` to the `VMRUN` instruction; XCR0 switching,
+debug-register switching, and guest-state save/restore also appeared near
+the top. These are sampled shares, not a decomposition of the 72.372 s.
+The report, annotation, log, and marker snapshots are under ignored
+`target/boxctl-evidence/amd-guard128-perf-1011/`. The profile supports
+reducing execute-fault transitions rather than revisiting the small memo
+lookup costs.
