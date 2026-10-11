@@ -1679,3 +1679,69 @@ predicted page with five raw hazards was dropped after a focused test showed
 its existing singleton proof already occupied all four debug-register slots.
 Logs and marker snapshots are under ignored
 `target/boxctl-evidence/amd-mask-compose-1011/`.
+
+### Classify current execute-fault transitions by admitted page count
+
+The 128-guard build with preserved breakpoint masks passed three more full
+10,000-transfer runs on a disposable EPYC 4245P HWE box. Temporary box-only
+probes were removed after collecting their marker snapshots. A first page
+sample was discarded for transition analysis because its field labeled
+`previous` held the page two steps back. The corrected run sampled every
+20,000th scalar execute fault and recorded the immediate predecessor.
+
+Between the corrected run's fair markers, 1,114 sampled scalar faults covered
+189 physical pages and 512 `(previous linear page, faulting linear page)`
+pairs. The hottest page appeared in 96 samples; the hottest pair in 28.
+Only 21 samples returned to the same linear page. Cached singleton alias
+proofs required one or two debug-register slots in 942 samples (84.6%),
+three in 83, four in 86, and were absent in three. These are periodic samples,
+so their frequencies are directional rather than an unbiased distribution.
+
+A separate cumulative counter classified raw nested-page faults by the batch
+that had just run. Subtracting the closest logged counters at the transfer
+markers gives approximately 22 million faults: 21,947,120 (99.8%) followed
+global counted batches. Of those, 4,326,796 followed a one-code-page batch,
+4,309,484 followed two pages, and **13,310,840 (60.6%) followed batches
+with three or four admitted code pages**. None of the counted transfer-phase
+faults targeted a code page already in the batch; they were transitions to
+another page. The million-fault logging interval limits the precision of
+these marker differences; the independent JSON snapshot recorded 22,414,922
+nested-page faults in the same run. The corrected sample, counter snapshots,
+and workload logs are under ignored
+`target/boxctl-evidence/amd-current-scalar-sample-1011/`.
+
+The current limit is largely page selection under four hardware breakpoint
+slots, not failure to enter a multi-page counted batch. A useful next change
+must improve which pages are admitted without recreating the expensive alias
+proof and permission work that made earlier wider-page variants slower.
+
+### Test smaller global page sets on the current build
+
+The batch classification motivated two isolated planner changes on the same
+EPYC 4245P box. A predicted-only candidate omitted the recent-page fallback;
+it passed the box SVM suite and all 10,000 transfers, but raised transfer
+nested-page faults from **22.39 million to 29.67 million** and the fair
+interval from **72.303 s to 83.237 s**. The recent pages are therefore
+important to the current acceleration path.
+
+A second candidate retained prediction and the recent-page fallback but
+capped a batch at three code pages instead of four. It passed the box suite
+and three complete Tempo runs. The local VMX suite had one expected
+selection-policy assertion failure until its test was adjusted; with that
+assertion updated, all 260 VMX and 40 VM-library tests passed. In run order:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Four-page control | 72.303 s | 22,390,096 | 92.20 billion |
+| Three-page cap | 72.109 s | 22,597,239 | 90.92 billion |
+| Four-page control | 72.734 s | 22,569,817 | 92.46 billion |
+| Three-page cap | 70.075 s | 22,049,686 | 87.83 billion |
+| Four-page control | 71.786 s | 22,277,366 | 90.84 billion |
+| Three-page cap | 72.012 s | 22,628,046 | 90.33 billion |
+
+The three paired timing differences were 0.19 s faster, 2.66 s faster, and
+0.23 s slower. The large second-run improvement was accompanied by fewer
+faults, whereas the other candidate runs had more faults than their controls.
+That variation is too large to attribute a reliable gain to the cap, so both
+experimental page limits were reverted. Logs and marker snapshots are under
+ignored `target/boxctl-evidence/amd-pred-only-1011/`.
