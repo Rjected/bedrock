@@ -2287,3 +2287,56 @@ Candidate runs had **1.5%** fewer exits overall, but preparation cycles
 per exit also fell from **2,696 to 2,410** (about **10.6%**). Both pairs
 favored the filter on wall time and normalized preparation cost. Marker
 snapshots are under ignored `target/boxctl-evidence/amd-alias-bloom-1011/`.
+
+### Test a hazard-only leaf-filter query
+
+A follow-up queried the leaf filter only for selected pages with hazardous
+instruction offsets and precomputed those filter bits once per alias walk.
+All 262 VMX tests, the box SVM suite, and the full 10,000-transfer workload
+passed. On the same EPYC 4245P box, the candidate took **60.599 s** with
+**28,910,267** exits and **69.33 billion** preparation cycles; the unchanged
+control took **60.429 s** with **28,896,504** exits and **69.13 billion**
+preparation cycles. Exit counts were nearly equal and neither wall time nor
+entry cost improved, so the change was reverted. Marker snapshots are under
+ignored `target/boxctl-evidence/amd-hazard-bloom-1011/`.
+
+### Widen the guarded leaf filter to 256 bits
+
+A separate candidate used four 64-bit words per guarded leaf table, reducing
+false positives at the cost of 24 KiB more guard-state storage. All 262 VMX
+tests, the in-box SVM suite, and three full 10,000-transfer Tempo runs passed.
+Same-box alternating measurements were:
+
+| Run order | Variant | Fair interval | VM exits | VM-entry preparation cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | 256-bit filter | 60.532 s | 29,153,444 | 68.25 billion |
+| 2 | 64-bit control | 61.160 s | 29,124,285 | 69.35 billion |
+| 3 | 256-bit filter | 59.330 s | 28,332,279 | 67.60 billion |
+| 4 | 64-bit control | 60.742 s | 28,999,410 | 69.26 billion |
+| 5 | 256-bit filter | 60.277 s | 28,812,256 | 68.69 billion |
+| 6 | 64-bit control | 60.292 s | 28,663,792 | 69.27 billion |
+
+The candidate averaged **60.046 s** against **60.731 s** for the control,
+about **1.1%** faster. Preparation cycles per exit were lower in each pair,
+but the third wall-time pair was effectively tied. A subsequent review added
+a direct-query fallback for unusually large selected-page batches without
+changing the measured common path. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-bloom256-1011/`.
+
+### Avoid rebuilding a valid guarded leaf filter
+
+An isolated candidate skipped hashing leaf entries when a valid filter
+already existed or the leaf was not eligible for caching. All 262 VMX tests,
+the in-box SVM suite, and two full Tempo runs passed. The same-box pairs were:
+
+| Run order | Variant | Fair interval | VM exits | VM-entry preparation cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Skip rebuild | 60.879 s | 29,181,321 | 68.79 billion |
+| 2 | Unchanged | 60.225 s | 28,655,296 | 68.92 billion |
+| 3 | Skip rebuild | 61.236 s | 29,216,526 | 69.99 billion |
+| 4 | Unchanged | 60.587 s | 28,460,876 | 69.16 billion |
+
+The candidate had about **1.7%** fewer preparation cycles per exit in
+aggregate but **2.2%** more exits and was **0.65 s slower** in each pair.
+Because it did not improve elapsed time, this change remains unmerged.
+Marker snapshots are under ignored `target/boxctl-evidence/amd-lazy-bloom-1011/`.
