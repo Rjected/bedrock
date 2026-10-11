@@ -57,7 +57,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
             let gate = &ctx.state().svm_guard;
             let may_trust = gate.gate_ready
                 && !gate.gate_dirty
-                && !gate.gate_tables[..gate.gate_count].contains(&page);
+                && !super::svm_batch::gate_table_contains(gate, page);
             let safe = may_trust && super::svm_batch::globally_safe_code(ctx, page);
             if may_trust {
                 super::svm_batch::protect_recurrent_code(ctx, allocator, page);

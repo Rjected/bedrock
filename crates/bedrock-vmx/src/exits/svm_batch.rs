@@ -572,7 +572,7 @@ fn add_translation_child<C: VmContext>(
     Some(())
 }
 
-fn gate_table_contains(guard: &super::super::vm_state::SvmGuardScratch, page: u64) -> bool {
+pub(crate) fn gate_table_contains(guard: &super::super::vm_state::SvmGuardScratch, page: u64) -> bool {
     if !guard.gate_table_index_valid {
         return guard.gate_tables[..guard.gate_count].contains(&page);
     }
