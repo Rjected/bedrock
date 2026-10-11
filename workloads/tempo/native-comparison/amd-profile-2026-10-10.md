@@ -1514,3 +1514,35 @@ and nested-page faults varied substantially. There is no evidence that the
 tag lookup caused the timing difference, so it was reverted. Diagnostic logs,
 marker snapshots, and the candidate patch are under ignored
 `target/boxctl-evidence/amd-alias-tag-1011/`.
+
+### Retain 32 active code write guards
+
+The memo profile above showed that the direct hash hint already works, while
+the remaining memo path still checks exact bytes on unguarded pages. Earlier
+eight-to-sixteen-guard tests reduced VM-entry preparation. Increasing the
+active write-guard limit from 16 to 32, with eight extra slots for very hot
+rejected pages, passed 260 VMX tests, 40 VM library tests, the EPYC 4245P box
+suite, and two complete Tempo runs. On the same 4245P box, interleaved runs
+with identical guest artifacts were:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| 32 guards | 75.631 s | 22,695,514 | 99.02 billion |
+| 16 guards | 77.468 s | 22,832,932 | 103.44 billion |
+| 32 guards, repeat | 76.312 s | 22,986,531 | 100.49 billion |
+| 16 guards, repeat | 76.546 s | 22,343,160 | 103.94 billion |
+
+The 32-guard pair averaged **75.971 s** versus **77.007 s** for the controls,
+about **1.3% faster**. Both candidate runs used fewer VM-entry preparation
+cycles, by 4.42 and 3.46 billion compared with the following controls.
+Nested-page-fault counts varied in both directions, so fewer faults do not
+explain the gain. All four runs reported 10,000 successful transfers. Logs,
+marker snapshots, and the candidate patch are under ignored
+`target/boxctl-evidence/amd-guard32-1011/`.
+
+One disposable box provisioned with an EPYC 4244P, rather than the 4245P used
+for those measurements. Both the candidate and unchanged module failed the
+existing `svm_bench` control-flow acceleration threshold on that 4244P (about
+20,000 exits where the test expects fewer than 100). Its other initial SVM
+checks passed. That host was not used for the Tempo comparison; the baseline
+failure log is saved with the guard-32 evidence for follow-up.
