@@ -47,6 +47,8 @@ pub struct InstructionBatch {
     pub code_page_count: usize,
     /// Execution traps for otherwise unsafe entry points in permitted pages.
     pub page_breakpoints: [u64; 4],
+    /// AMD address-mask bits for each page execution breakpoint.
+    pub page_breakpoint_masks: [u16; 4],
     pub page_breakpoint_count: usize,
     /// Direct transfers leaving the decoded region stop before target execution.
     pub branch_exits: [u64; 3],

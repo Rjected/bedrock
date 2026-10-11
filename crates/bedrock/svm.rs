@@ -158,6 +158,13 @@ extern "C" {
     ) -> i32;
 }
 
+fn page_breakpoint_hit(batch: &InstructionBatch, address: u64) -> bool {
+    (0..batch.page_breakpoint_count).any(|index| {
+        let mask = u64::from(batch.page_breakpoint_masks[index]);
+        address & !mask == batch.page_breakpoints[index] & !mask
+    })
+}
+
 /// Caller holds the VM lock, is pinned, and has disabled local interrupts.
 pub(crate) unsafe fn run(
     ctx: &mut VmxContext,
@@ -190,10 +197,15 @@ pub(crate) unsafe fn run(
             _ => return Err(VmEntryError::VmEntryFailed),
         }
     }
-    let mut breakpoints = [0u64; 4];
+    // The assembly entry receives four addresses followed by their AMD
+    // breakpoint-address masks. Non-page batches always use exact matches.
+    let mut breakpoints = [0u64; 8];
     if let Some(batch) = batch {
         let count = if batch.page_execution {
-            breakpoints = batch.page_breakpoints;
+            breakpoints[..4].copy_from_slice(&batch.page_breakpoints);
+            for index in 0..4 {
+                breakpoints[4 + index] = u64::from(batch.page_breakpoint_masks[index]);
+            }
             batch.page_breakpoint_count
         } else {
             let mut count = 0;
@@ -295,8 +307,7 @@ pub(crate) unsafe fn run(
         // Guest TF and DR7 were excluded before entering this gate, so the
         // protected hazard address itself is sufficient to request replay.
         let hazard_breakpoint = code == 0x41
-            && batch.page_breakpoints[..batch.page_breakpoint_count]
-                .contains(&v.read(o::RIP, 8));
+            && page_breakpoint_hit(batch, v.read(o::RIP, 8));
         let replay = hazard_breakpoint || (0x20..=0x3f).contains(&code)
             || matches!(code, 0x66 | 0x6a | 0x74);
         if hazard_breakpoint {
@@ -340,7 +351,7 @@ pub(crate) unsafe fn run(
         // Free execution starts with TF and guest breakpoints disabled.
         // Guarded unsafe entries stop before they can restore guest TF mid-run.
         let trapped = code == 0x41 && v.read(o::DR6, 8) & 15 != 0
-            && batch.page_breakpoints[..batch.page_breakpoint_count].contains(&v.read(o::RIP, 8));
+            && page_breakpoint_hit(batch, v.read(o::RIP, 8));
         if code == 0x41 && !trapped {
             kernel::pr_err!("SVM page execution unexpected debug trap: rip={:#x} dr6={:#x}\n",
                 v.read(o::RIP, 8), v.read(o::DR6, 8));

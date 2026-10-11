@@ -74,7 +74,7 @@ SYM_FUNC_START(svm_run_guest)
  push %r13
  push %r12
  push %rbx
- sub $88, %rsp
+ sub $136, %rsp
  mov %rdi, 0(%rsp)
  mov %rsi, 8(%rsp)
  mov %rdx, 16(%rsp)
@@ -123,7 +123,57 @@ SYM_FUNC_START(svm_run_guest)
  mov 24(%rcx), %rax
  mov %rax, %dr3
 .Lsvm_skip_dr3_entry:
- mov %rdx, %rax
+ /* Address-mask MSRs are host state, not VMCB state. Only masked page
+  * batches need the extra four read/write pairs on each VMRUN. */
+ movq $0, 88(%rsp)
+ mov 32(%rcx), %rax
+ or 40(%rcx), %rax
+ or 48(%rcx), %rax
+ or 56(%rcx), %rax
+ jz .Lsvm_skip_addr_mask_entry
+ mov %rcx, 88(%rsp)
+ mov $0xc0011027, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ mov %rax, 96(%rsp)
+ mov 88(%rsp), %r10
+ mov 32(%r10), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+ mov $0xc0011019, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ mov %rax, 104(%rsp)
+ mov 88(%rsp), %r10
+ mov 40(%r10), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+ mov $0xc001101a, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ mov %rax, 112(%rsp)
+ mov 88(%rsp), %r10
+ mov 48(%r10), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+ mov $0xc001101b, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ mov %rax, 120(%rsp)
+ mov 88(%rsp), %r10
+ mov 56(%r10), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+.Lsvm_skip_addr_mask_entry:
+ mov 16(%rsp), %rax
  vmsave %rax
 	mov	VMXCTX_XCR0_MASK(%rdi), %rax
 	test	%rax, %rax
@@ -300,6 +350,29 @@ SYM_FUNC_START(svm_run_guest)
  mov 72(%rsp), %rax
  mov %rax, %dr3
 .Lsvm_skip_dr3_exit:
+ cmpq $0, 88(%rsp)
+ je .Lsvm_skip_addr_mask_exit
+ mov 96(%rsp), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ mov $0xc0011027, %ecx
+ wrmsr
+ mov 104(%rsp), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ mov $0xc0011019, %ecx
+ wrmsr
+ mov 112(%rsp), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ mov $0xc001101a, %ecx
+ wrmsr
+ mov 120(%rsp), %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ mov $0xc001101b, %ecx
+ wrmsr
+.Lsvm_skip_addr_mask_exit:
  mov 32(%rsp), %rax
  /* VMEXIT disables host breakpoints. When the saved host DR7 was the
   * already-disabled architectural value, no software restore is needed. */
@@ -308,7 +381,7 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, %dr7
 .Lsvm_host_dr7_restored:
  stgi
- add $88, %rsp
+ add $136, %rsp
  pop %rbx
  pop %r12
  pop %r13

@@ -21,6 +21,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("SVM_CASE").as_deref() == Ok("boundary-rdrand") {
         return test_boundary_rdrand();
     }
+    if std::env::var("SVM_CASE").as_deref() == Ok("masked-breakpoints") {
+        return test_masked_breakpoints();
+    }
     test_mov_ss_random_interception()?;
     test_mov_ss_deadline()?;
     test_syscall(false)?;
@@ -33,7 +36,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_repeated_store_with_rf()?;
     test_boundary_rep_prefix()?;
     test_boundary_rdrand()?;
+    test_masked_breakpoints()?;
     Ok(())
+}
+
+fn test_masked_breakpoints() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x2000].fill(0x90);
+    for offset in [0x100, 0x110, 0x120, 0x130, 0x140] {
+        memory[0x1000 + offset..0x1003 + offset].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+    }
+    memory[0x1150..0x1155].copy_from_slice(&[0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    let mut random_exits = 0;
+    loop {
+        let exit = vm.run()?;
+        match exit.exit_reason {
+            256 => continue,
+            57 => {
+                random_exits += 1;
+                vm.set_rdrand_value(0x1234)?;
+            }
+            258 => {
+                assert_eq!(random_exits, 5);
+                let exits = vm.get_exit_stats()?.total_exit_count();
+                assert!(exits < 150, "masked page fell back to stepping: {exits} exits");
+                println!("SVM_MASKED_BREAKPOINTS_PASS exits={exits}");
+                return Ok(());
+            }
+            reason => return Err(format!("Unexpected masked breakpoint exit: {reason}").into()),
+        }
+    }
 }
 
 fn test_boundary_rdrand() -> Result<(), Box<dyn std::error::Error>> {

@@ -225,10 +225,11 @@ pub(crate) struct SvmAliasProof {
     pub key_hash: u64,
     pub root: u64,
     pub pages: [u64; SVM_ALIAS_PROOF_PAGE_CAPACITY],
-    pub offsets: [[u16; 4]; SVM_ALIAS_PROOF_PAGE_CAPACITY],
+    pub offsets: [[u16; 16]; SVM_ALIAS_PROOF_PAGE_CAPACITY],
     pub counts: [usize; SVM_ALIAS_PROOF_PAGE_CAPACITY],
     pub page_count: usize,
     pub breakpoints: [u64; 4],
+    pub breakpoint_masks: [u16; 4],
     pub breakpoint_count: usize,
 }
 
@@ -252,7 +253,7 @@ pub(crate) struct SvmCodeProof {
     pub boundary: [u8; 32],
     pub boundary_guarded: bool,
     pub edge: u16,
-    pub offsets: [u16; 4],
+    pub offsets: [u16; 16],
     pub count: usize,
 }
 

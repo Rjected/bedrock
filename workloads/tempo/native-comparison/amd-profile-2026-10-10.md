@@ -1363,7 +1363,38 @@ four-entry fallback. A targeted five-entry hardware probe made a box
 unresponsive. The same probe passed with the last known-good module in 29
 exits, while two candidate controls also locked up with mask use disabled;
 one of those additionally restored the original VMRUN assembly and four-entry
-scan limit. The first prototype is preserved locally as the Git stash
-`WIP AMD masked breakpoints: unsafe hardware prototype` and is **not** on the
-pushed branch. The next step is to isolate the candidate's failing Rust path
-with smaller changes and hardware probes before resuming throughput tests.
+scan limit. That first prototype was not pushed. The failure was traced to
+kernel-stack usage as described below.
+
+### Resolve stack overflow and validate masked breakpoints
+
+The prototype failure came from expanding a 64-element `PageHazards` array on
+the kernel stack from about 3.5 KB to over 5 KB. That planner can select only
+the current page plus eight recent pages. Reducing its local array to nine
+elements eliminated the box lockups; the same five-entry hardware probe now
+passes with four masked breakpoints in 44 exits. The 260 VMX and 40 VM library
+tests and box SVM smoke/transition checks pass. Pages with more than 16 unsafe
+entries, or ranges too wide for the bounded four-slot plan, retain the scalar
+fallback. CPUs without AMD's breakpoint-mask feature retain the four-entry
+hazard scan.
+
+Three full 10,000-transfer runs passed on the same EPYC 4245P box, with the
+same guest artifacts, command line, and benchmark command, in candidate /
+unchanged module / candidate order:
+
+| Variant | Transfer interval | Transfer start after launch |
+| --- | ---: | ---: |
+| Masked breakpoints | 75.673 s | 182.114 s |
+| Unchanged module | 79.175 s | 233.593 s |
+| Masked breakpoints, repeat | 75.137 s | 182.631 s |
+
+The candidate pair averaged **75.405 s**, **4.8%** faster than the single
+same-box control. The transfer phase also started about **51 s** sooner. In
+the first candidate/control full-run comparison, single-step exits fell from
+62.98 million to 27.70 million and nested-page faults from 76.63 million to
+75.06 million. The confirming candidate's transfer-phase marker snapshots
+show 22.40 million nested-page faults, 4.45 million single-step exits, and
+99.31 billion VM-entry overhead cycles. The AMD transfer interval remains
+about **3.1×** the historical Intel 24.087-second run. Logs and confirming
+marker snapshots are under ignored
+`target/boxctl-evidence/amd-masked-breakpoints-1011/`.
