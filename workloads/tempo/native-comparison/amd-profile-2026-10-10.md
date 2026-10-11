@@ -1040,3 +1040,12 @@ The two successor runs average **86.659 s** versus **89.489 s** for the
 bracketing unchanged runs, a **3.2%** improvement. They remove roughly
 1.3–1.5 million nested-page faults in each matched comparison. Raw logs and
 marker snapshots are under ignored `target/boxctl-evidence/amd-successor-1011/`.
+
+An isolated 8,192-entry successor table passed the same SVM checks and full
+workload, but its single fair interval was **87.197 s** with **24,076,128**
+nested-page faults, more than either 2,048-entry successor run. Increasing
+capacity alone has not shown a benefit, so the shared branch retains 2,048
+entries. The next useful diagnostic is to separate failed successor predictions
+from candidates rejected by the existing alias, boundary, or breakpoint proof:
+the predictor removed only about 1.4 million faults despite most remaining
+faults targeting pages beyond the two most recent.
