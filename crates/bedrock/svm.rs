@@ -153,7 +153,6 @@ extern "C" {
         guest_pa: u64,
         host_pa: u64,
         breakpoints: *const u64,
-        pmu_mask: u64,
         vmcb: *mut Vmcb,
     ) -> i32;
 }
@@ -242,12 +241,9 @@ pub(crate) unsafe fn run(
     } else {
         None
     };
-    // PMC virtualization loads the guest controls from the VMCB. Disable
-    // the guest event for entries that do not use a counted batch; the
-    // assembly verifies that the host global control survives VMRUN.
-    if pmu_mask != 0 && !counting {
-        PmcEntry::disarm(v);
-    }
+    // PMC virtualization loads the guest controls from the VMCB. Keep it
+    // enabled with guest counting disabled on entries without a batch.
+    let uncounted_virt_ext = (pmu_mask != 0 && !counting).then(|| PmcEntry::disarm(v));
     if batch.is_some_and(|batch| batch.page_execution) {
         if let Some(counter) = counter.as_ref() {
             // TF is clear for guarded native execution. NPT catches PUSHF
@@ -258,8 +254,11 @@ pub(crate) unsafe fn run(
     unsafe {
         // Pass the virtual pointer as well as the physical address: VMRUN
         // modifies this allocation, which the compiler must see at the FFI
-        // boundary. Assembly uses the physical address and ignores arg six.
-        svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), u64::from(pmu_mask != 0), v);
+        // boundary. Assembly also reads the virtual VMCB's breakpoint state.
+        svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), v);
+    }
+    if let Some(virt_ext) = uncounted_virt_ext {
+        v.write(o::VIRT_EXT, 8, virt_ext);
     }
     let mut host_count = 0;
     let pmu_ready = !counting || unsafe { c_helpers::bedrock_svm_pmu_read(&mut host_count) } == 0;

@@ -62,9 +62,9 @@
 #define VMXCTX_SVM_HOST_FPU_RESERVED 296
 #define VMXCTX_SVM_GUEST_FPU_RESIDENT 304
 
-/* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints, PMU available,
+/* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints,
  * guest VMCB virtual pointer. The final argument exposes hardware writes to
- * the compiler; assembly uses the physical address. Host RSP is saved by
+ * the compiler and supplies the guest breakpoint flags. Host RSP is saved by
  * VMRUN, so the stack remains our anchor without guest-visible scratch GPRs. */
 SYM_FUNC_START(svm_run_guest)
  push %rbp
@@ -78,7 +78,6 @@ SYM_FUNC_START(svm_run_guest)
  mov %rdi, 0(%rsp)
  mov %rsi, 8(%rsp)
  mov %rdx, 16(%rsp)
- mov %r8, 48(%rsp)
  clgi
  /* V_INTR_MASKING uses host IF at VMRUN. GIF=0 protects host setup;
   * VMRUN enables guest GIF, so physical IRQs can terminate a long batch. */
@@ -92,7 +91,7 @@ SYM_FUNC_START(svm_run_guest)
 .Lsvm_host_dr7_disabled:
  /* Only enabled guest execution breakpoints need an address-register swap.
   * DR7 is disabled here, so unused host DR0-DR3 remain untouched. */
- movzbl 0x560(%r9), %eax
+ movzbl 0x560(%r8), %eax
  and $0x55, %eax
  mov %rax, 80(%rsp)
  testb $1, 80(%rsp)
@@ -218,16 +217,6 @@ SYM_FUNC_START(svm_run_guest)
 .Lsvm_skip_guest_xrstor_entry:
 
 .Lsvm_skip_xsave_entry:
- /* PMC virtualization loads guest counter controls from the VMCB. Save the
-  * host global control so it can be verified and restored after VMRUN. */
- cmpq $0, 48(%rsp)
- je .Lsvm_skip_pmu_entry
- mov $0xc0000301, %ecx
- rdmsr
- shl $32, %rdx
- or %rdx, %rax
- mov %rax, 40(%rsp)
-.Lsvm_skip_pmu_entry:
  mov 8(%rsp), %rax
  vmload %rax
  mov VMXCTX_GUEST_RBX(%rdi), %rbx
@@ -266,19 +255,6 @@ SYM_FUNC_START(svm_run_guest)
  mov 0(%rsp), %rcx
  mov %rcx, VMXCTX_GUEST_RDI(%rax)
  add $8, %rsp
- cmpq $0, 48(%rsp)
- je .Lsvm_skip_pmu_exit
- mov $0xc0000301, %ecx
- rdmsr
- shl $32, %rdx
- or %rdx, %rax
- cmp 40(%rsp), %rax
- je .Lsvm_skip_pmu_exit
- mov 40(%rsp), %rax
- mov %rax, %rdx
- shr $32, %rdx
- wrmsr
-.Lsvm_skip_pmu_exit:
  mov 8(%rsp), %rax
  vmsave %rax
  mov 16(%rsp), %rax

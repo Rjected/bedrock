@@ -2066,3 +2066,36 @@ restore `WRMSR`. The host global-control register read `0x3f` after that
 run. Sampling cannot prove the restore never executes, so the conditional
 restore remains. Logs, snapshots, perf data, and annotation are under ignored
 `target/boxctl-evidence/amd-pmu-autoswap-1011/`.
+
+### Keep PMC virtualization enabled on uncounted entries
+
+The VMCB can hold a disarmed guest PMC state while PMC virtualization stays
+enabled. We now enable it on uncounted entries, clear both guest PMC controls,
+and restore the previous VMCB virtualization flags after exit. Counted entries
+still use `PmcEntry::prepare` and `finish`. This lets SVM handle the host/guest
+PMC switch without the assembly's two host-global-control reads and conditional
+restore. On the test EPYC 4245P, host `PERF_GLOBAL_CTRL` was `0x3f` before and
+after each run. The in-box SVM suite and 21 `bedrock-svm` tests passed.
+
+Two same-box pairs, before removing the now-unreachable assembly branch,
+completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | VM runner and guest cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | PMC virtualization throughout | 66.736 s | 29,390,087 | 5,081 |
+| 2 | Conditional host check | 67.608 s | 28,669,501 | 5,361 |
+| 3 | PMC virtualization throughout | 65.972 s | 28,768,541 | 5,065 |
+| 4 | Conditional host check | 67.444 s | 28,742,830 | 5,342 |
+
+Mean fair interval fell from **67.526 to 66.354 s** (**1.7%**). Runner and
+guest cycles per exit fell by 277–280 in both pairs; the candidate even had
+more exits in the first pair. Full run snapshots are under ignored
+`target/boxctl-evidence/amd-pmu-pure-fixed-1011/`.
+
+The final assembly removes that dead PMU-check branch and its unused ABI
+argument. Its in-box SVM suite passed, and one full Tempo run completed in
+**65.194 s** with **28,355,171** exits and **5,090** runner/guest cycles per
+exit. The host global control remained `0x3f` after the run. This single
+final-code sample is consistent with the two earlier candidate samples; the
+lower wall time also reflects fewer exits, so the two-pair comparison above
+is the stronger estimate of the change's effect.
