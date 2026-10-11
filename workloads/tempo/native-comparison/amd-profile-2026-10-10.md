@@ -1857,3 +1857,38 @@ variant. Logs, snapshots, perf recordings, and rebuilt modules are under
 ignored `target/boxctl-evidence/amd-mask-msr-1011/`,
 `target/boxctl-evidence/amd-multipage-scalar-1011/`, and
 `target/boxctl-evidence/amd-early-mask-1011/`.
+
+### Attribute the extra VM-entry preparation
+
+Temporary per-entry RDTSC counters split SVM preparation into instruction
+window reading, batch planning, write guarding, paired-page execute setup,
+and the remaining pre-entry tail. The counters were exported in the same
+marker snapshots used for fair transfer intervals, then removed from the
+source. Their extra timestamp reads change timings, so only comparisons
+between identically instrumented runs are meaningful.
+
+| Instrumented variant | Batch planning | Full VM-entry preparation | VM runner and guest | Nested-page faults | Fair interval |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Pushed baseline | 59.55 billion cycles | 94.71 billion | 160.23 billion | 21,092,240 | 71.512 s |
+| Early masking, no slot stop | 82.60 billion | 117.22 billion | 173.45 billion | 19,495,053 | 80.356 s |
+| Early masking, stop when four slots full | 61.66 billion | 96.15 billion | 174.51 billion | 19,725,705 | 75.255 s |
+| Slot stop plus host/guest mask comparison | 62.68 billion | 97.09 billion | 159.78 billion | 19,411,627 | 71.662 s |
+
+The unnecessary search after all four breakpoint slots filled accounted for
+most of the early-mask planning regression. Stopping there removed **20.9
+billion** planning cycles. Comparing host and guest mask values before an
+MSR write removed most of the remaining VM-run penalty. Yet the combined
+approach did not improve the application interval.
+
+The same combined candidate was then built without diagnostic counters and
+passed 261 VMX tests, 40 VM-library tests, the in-box SVM suite, and all
+10,000 transfers. Against an adjacent unchanged control on the same box it
+took **71.329 s versus 70.471 s**. Nested-page faults fell from **21,211,125
+to 19,694,026**, but VM-entry preparation rose from **89.48 to 93.33
+billion cycles** and VM-run/guest cycles from **160.90 to 161.66 billion**.
+The early mask, slot stop, and mask-MSR comparison were all reverted. This
+leaves batch planning cost as the next measurable target if widening the
+executable page set is attempted again. Snapshots and logs are under ignored
+`target/boxctl-evidence/amd-prep-buckets-1011/` and
+`target/boxctl-evidence/amd-clean-combined-stop-1011/`. All kernel builds,
+loads, and hardware tests ran in the disposable box.
