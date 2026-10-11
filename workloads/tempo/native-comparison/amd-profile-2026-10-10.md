@@ -1398,3 +1398,58 @@ show 22.40 million nested-page faults, 4.45 million single-step exits, and
 about **3.1×** the historical Intel 24.087-second run. Logs and confirming
 marker snapshots are under ignored
 `target/boxctl-evidence/amd-masked-breakpoints-1011/`.
+
+### Test broader speculative-page admission with masked breakpoints
+
+The planner still rejects an optional code page when the raw hazard count
+across selected pages exceeds four. An experiment removed that preliminary
+limit on CPUs with breakpoint-address masks, leaving the alias and breakpoint
+collector to prove whether the combined pages fit. It passed 260 VMX and 40
+VM library tests, box SVM checks, and the full 10,000-transfer workload. A
+same-box control, run immediately afterward with the unchanged module, showed
+the broader admission was slower:
+
+| Variant | Transfer interval | Nested-page faults | VM-entry overhead cycles |
+| --- | ---: | ---: | ---: |
+| Broader optional-page admission | 77.513 s | 22,542,328 | 106.83 billion |
+| Unchanged masked-breakpoint module | 74.529 s | 22,243,158 | 98.65 billion |
+
+The candidate added 299,170 faults and 8.18 billion preparation cycles, so
+it was reverted. Both runs included all transfers without failure or revert.
+Logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-mask-optional-pages-1011/`.
+
+The global counted-execution planner has its own four-raw-hazard limit. A
+second experiment combined cached masked singleton proofs across pages there.
+A focused ten-hazard, two-page unit test, all 261 VMX tests, 40 VM library
+tests, and the box smoke/transition suite passed. It was unusably slow in a
+full guest: after two minutes of 100% CPU, boot had reached only virtual time
+0.279 seconds. The unchanged module had already reached image import by then.
+The run was stopped, and the change was reverted. Its boot log is saved beside
+the paired optional-page logs above.
+
+A CPU-pinned `perf` cycle sample of the unchanged module during the transfer
+captured only five samples in 25 seconds; a concurrent `perf stat` cycle count
+hit the 47-bit counter maximum. Bedrock owns the PMU while counting guest
+instructions, so this sample cannot attribute its host costs.
+
+Temporary host-TSC probes then measured the unchanged masked-breakpoint
+module during a passing full Tempo run. Between the transfer markers, the
+global counted-execution planner ran about **30.4 million** times and used
+**66.1 billion cycles**. Its nested breakpoint collector used **20.1 billion
+cycles** over 25.9 million calls, and cached code-hazard lookup used **20.5
+billion cycles** over 86.5 million calls. Translation-tree collection used
+only **0.10 billion cycles**. These nested figures must not be added to the
+global total. The probes added several seconds to the transfer, so the
+unprofiled paired runs above remain the timing baseline. Dmesg snapshots at
+both fair markers are saved in ignored
+`target/boxctl-evidence/amd-internal-profile-1011/`; the probes were removed
+afterward.
+
+A two-entry most-recently-used shortcut for the code-proof lookup was then
+tested against the unchanged module on the same box. The shortcut passed 260
+VMX and 40 VM library tests, the box suite, and all 10,000 Tempo transfers,
+but its transfer interval was **76.310 s** versus the unchanged **74.529 s**.
+It also added 416,459 nested-page faults and 3.47 billion VM-entry overhead
+cycles. It was reverted; the log and marker snapshots are under ignored
+`target/boxctl-evidence/amd-code-mru-1011/`.
