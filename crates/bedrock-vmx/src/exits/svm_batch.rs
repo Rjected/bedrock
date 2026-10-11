@@ -2273,10 +2273,17 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
                 continue;
             };
             let mut breakpoints = batch.page_breakpoints;
+            let mut masks = batch.page_breakpoint_masks;
             let mut breakpoint_count = batch.page_breakpoint_count;
             let mut fits = true;
-            for &address in &proof.breakpoints[..proof.breakpoint_count] {
-                if breakpoints[..breakpoint_count].contains(&address) {
+            // A singleton proof may cover several unsafe entries with one
+            // masked address. Preserve that range when composing page guards.
+            for index in 0..proof.breakpoint_count {
+                let address = proof.breakpoints[index];
+                let mask = proof.breakpoint_masks[index];
+                if (0..breakpoint_count).any(|slot| {
+                    breakpoints[slot] == address && masks[slot] == mask
+                }) {
                     continue;
                 }
                 if breakpoint_count == breakpoints.len() {
@@ -2284,12 +2291,14 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
                     break;
                 }
                 breakpoints[breakpoint_count] = address;
+                masks[breakpoint_count] = mask;
                 breakpoint_count += 1;
             }
             if !fits || breakpoint_count == batch.page_breakpoint_count {
                 continue;
             }
             batch.page_breakpoints = breakpoints;
+            batch.page_breakpoint_masks = masks;
             batch.page_breakpoint_count = breakpoint_count;
             batch.pages[batch.code_page_count] = previous;
             hazards[batch.code_page_count] = other;
@@ -4333,6 +4342,19 @@ mod tests {
         let contextual = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(&contextual.pages[..contextual.code_page_count],
             &[0x1000, 0x2000, 0x9000]);
+        let masked = ctx.state_mut().svm_guard.alias_proofs.iter_mut()
+            .find(|proof| proof.valid && proof.page_count == 1 && proof.pages[0] == 0x2000)
+            .unwrap();
+        assert_eq!(masked.breakpoints[0], 0x2100);
+        masked.breakpoint_masks[0] = 0x1f;
+        let combined = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        let masked_slot = combined.page_breakpoints[..combined.page_breakpoint_count]
+            .iter().position(|&address| address == 0x2100).unwrap();
+        assert_eq!(combined.page_breakpoint_masks[masked_slot], 0x1f);
+        assert!(breakpoint_matches(&combined, 0x2110));
+        ctx.state_mut().svm_guard.alias_proofs.iter_mut()
+            .find(|proof| proof.valid && proof.page_count == 1 && proof.pages[0] == 0x2000)
+            .unwrap().breakpoint_masks[0] = 0;
         for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
             if proof.page_count == 1 && proof.pages[0] != 0x1000 {
                 proof.valid = false;

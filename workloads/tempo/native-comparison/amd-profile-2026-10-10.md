@@ -1649,3 +1649,33 @@ The report, annotation, log, and marker snapshots are under ignored
 `target/boxctl-evidence/amd-guard128-perf-1011/`. The profile supports
 reducing execute-fault transitions rather than revisiting the small memo
 lookup costs.
+
+### Preserve breakpoint masks when admitting a second page
+
+The global planner could reuse a cached single-page alias proof to admit a
+predicted or recently visited hazardous page, but it copied only each
+breakpoint address. A masked proof then lost its range when combined with the
+current page. The planner now carries each proof's address and mask together;
+a unit test confirms the resulting batch covers an unsafe entry inside the
+mask. This also prevents a combined batch from executing a hazardous entry
+with a narrower hardware breakpoint than its cached proof established.
+
+The 260 VMX and 40 VM-library tests, the EPYC 4245P box SVM suite, and four
+full Tempo workloads passed. The same box, guest artifacts, and workload were
+used in adjacent candidate/control pairs:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Preserve masks | 71.744 s | 22,404,756 | 89.94 billion |
+| Unchanged branch | 72.867 s | 22,759,653 | 91.39 billion |
+| Preserve masks, repeat | 70.647 s | 21,737,895 | 90.09 billion |
+| Unchanged branch, repeat | 70.774 s | 22,151,414 | 88.61 billion |
+
+The candidate had roughly 355,000 and 414,000 fewer nested-page faults in
+the two pairs. Its paired intervals were 1.12 s and 0.13 s shorter, so the
+timing benefit is small and variable; the mask-preservation correctness fix
+is the primary reason to retain it. An attempted wider admission for a
+predicted page with five raw hazards was dropped after a focused test showed
+its existing singleton proof already occupied all four debug-register slots.
+Logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-mask-compose-1011/`.
