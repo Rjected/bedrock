@@ -2409,3 +2409,46 @@ faster; its normalized nested-page-fault handling cost remained much lower.
 The two controls differed in handler cost, so the table gives a range rather
 than a single fixed cycles-per-fault saving. Marker snapshots are under
 ignored `target/boxctl-evidence/amd-npf-index-1011/`.
+
+### Profile the indexed fault path
+
+A fresh 25-second, 99 Hz host profile began at the first Tempo transfer
+marker on the pushed indexed build. It captured **2,478 samples** with none
+lost; the full 10,000-transfer run passed in **60.216 s**, with **21.49
+million** nested-page faults and **178 handler cycles per fault**. The
+largest self-sample shares were `svm_run_guest` **32.30%**, the kernel run
+loop **8.36%**, `page_hazards_memo` **4.44%**, `prepare_global_into`
+**3.40%**, `collect_page_breakpoints` **3.23%**, and `__pi_memcpy` **2.01%**.
+Assembly annotation attributed 37.44% of the `svm_run_guest` samples to
+`VMRUN`; XCR0 changes and debug-register swaps remained visible. These are
+samples, not additive wall-time costs. The perf data, reports, annotation,
+and marker snapshots are under ignored
+`target/boxctl-evidence/amd-after-npf-index-1011/`.
+
+The hazard-memo annotation sampled mostly inside the existing exact 4 KiB
+byte comparison. A pinned, native same-CPU microbenchmark of unchanged
+pages measured **62 ns** per page for the current eight-word comparison
+loop and **292 ns** for `REP CMPSQ`, so that replacement was not pursued.
+The global planner annotation also showed repeated `REP MOVSQ` copies;
+the cached singleton alias proof was returned by value, motivating a
+separate borrowed-proof experiment.
+
+### Borrow the cached singleton alias proof
+
+The global planner used a cached singleton alias proof only to read its
+breakpoint addresses and masks, but its lookup returned the entire proof by
+value. It now borrows the validated cache entry while composing the batch.
+All 262 VMX tests and the in-box SVM suite passed, including masked
+breakpoints and fork replay. A same-box EPYC 4245P pair completed all
+10,000 Tempo transfers:
+
+| Variant | Fair interval | VM exits | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Borrowed proof | 57.718 s | 28,496,984 | 20,947,001 | 65.68 billion |
+| Unchanged control | 59.220 s | 28,743,412 | 21,129,477 | 69.88 billion |
+
+The candidate was **1.50 s faster** with **0.9%** fewer exits. Preparation
+cycles per exit also fell from about **2,431 to 2,305**, a **5.2%** reduction
+that supports less per-entry copying. This is one full paired comparison;
+the size of the wall-time gain needs a repeat on another lease. Marker
+snapshots are under ignored `target/boxctl-evidence/amd-borrow-alias-1011/`.
