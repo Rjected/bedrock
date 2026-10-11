@@ -1155,3 +1155,28 @@ preparation cycles in both candidate runs are consistent with more code-byte
 proofs being retained. This is a small paired gain, not a claim that the
 remaining **3.4×** gap to the historical Intel run is solved. Guest logs and
 marker snapshots are under ignored `target/boxctl-evidence/amd-guard16-1011/`.
+
+### Use the fourth hardware breakpoint in global batches
+
+The global AMD batch previously stopped at three hazardous code pages even
+when each page needed only one breakpoint. A focused test now verifies that a
+four-page batch can use all four hardware breakpoint slots while retaining
+the exact translation, alias, and boundary checks. The 258 VMX and 40 VM
+library tests, box smoke and transition checks, and three full Tempo runs
+passed. On the same EPYC 4245P box used above:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Eight guards, three-page global cap | 84.514 s | 23,842,225 | 127.04 billion |
+| Eight guards, four-page global cap | 82.333 s | 22,951,250 | 124.47 billion |
+| Sixteen guards, three-page global cap, two-run mean | 82.519 s | 23,872,686 | 121.30 billion |
+| Sixteen guards, four-page global cap | 81.928 s | 23,244,395 | 122.53 billion |
+| Sixteen guards, four-page global cap repeat | 82.330 s | 23,410,724 | 122.46 billion |
+
+The combined pair averaged **82.129 s**, about **0.4 s faster** than the
+sixteen-guard pair and **2.4 s faster** than the eight-guard control. This
+small timing difference needs more sampling to quantify precisely, but both
+combined runs had fewer nested-page faults than either sixteen-guard run.
+The guest reported `TEMPO_TXGEN_PASS` every time. Logs and marker snapshots
+are under ignored `target/boxctl-evidence/amd-fourpage-1011/` and
+`target/boxctl-evidence/amd-combined-1011/`.
