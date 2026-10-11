@@ -2099,3 +2099,40 @@ exit. The host global control remained `0x3f` after the run. This single
 final-code sample is consistent with the two earlier candidate samples; the
 lower wall time also reflects fewer exits, so the two-pair comparison above
 is the stronger estimate of the change's effect.
+
+### Profile and test VMCB access costs
+
+A fresh 25-second, 99 Hz profile of the pushed PMC-virtualization build
+captured 2,479 samples with none lost. `svm_run_guest` took 28.13% of
+self samples, `collect_page_breakpoints` 4.16%, `page_hazards_memo` 3.75%,
+`Vmcb::read` 2.51%, and `fields::location` 1.78%. The profiled workload's
+fair interval was 67.254 s. This motivated two isolated VMCB-access tests.
+
+First, `#[inline]` on the generic VMCB and field accessors passed the SVM
+suite but regressed the otherwise identical profiled interval to 70.082 s.
+The sample share moved into `RealVmcs::vmread` and `fields::location`; the
+inlining change was reverted. Next, width-specific unaligned VMCB loads and
+stores passed the unit and box suites but regressed an unprofiled same-box
+full run to **69.045 s versus 65.920 s** for the unchanged code. Exit counts
+were nearly equal (28,954,951 versus 28,977,097), while entry-preparation
+cycles rose from **85.97 to 95.22 billion**. That change was also reverted.
+The comparison markers are under ignored
+`target/boxctl-evidence/amd-vmcb-access-1011/`.
+
+A narrower follow-up resolved the five guest fields used by the global-batch
+planner directly in the SVM VMCS adapter, leaving the general mapping and VMCB
+byte access unchanged. It passed 22 SVM-library tests and the in-box SVM
+suite. Two candidates and two unchanged controls on the same EPYC 4245P box
+completed the full transfer workload:
+
+| Run order | Variant | Fair interval | VM exits | Entry-preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Unchanged | 65.920 s | 28,977,097 | 2,967 |
+| 2 | Direct fields | 65.591 s | 29,071,818 | 2,902 |
+| 3 | Direct fields | 65.538 s | 29,303,952 | 2,795 |
+| 4 | Unchanged | 66.498 s | 29,061,873 | 3,014 |
+
+The candidate mean was **65.564 s** versus **66.209 s** unchanged (about
+**1.0%** faster). It had more exits in both adjacent comparisons yet lower
+preparation cycles per exit. Logs and markers are under ignored
+`target/boxctl-evidence/amd-field-fastpath-1011/`.

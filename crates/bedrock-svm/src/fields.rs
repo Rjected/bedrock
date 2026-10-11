@@ -65,6 +65,16 @@ pub fn read(v: &Vmcb, field: u32) -> Result<u64, UnsupportedField> {
     if host_field(field) {
         return Ok(0);
     }
+    // The global-batch planner reads these guest fields on nearly every
+    // entry. Resolve them directly before the general VMCS-to-VMCB mapping.
+    match field {
+        0x4816 => return Ok(segment_attributes_to_vmx(v.read(o::CS + 2, 2) as u16) as u64),
+        0x6802 => return Ok(v.read(o::CR3, 8)),
+        0x681a => return Ok(v.read(o::DR7, 8)),
+        0x681e => return Ok(v.read(o::RIP, 8)),
+        0x6820 => return Ok(v.read(o::RFLAGS, 8)),
+        _ => {}
+    }
     let (offset, width) = location(field)?;
     let raw = v.read(offset, width);
     Ok(match field {
@@ -138,6 +148,19 @@ mod tests {
         assert_eq!(v.read(o::CS + 2, 2), 0xafb);
         assert_eq!(v.read(o::CPL, 1), 3);
         assert_eq!(read(&v, 0x4816), Ok(0xa0fb));
+    }
+    #[test]
+    fn batch_planner_fields_read_hardware_state() {
+        let mut v = Vmcb::new();
+        for (offset, field, value) in [
+            (o::CR3, 0x6802, 0x1230_0000),
+            (o::DR7, 0x681a, 0x400),
+            (o::RIP, 0x681e, 0xffff_8000_1234_5678),
+            (o::RFLAGS, 0x6820, 0x202),
+        ] {
+            v.write(offset, 8, value);
+            assert_eq!(read(&v, field), Ok(value));
+        }
     }
     #[test]
     fn control_and_exit_state_do_not_overlap() {
