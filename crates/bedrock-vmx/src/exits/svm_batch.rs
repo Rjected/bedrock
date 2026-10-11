@@ -2604,9 +2604,22 @@ fn remember_alias_proof<C: VmContext>(
     cache.alias_cursor = cache.alias_cursor.wrapping_add(1);
 }
 
-fn leaf_filter_bits(page: u64) -> u64 {
+type LeafFilterProbe = (usize, u64, usize, u64);
+
+fn leaf_filter_probe(page: u64) -> LeafFilterProbe {
     let hash = (page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    (1u64 << (hash >> 58)) | (1u64 << (hash.rotate_left(27) >> 58))
+    let first = (hash >> 56) as usize;
+    let second = (hash.rotate_left(27) >> 56) as usize;
+    (
+        first >> 6,
+        1u64 << (first & 63),
+        second >> 6,
+        1u64 << (second & 63),
+    )
+}
+
+fn leaf_filter_contains(filter: &[u64; 4], probe: LeafFilterProbe) -> bool {
+    filter[probe.0] & probe.1 != 0 && filter[probe.2] & probe.3 != 0
 }
 
 fn guarded_leaf_slot(
@@ -2770,6 +2783,13 @@ fn collect_page_breakpoints<C: VmContext>(
         batch.page_breakpoint_count = 0;
     }
     COLLECT_WALKS.fetch_add(1, Ordering::Relaxed);
+    let mut selected_probes = [(0, 0, 0, 0); SVM_RECENT_PAGE_CAPACITY + 1];
+    let precompute_probes = batch.code_page_count <= selected_probes.len();
+    if precompute_probes {
+        for (index, &page) in batch.pages[..batch.code_page_count].iter().enumerate() {
+            selected_probes[index] = leaf_filter_probe(page);
+        }
+    }
     // Enumerate executable virtual aliases. NPT alone protects physical pages;
     // a hardware breakpoint must cover every virtual entry to hazardous bytes.
     // A physical table may appear through several virtual paths. Keep each
@@ -2827,15 +2847,21 @@ fn collect_page_breakpoints<C: VmContext>(
         if let Some(index) = leaf_slot {
             let guard = &ctx.state().svm_guard;
             if guard.gate_leaf_filter_valid[index]
-                && batch.pages[..batch.code_page_count]
-                    .iter()
-                    .all(|&page| guard.gate_leaf_filters[index] & leaf_filter_bits(page) != leaf_filter_bits(page))
+                && if precompute_probes {
+                    selected_probes[..batch.code_page_count]
+                        .iter()
+                        .all(|&probe| !leaf_filter_contains(&guard.gate_leaf_filters[index], probe))
+                } else {
+                    batch.pages[..batch.code_page_count].iter().all(|&page| {
+                        !leaf_filter_contains(&guard.gate_leaf_filters[index], leaf_filter_probe(page))
+                    })
+                }
             {
                 cursor += 1;
                 continue;
             }
         }
-        let mut leaf_filter = 0u64;
+        let mut leaf_filter = [0u64; 4];
         for offset in (0..4096).step_by(512) {
             if ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes).is_err() {
                 COLLECT_WALK_READ_FAIL.fetch_add(1, Ordering::Relaxed);
@@ -2849,7 +2875,9 @@ fn collect_page_breakpoints<C: VmContext>(
                     continue;
                 }
                 if walk.level == 1 {
-                    leaf_filter |= leaf_filter_bits(entry & 0x000f_ffff_ffff_f000);
+                    let probe = leaf_filter_probe(entry & 0x000f_ffff_ffff_f000);
+                    leaf_filter[probe.0] |= probe.1;
+                    leaf_filter[probe.2] |= probe.3;
                 }
                 // At the 4KB leaf level, only mappings of selected code
                 // pages can contribute execution breakpoints. Large-page

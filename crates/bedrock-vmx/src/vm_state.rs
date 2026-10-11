@@ -117,7 +117,7 @@ pub(crate) struct SvmGuardScratch {
     pub gate_upper_count: usize,
     /// Cached Bloom filters of executable GPAs in guarded leaf tables.
     /// A cleared bit proves a page cannot have an alias through that table.
-    pub gate_leaf_filters: [u64; SVM_TABLE_CAPACITY],
+    pub gate_leaf_filters: [[u64; 4]; SVM_TABLE_CAPACITY],
     pub gate_leaf_filter_valid: [bool; SVM_TABLE_CAPACITY],
     pub gate_count: usize,
     pub gate_root: u64,
