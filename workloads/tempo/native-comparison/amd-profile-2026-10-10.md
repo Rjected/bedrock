@@ -2449,6 +2449,24 @@ breakpoints and fork replay. A same-box EPYC 4245P pair completed all
 
 The candidate was **1.50 s faster** with **0.9%** fewer exits. Preparation
 cycles per exit also fell from about **2,431 to 2,305**, a **5.2%** reduction
-that supports less per-entry copying. This is one full paired comparison;
-the size of the wall-time gain needs a repeat on another lease. Marker
-snapshots are under ignored `target/boxctl-evidence/amd-borrow-alias-1011/`.
+that supports less per-entry copying. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-borrow-alias-1011/`.
+
+Two more alternating candidate/control runs on a fresh EPYC 4245P box also
+completed all 10,000 transfers. Both variants passed the in-box SVM suite
+before their full runs:
+
+| Run order | Variant | Fair interval | VM exits | Nested-page faults | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Borrowed proof | 59.027 s | 28,744,089 | 21,132,908 | 2,363 |
+| 2 | Unchanged control | 58.358 s | 28,047,210 | 20,609,370 | 2,463 |
+| 3 | Borrowed proof | 60.511 s | 29,425,971 | 21,682,505 | 2,360 |
+| 4 | Unchanged control | 62.391 s | 30,018,006 | 22,118,038 | 2,451 |
+
+The two candidate intervals averaged **59.769 s** versus **60.374 s** for
+the controls, about **1.0%** faster. One pair was slower because the candidate
+had 2.5% more exits; the other was 1.88 s faster. The preparation cost per
+exit fell consistently by about **3.7–4.1%** on the fresh box, so the local
+copy reduction is repeatable while its end-to-end benefit is modest relative
+to run-to-run variation. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-borrow-alias-repeat-1011/`.
