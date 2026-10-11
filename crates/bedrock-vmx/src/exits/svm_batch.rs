@@ -683,6 +683,7 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     }
     let scratch = &mut ctx.state_mut().svm_guard;
     scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
+    scratch.gate_leaf_filter_valid.fill(false);
     if (!scratch.gate_ready || scratch.gate_dirty || scratch.gate_root != root)
         && !preserve_alias_proofs && !guarded_root_switch
     {
@@ -1192,6 +1193,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
             guard.translation_count = 0;
             guard.translation_cursor = 0;
             guard.tree_generation = guard.tree_generation.wrapping_add(1);
+            guard.gate_leaf_filter_valid.fill(false);
             guard.alias_proof.valid = false;
             guard.gate_dirty = false;
             REFRESH_REARM.fetch_add(1, Ordering::Relaxed);
@@ -2602,6 +2604,37 @@ fn remember_alias_proof<C: VmContext>(
     cache.alias_cursor = cache.alias_cursor.wrapping_add(1);
 }
 
+fn leaf_filter_bits(page: u64) -> u64 {
+    let hash = (page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    (1u64 << (hash >> 58)) | (1u64 << (hash.rotate_left(27) >> 58))
+}
+
+fn guarded_leaf_slot(
+    guard: &super::super::vm_state::SvmGuardScratch,
+    page: u64,
+) -> Option<usize> {
+    if !guard.gate_table_index_valid {
+        return None;
+    }
+    let index = &guard.gate_table_index;
+    let mask = index.len() - 1;
+    let shift = 64 - index.len().trailing_zeros();
+    let mut slot = ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize;
+    for _ in 0..index.len() {
+        let entry = index[slot];
+        if entry == 0 {
+            return None;
+        }
+        let table = usize::from(entry - 1);
+        if guard.gate_tables[table] == page {
+            return (guard.gate_levels[table] == 1 && guard.gate_guards[table].valid)
+                .then_some(table);
+        }
+        slot = (slot + 1) & mask;
+    }
+    None
+}
+
 fn collect_page_breakpoints<C: VmContext>(
     ctx: &mut C,
     batch: &mut InstructionBatch,
@@ -2781,6 +2814,28 @@ fn collect_page_breakpoints<C: VmContext>(
             cursor += 1;
             continue;
         }
+        let leaf_slot = if walk.level == 1
+            && tree_guarded
+            && !ctx.state().svm_guard.gate_links_untrusted
+            && ctx.state().svm_guard.gate_mapping_generation
+                == ctx.state().ept.mapping_generation()
+        {
+            guarded_leaf_slot(&ctx.state().svm_guard, walk.table)
+        } else {
+            None
+        };
+        if let Some(index) = leaf_slot {
+            let guard = &ctx.state().svm_guard;
+            if guard.gate_leaf_filter_valid[index]
+                && batch.pages[..batch.code_page_count]
+                    .iter()
+                    .all(|&page| guard.gate_leaf_filters[index] & leaf_filter_bits(page) != leaf_filter_bits(page))
+            {
+                cursor += 1;
+                continue;
+            }
+        }
+        let mut leaf_filter = 0u64;
         for offset in (0..4096).step_by(512) {
             if ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes).is_err() {
                 COLLECT_WALK_READ_FAIL.fetch_add(1, Ordering::Relaxed);
@@ -2792,6 +2847,9 @@ fn collect_page_breakpoints<C: VmContext>(
                 // walker for entries that cannot name executable code.
                 if entry & 1 == 0 || entry & (1 << 63) != 0 {
                     continue;
+                }
+                if walk.level == 1 {
+                    leaf_filter |= leaf_filter_bits(entry & 0x000f_ffff_ffff_f000);
                 }
                 // At the 4KB leaf level, only mappings of selected code
                 // pages can contribute execution breakpoints. Large-page
@@ -2805,6 +2863,11 @@ fn collect_page_breakpoints<C: VmContext>(
                 let slot = (offset / 8 + part as u64) as u16;
                 visit_alias_entry(ctx, batch, hazards, walk, slot, entry, &mut count)?;
             }
+        }
+        if let Some(index) = leaf_slot {
+            let guard = &mut ctx.state_mut().svm_guard;
+            guard.gate_leaf_filters[index] = leaf_filter;
+            guard.gate_leaf_filter_valid[index] = true;
         }
         cursor += 1;
     }
@@ -6033,11 +6096,17 @@ mod tests {
         }
         ctx.state_mut().svm_guard.gate_count = count;
         ctx.state_mut().svm_guard.gate_upper_count = edge_count;
+        let mapping_generation = ctx.state().ept.mapping_generation();
+        ctx.state_mut().svm_guard.gate_mapping_generation = mapping_generation;
+        index_gate_tables(&mut ctx.state_mut().svm_guard);
 
         let hazard = cached_page_hazards(&mut ctx, 0x1000).unwrap();
         let mut batch = planned(&ctx).unwrap();
         collect_page_breakpoints(&mut ctx, &mut batch, &[hazard]).unwrap();
         assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1100]);
+        let leaf = ctx.state().svm_guard.gate_tables[..count]
+            .iter().position(|&page| page == 0x6000).unwrap();
+        assert!(ctx.state().svm_guard.gate_leaf_filter_valid[leaf]);
 
         // A host write bypasses NPT. The next walk must read the changed
         // table instead of trusting its previously guarded edge list.
@@ -6068,6 +6137,21 @@ mod tests {
         assert_eq!(
             &batch.page_breakpoints[..batch.page_breakpoint_count],
             &[0x8000_1100]
+        );
+
+        // Releasing a leaf write guard must bypass its cached absence proof
+        // until the changed PTEs have been read and the gate rebuilt.
+        ctx.memory[0x6008..0x6010].fill(0);
+        ctx.memory[0x6010..0x6018].copy_from_slice(&0x1007u64.to_le_bytes());
+        let leaf = ctx.state().svm_guard.gate_tables[..count]
+            .iter().position(|&page| page == 0x6000).unwrap();
+        ctx.state_mut().svm_guard.gate_guards[leaf].valid = false;
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+        collect_page_breakpoints(&mut ctx, &mut batch, &[hazard]).unwrap();
+        assert_eq!(
+            &batch.page_breakpoints[..batch.page_breakpoint_count],
+            &[0x8000_2100]
         );
     }
 
