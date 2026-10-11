@@ -1332,3 +1332,38 @@ kernel samples, and the system-wide kernel-only sample was dominated by idle
 threads. Neither sample is suitable for attributing the remaining Bedrock
 hotspots. The raw data is under ignored
 `target/boxctl-evidence/amd-rejected-guard-profile-1011/`.
+
+### Investigate AMD breakpoint-address masks (2026-10-11)
+
+The EPYC 4245P box reports both AMD breakpoint-address extension CPUID bits
+(`Fn8000_0001_ECX[26,30]`). All four DR0–DR3 mask MSRs can be read, written
+with a low-bit mask, and restored on a disposable box. The
+[AMD64 system programming manual](https://docs.amd.com/api/khub/documents/sD1_QL~h4Afq2_tvzxqqSQ/content)
+specifies that set mask bits exclude those address bits from instruction
+breakpoint comparison. This permits one breakpoint to cover several unsafe
+entries in an aligned range.
+
+A short instrumented guest run recorded nine hot rejected-page samples, with
+five to seven hazardous instruction entries on most pages. For example, page
+`0x184b000` had offsets `2071, 2183, 3575, 3576, 3735`; four aligned ranges
+can cover them in only 19 bytes total. Page `0x118ee2000` had six entries
+coverable in four ranges spanning 98 bytes. One six-entry page needs a
+512-byte range under a minimum-byte-span four-range plan, so extra harmless
+debug exits may limit the gain. The raw samples are in ignored
+`target/boxctl-evidence/amd-mask-diagnostic-1011/hot-rejected.log`. This
+instrumented run reached its 340-second wall-clock timeout before the Tempo
+transfer markers, so it supplies address distributions, not a performance
+comparison.
+
+An initial implementation expanded the hazard scan to 16 entries, grouped
+virtual addresses into at most four masked ranges, and saved/restored host
+mask MSRs around VMRUN. It built and passed existing SVM smoke/transition
+checks, but seven VMX unit tests then failed because they expected the old
+four-entry fallback. A targeted five-entry hardware probe made a box
+unresponsive. The same probe passed with the last known-good module in 29
+exits, while two candidate controls also locked up with mask use disabled;
+one of those additionally restored the original VMRUN assembly and four-entry
+scan limit. The first prototype is preserved locally as the Git stash
+`WIP AMD masked breakpoints: unsafe hardware prototype` and is **not** on the
+pushed branch. The next step is to isolate the candidate's failing Rust path
+with smaller changes and hardware probes before resuming throughput tests.
