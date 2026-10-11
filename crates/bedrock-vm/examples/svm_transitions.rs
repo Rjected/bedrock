@@ -3,6 +3,9 @@
 use bedrock_vm::{Cr3, Efer, Gdtr, Idtr, RdrandConfig, Regs, SegmentRegister, Vm};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("SVM_CASE").as_deref() == Ok("rep-pmu-probe") {
+        return test_rep_pmu_deadline();
+    }
     if std::env::var("SVM_CASE").as_deref() == Ok("rep-rf") {
         return test_repeated_store_with_rf();
     }
@@ -33,11 +36,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_page_fault()?;
     test_guest_debug_trap()?;
     test_guest_breakpoint_trap()?;
+    test_rep_pmu_deadline()?;
     test_repeated_store_with_rf()?;
     test_boundary_rep_prefix()?;
     test_boundary_rdrand()?;
     test_masked_breakpoints()?;
     Ok(())
+}
+
+fn test_rep_pmu_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x1064].fill(0x90); // 100 ordinary retired instructions.
+    memory[0x1064..0x106b].copy_from_slice(&[
+        0xf3, 0xaa, // REP STOSB with 5,000 iterations.
+        0x31, 0xc0, // XOR EAX, EAX
+        0x0f, 0x01, 0xd9, // VMMCALL shutdown.
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rax = 0x5a;
+    regs.gprs.rcx = 5000;
+    regs.gprs.rdi = 0x8000;
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(1000))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        let stopped = vm.get_regs()?;
+        println!(
+            "SVM_REP_PMU_PROBE reason={} vt={} rip={:#x} rcx={} rdi={:#x} exits={}",
+            exit.exit_reason, exit.emulated_tsc, stopped.rip, stopped.gprs.rcx,
+            stopped.gprs.rdi, vm.get_exit_stats()?.total_exit_count(),
+        );
+        assert_eq!(exit.exit_reason, 259, "REP crossed the requested deadline");
+        assert_eq!(exit.emulated_tsc, 1000);
+        assert_eq!(stopped.rip, 0x1064);
+        assert_eq!(stopped.gprs.rcx, 4100);
+        assert_eq!(stopped.gprs.rdi, 0x8000 + 900);
+        assert!(vm.memory()?[0x8000..0x8000 + 900].iter().all(|&b| b == 0x5a));
+        assert_eq!(vm.memory()?[0x8000 + 900], 0);
+        println!("SVM_REP_PMU_DEADLINE_PASS");
+        return Ok(());
+    }
 }
 
 fn test_masked_breakpoints() -> Result<(), Box<dyn std::error::Error>> {

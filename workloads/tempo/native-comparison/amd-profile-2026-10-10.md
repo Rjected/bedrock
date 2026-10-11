@@ -2535,3 +2535,24 @@ roughly **3–6%**. The first candidate had 1.18 million more exits and was
 faster. This is a repeatable per-entry reduction with a modest, noisy
 end-to-end benefit. Marker snapshots are under ignored
 `target/boxctl-evidence/amd-guard192-1011/`.
+
+### Verify that AMD PMU counting cannot replace REP entry traps
+
+A focused hardware probe starts with 100 NOPs, then a 5,000-iteration
+`REP STOSB`, and requests an exact stop at virtual instruction count 1,000.
+With the normal code-page guard, the HWE 7.0.0-38 EPYC 4245P box stopped
+at the REP RIP with RCX 4,100 and RDI advanced by exactly 900 bytes; the
+full in-box SVM suite passed. The probe is now part of `svm_transitions`.
+
+In an **isolated, unmerged** variant, the page scanner omitted only interior
+REP entries from its hazard list, allowing the same code page to run under
+the global retired-instruction counter. The probe instead reached shutdown
+with all 5,000 iterations complete at virtual count **103** and failed its
+deadline assertion. The broader `svm_bench` suite also failed an instruction
+count assertion, reporting 18 where its reference expected 16. The safe
+module was reloaded afterward and passed the complete in-box SVM suite,
+including the new probe. This rules out merely trusting REP-containing pages
+under the existing AMD PMU path: the counter accounts for the whole REP as
+one retired instruction in this experiment, so it cannot stop a long REP
+at the requested iteration. The unsafe source remains isolated in
+`/tmp/bedrock-amd-rep-pmu-probe-1011`; it was not merged.
