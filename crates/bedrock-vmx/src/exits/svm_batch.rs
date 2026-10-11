@@ -2528,12 +2528,12 @@ fn alias_proof_item(page: u64, hazard: &PageHazards) -> u64 {
     item.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(27)
 }
 
-fn cached_single_page_alias_proof<C: VmContext>(
-    ctx: &C,
+fn cached_single_page_alias_proof<'a, C: VmContext>(
+    ctx: &'a C,
     root: u64,
     page: u64,
     hazard: &PageHazards,
-) -> Option<super::super::vm_state::SvmAliasProof> {
+) -> Option<&'a super::super::vm_state::SvmAliasProof> {
     let guard = &ctx.state().svm_guard;
     if guard.gate_dirty || !((guard.valid && guard.root == root)
         || (guard.gate_ready && guard.gate_root == root)) {
@@ -2550,7 +2550,6 @@ fn cached_single_page_alias_proof<C: VmContext>(
             && proof.page_count == 1 && proof.pages[0] == page
             && proof.counts[0] == hazard.count
             && proof.offsets[0][..hazard.count] == hazard.offsets[..hazard.count])
-        .copied()
 }
 
 fn alias_proof_key(root: u64, batch: &InstructionBatch, hazards: &[PageHazards]) -> u64 {
