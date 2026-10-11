@@ -1325,3 +1325,10 @@ per run. The AMD interval remains about **3.3×** the historical Intel
 24.087-second workload. Logs and marker snapshots are under ignored
 `target/boxctl-evidence/amd-global-diag-1011/` and
 `target/boxctl-evidence/amd-rejected-guard-1011/`.
+
+A further full candidate run passed in **79.652 s** while attempting a
+transfer-phase perf sample. The process-attached sample captured only 41
+kernel samples, and the system-wide kernel-only sample was dominated by idle
+threads. Neither sample is suitable for attributing the remaining Bedrock
+hotspots. The raw data is under ignored
+`target/boxctl-evidence/amd-rejected-guard-profile-1011/`.
