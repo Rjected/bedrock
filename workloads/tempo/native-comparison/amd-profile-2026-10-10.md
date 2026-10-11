@@ -2180,3 +2180,28 @@ candidate runs had more exits than their adjacent controls, so the gain is
 not explained by a lower exit count. The counters bucket only part of the
 exit-recording work; the full interval is the outcome measure. Marker
 snapshots are under ignored `target/boxctl-evidence/amd-exit-record-1011/`.
+
+### Build AMD global batches in the caller's slot
+
+The post-exit-recording profile sampled `__pi_memcpy` at 4.85% self time and
+showed a large batch copy on return from `prepare_global`. The planner now
+constructs its batch directly in the caller's slot. Its compatibility wrapper
+still returns a batch for the planner tests. The candidate module's planner
+disassembly no longer has that return-path `memcpy`. All 262 `bedrock-vmx`
+library tests and the in-box SVM suite passed.
+
+Two same-box EPYC 4245P pairs completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | VM-entry preparation cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | In-place batch | 63.803 s | 29,446,956 | 78.90 billion |
+| 2 | Return-and-copy control | 63.475 s | 28,808,143 | 81.72 billion |
+| 3 | In-place batch | 62.044 s | 28,459,289 | 77.48 billion |
+| 4 | Return-and-copy control | 63.550 s | 29,212,376 | 80.29 billion |
+
+Mean fair interval fell from **63.512 to 62.923 s**, a **0.9%** gain. Mean
+VM-entry preparation cycles fell from **81.00 to 78.19 billion**, about
+**3.5%**, while total exits across each variant differed by only 0.2%.
+The first pair did not improve wall time, so the measured benefit is modest
+and subject to workload variation. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-batch-into-1011/`.

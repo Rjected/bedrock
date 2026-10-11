@@ -2165,6 +2165,21 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
     allow_unsafe: bool,
     window: &super::svm::InstructionWindow,
 ) -> Option<InstructionBatch> {
+    let mut batch = None;
+    prepare_global_into(ctx, allocator, can_count, allow_unsafe, window, &mut batch)?;
+    batch
+}
+
+/// On success, build directly in the caller's batch slot. On failure the
+/// caller must replace the slot before using it.
+pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+    can_count: bool,
+    allow_unsafe: bool,
+    window: &super::svm::InstructionWindow,
+    output: &mut Option<InstructionBatch>,
+) -> Option<()> {
     let page = window.physical.as_u64() & !4095;
     let trusted = ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page));
     if !can_count
@@ -2183,7 +2198,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
     if budget <= InstructionBatch::COUNTER_DEADLINE_MARGIN {
         return None;
     }
-    let mut batch = InstructionBatch {
+    *output = Some(InstructionBatch {
         start: ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?,
         offsets: [0; 65],
         count: 0,
@@ -2208,7 +2223,8 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         global_execution: true,
         endpoint_intercepted: false,
         instruction_budget: budget,
-    };
+    });
+    let batch = output.as_mut().unwrap();
     batch.pages[0] = page;
     if !trusted {
         let hazard = cached_page_hazards(ctx, page)?;
@@ -2229,7 +2245,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
                     .trust_npt_code_4k(allocator, GuestPhysAddr::new(page))
                     .is_some()
             {
-                return Some(batch);
+                return Some(());
             }
             return None;
         }
@@ -2238,7 +2254,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         {
             return None;
         }
-        collect_page_breakpoints(ctx, &mut batch, core::slice::from_ref(&hazard))?;
+        collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
         if batch.page_breakpoint_count == 0 {
             return None;
         }
@@ -2367,7 +2383,7 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
     }
-    Some(batch)
+    Some(())
 }
 
 fn breakpoint_masks_supported() -> bool {

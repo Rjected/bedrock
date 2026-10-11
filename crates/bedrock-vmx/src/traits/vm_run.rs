@@ -435,55 +435,33 @@ where
         if replay_single_step {
             force_single_step = true;
         }
-        let mut batch = if Ctx::V::uses_nested_paging()
-            && !software_exit
-            && !force_single_step
-            && scalar_page.is_none()
-        {
-            instruction_window.as_mut().and_then(|window| {
-                super::super::exits::prepare_global(
-                    ctx,
-                    allocator,
-                    runner.can_count_instructions(),
-                    false,
-                    window,
-                )
-                .or_else(|| {
-                    window.fill_full(ctx).ok()?;
-                    super::super::exits::prepare_instruction_batch(
+        let mut batch = None;
+        if Ctx::V::uses_nested_paging() && !software_exit && !force_single_step {
+            let trusted_scalar = scalar_page.is_some_and(|page| {
+                ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
+            });
+            if !trusted_scalar {
+                if let Some(window) = instruction_window.as_mut() {
+                    if super::super::exits::prepare_global_into(
                         ctx,
+                        allocator,
                         runner.can_count_instructions(),
-                        runner.can_guard_page_tables(),
+                        scalar_page.is_some(),
                         window,
-                    )
-                })
-            })
-        } else if Ctx::V::uses_nested_paging()
-            && !software_exit
-            && !force_single_step
-            && scalar_page.is_some()
-        {
-            if scalar_page.is_some_and(|page| ctx.state().ept.npt_trusted_code_4k(
-                allocator, GuestPhysAddr::new(page))) {
-                None
-            } else {
-                instruction_window.as_mut().and_then(|window| {
-                    super::super::exits::prepare_global(ctx, allocator,
-                        runner.can_count_instructions(), true, window)
-                        .or_else(|| {
-                            window.fill_full(ctx).ok()?;
+                        &mut batch,
+                    ).is_none() {
+                        batch = window.fill_full(ctx).ok().and_then(|_| {
                             super::super::exits::prepare_instruction_batch(
                                 ctx,
                                 runner.can_count_instructions(),
                                 runner.can_guard_page_tables(),
                                 window,
                             )
-                        })
-                })
+                        });
+                    }
+                }
             }
-        } else {
-            None
-        };
+        }
         force_single_step = false;
         let scalar_execute = if !software_exit {
             scalar_page
