@@ -1745,3 +1745,38 @@ faults, whereas the other candidate runs had more faults than their controls.
 That variation is too large to attribute a reliable gain to the cap, so both
 experimental page limits were reverted. Logs and marker snapshots are under
 ignored `target/boxctl-evidence/amd-pred-only-1011/`.
+
+### Pair a trusted page with a predicted hazardous successor
+
+A sampled classifier for execute faults after global batches found that 143
+of 1,107 samples had a globally trusted current page, no breakpoint slots in
+use, and a faulting hazardous target whose cached singleton proof fit the
+available slots. This exposed a planner gap: the trusted-page branch never
+tried an optional predicted successor. The diagnostic source was removed
+after capture; its output is under ignored
+`target/boxctl-evidence/amd-fit-headroom-1011/`.
+
+The planner now admits a predicted hazardous successor when its cached code
+translation, hazard scan, and single-page alias proof are valid, its boundary
+is guarded, and all required breakpoints fit. The globally trusted current
+page uses no breakpoint slots; the successor's cached mask supplies the
+hardware breakpoints. The combined batch write-guards both pages. A focused
+unit test covers the pairing and rejection when the cached alias proof is
+invalid. All 261 VMX tests, 40 VM-library tests, and the in-box SVM quick
+suite passed. Each full run completed 10,000 transfers with no failures.
+
+| Run order | Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Paired trusted/successor | 70.751 s | 21,484,965 | 89.25 billion |
+| 2 | Unchanged control | 71.131 s | 22,226,493 | 89.70 billion |
+| 3 | Paired trusted/successor | 69.137 s | 20,732,642 | 88.24 billion |
+| 4 | Unchanged control | 73.676 s | 22,984,012 | 94.03 billion |
+
+The candidate averaged **69.944 s** versus **72.404 s** for the two
+same-box controls, a **3.4%** shorter transfer interval and about **1.50
+million** fewer nested-page faults per run. The first pair improved by only
+0.38 s, so this is a modest gain with run-to-run variation rather than a
+precise throughput estimate. It remains about **2.9×** the historical Intel
+24.087-second interval. Logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-trusted-pred-1011/`. All module builds, loads,
+and application tests ran inside `box-e6354dd8`, not on the local machine.

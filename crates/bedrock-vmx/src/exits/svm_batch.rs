@@ -2306,6 +2306,47 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
             batch.page_count += 1;
             hazard_count += other.count;
         }
+    } else {
+        // A globally trusted current page uses no debug-register slots. A
+        // predicted hazardous successor can share its counted interval when
+        // its independently cached alias proof fits those free slots. The
+        // trusted-page proof excludes unsafe suffixes; the successor's
+        // guarded boundary covers the reverse join.
+        let current_linear = window.linear & !4095;
+        let recent = ctx.state().svm_recent_pages;
+        let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
+            & 0x000f_ffff_ffff_f000;
+        let predicted = predicted_second_successor(
+            &ctx.state().svm_guard, root, recent[1], current_linear,
+        ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
+        if let Some(linear) = predicted.filter(|&linear| linear != current_linear) {
+            if let Some(physical) = cached_code_translation(ctx, linear) {
+                if physical != page
+                    && !gate_table_contains(&ctx.state().svm_guard, physical)
+                    && !ctx.state().ept.npt_trusted_code_4k(
+                        allocator, GuestPhysAddr::new(physical))
+                {
+                    if let Some(hazard) = cached_page_hazards(ctx, physical) {
+                        if hazard.count != 0 && hazard.boundary_guarded {
+                            if let Some(proof) =
+                                cached_single_page_alias_proof(ctx, root, physical, &hazard)
+                            {
+                                if proof.breakpoint_count != 0
+                                    && proof.breakpoint_count <= batch.page_breakpoints.len()
+                                {
+                                    batch.pages[1] = physical;
+                                    batch.code_page_count = 2;
+                                    batch.page_count = 2;
+                                    batch.page_breakpoints = proof.breakpoints;
+                                    batch.page_breakpoint_masks = proof.breakpoint_masks;
+                                    batch.page_breakpoint_count = proof.breakpoint_count;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     Some(batch)
 }
@@ -4388,6 +4429,53 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn trusted_global_page_can_guard_a_predicted_hazardous_successor() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page),
+                HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        ctx.set_guest_rip(0x2000);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
+            .unwrap().page_breakpoint_count, 1);
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)).unwrap();
+        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
+            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000, valid: true };
+        ctx.set_guest_rip(0x1000);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
+        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000]);
+        assert_eq!(batch.page_breakpoint_count, 1);
+        assert!(breakpoint_matches(&batch, 0x2100));
+        let guard = protect(&mut ctx, &allocator, &batch).unwrap();
+        assert_eq!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x2000))
+            .unwrap().1.bits() & 2, 0);
+        guard.restore(&mut ctx, &allocator);
+        for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
+            if proof.page_count == 1 && proof.pages[0] == 0x2000 {
+                proof.valid = false;
+            }
+        }
+        assert_eq!(prepare_global(&mut ctx, &allocator, true, false, &window)
+            .unwrap().code_page_count, 1);
     }
 
     #[test]
