@@ -2046,7 +2046,7 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
     };
     if cache.hazard_memos[index].guarded {
         let guard = cache.hazard_memos[index].write_guard;
-        if cache.hazard_memos[index].rejected || cache.hazard_memos[index].proof.count == 0 {
+        if !cache.hazard_memos[index].rejected && cache.hazard_memos[index].proof.count == 0 {
             guard.restore(&mut ctx.state_mut().ept, allocator);
             let cache = &mut ctx.state_mut().svm_guard;
             cache.hazard_memos[index].guarded = false;
@@ -2066,10 +2066,16 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
         cache.hazard_guard_count -= 1;
     }
     let memo = &ctx.state().svm_guard.hazard_memos[index];
-    if memo.rejected || memo.proof.count == 0 || memo.hits < 16 {
+    // Pages with more hazards than the four debug registers remain NX, but
+    // their exact-byte rejection is still reusable while writes are trapped.
+    // Guard only very hot rejected pages and give them additional slots so
+    // they do not displace ordinary hazardous code proofs.
+    if (!memo.rejected && memo.proof.count == 0)
+        || memo.hits < if memo.rejected { 4096 } else { 16 }
+    {
         return;
     }
-    if ctx.state().svm_guard.hazard_guard_count >= 16 {
+    if ctx.state().svm_guard.hazard_guard_count >= if memo.rejected { 24 } else { 16 } {
         let cache = &mut ctx.state_mut().svm_guard;
         let now = cache.hazard_guard_clock;
         if now.wrapping_sub(cache.hazard_guard_last_check) < 1 << 16 {
@@ -6355,6 +6361,40 @@ mod tests {
         assert!(!ctx.state().svm_guard.hazard_memos[0].valid);
         assert_ne!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x1000))
             .unwrap().1.bits() & 2, 0);
+    }
+
+    #[test]
+    fn rejected_hot_page_guard_rechecks_after_a_guest_write() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        for offset in [0x100, 0x200, 0x300, 0x400, 0x500] {
+            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf3, 0xa4]);
+        }
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        ctx.state_mut().ept.map_4k(
+            &mut allocator, GuestPhysAddr::new(0x1000), HostPhysAddr::new(0x101000),
+            bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+            bedrock_ept::EptMemoryType::WriteBack,
+        ).unwrap();
+        for _ in 0..4097 {
+            assert!(!globally_safe_code(&mut ctx, 0x1000));
+        }
+        let (_, Some(index)) = hazard_memo_lookup(&ctx, 0x1000) else { panic!("missing memo"); };
+        assert!(ctx.state().svm_guard.hazard_memos[index].rejected);
+        protect_recurrent_code(&mut ctx, &allocator, 0x1000);
+        assert!(ctx.state().svm_guard.hazard_memos[index].guarded);
+        let revision = ctx.state().svm_guard.hazard_memos[index].revision;
+        assert!(!globally_safe_code(&mut ctx, 0x1000));
+        assert_eq!(ctx.state().svm_guard.hazard_memos[index].revision, revision);
+
+        assert!(release_recurrent_code_write(&mut ctx, &allocator, 0x1000));
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        assert!(globally_safe_code(&mut ctx, 0x1000));
+        let (_, Some(new_index)) = hazard_memo_lookup(&ctx, 0x1000) else { panic!("missing new memo"); };
+        assert!(ctx.state().svm_guard.hazard_memos[new_index].revision > revision);
     }
 
     #[test]
