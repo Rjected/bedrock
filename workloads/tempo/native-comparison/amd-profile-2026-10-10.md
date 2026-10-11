@@ -1116,3 +1116,21 @@ marker snapshots and perf reports are in ignored
 `target/boxctl-evidence/amd-profile-successor-1011/`,
 `target/boxctl-evidence/amd-stale-guard-1011/`, and
 `target/boxctl-evidence/amd-stale-guard-ab-1011/`.
+
+### Profile the adaptive guard build
+
+The pushed adaptive build (`a3bb1cb`) passed another complete 10,000-transfer
+run on the same EPYC 4245P box in **83.400 s** between fair markers. The
+transfer interval recorded **23,451,327 nested-page faults**, **7,479,580
+monitor-trap exits**, and **126.66 billion VM-entry preparation cycles**. The
+guest emitted `TEMPO_TXGEN_PASS`.
+
+A 25-second, 99 Hz transfer-phase `perf` sample collected 2,494 samples with
+none lost. The leading symbols were `svm_run_guest` **27.04%**,
+`page_hazards_memo` **9.49%**, and `collect_page_breakpoints` **5.33%**.
+`protect_recurrent_code` was only **0.08%**, confirming that the bounded
+replacement check removed its earlier scan overhead. These sample shares are
+not a cycle decomposition, but they point to the still-high exit rate and
+per-exit code-page preparation as the next bottlenecks. The log, marker
+snapshots, and perf report are under ignored
+`target/boxctl-evidence/amd-profile-adaptive-1011/`.
