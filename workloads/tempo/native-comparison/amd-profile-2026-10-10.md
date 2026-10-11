@@ -1285,3 +1285,43 @@ guest XSETBV exits in both candidate and control transfer intervals. Thus the
 equality branch could not skip the writes on this workload. The variant was
 not merged. Evidence is under ignored
 `target/boxctl-evidence/amd-skip-xcr0-1011/`.
+
+### Retain exact-byte proofs for very hot rejected pages
+
+An instrumented full Tempo run on a fresh EPYC 4245P box passed in **81.445 s**.
+Across nearby diagnostic snapshots around the transfer markers, the global
+planner attempted roughly 30 million batches and rejected about 5.4 million
+because the current page had no usable hazard scan. A second full run passed
+in **81.022 s** and showed that more than 7.2 million hazard-memo rejection
+lookups over a similar interval were for pages with more entries than the four
+hardware breakpoint slots; only about 0.16 million were for forbidden boundary
+bytes. These memo lookup counts include calls outside the global planner.
+The hot-page diagnostic then passed in **80.004 s**; every logged hot rejection
+during its transfer interval contained `REP` string patterns, with no RDRAND
+or SYSRET patterns. The hash-table hint was already effective, so this points
+to repeated 4 KB exact-byte comparisons on pages that cannot enter a global
+batch, rather than alias-cache misses.
+
+The retained change write-protects a rejected memo only after 4,096 uses,
+allowing its exact-byte rejection to be reused until a guest or host write
+invalidates it. It raises the total guard ceiling from 16 to 24 only for
+these hot rejected pages. It does not make the page globally executable or
+bypass the hazard proof or scalar fallback. A focused test confirms that a guest
+write revokes the guard and changed bytes are rescanned. The 259 VMX and 40
+VM library tests, box SVM smoke and transition checks, and four complete
+Tempo workloads passed. On the same box, in candidate/control/candidate/control
+order:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Guard hot rejected pages | 80.872 s | 22,586,661 | 123.61 billion |
+| Unchanged branch | 82.427 s | 22,623,867 | 126.69 billion |
+| Guard hot rejected pages, repeat | 79.376 s | 21,990,253 | 121.87 billion |
+| Unchanged branch, repeat | 82.155 s | 22,706,810 | 125.23 billion |
+
+The candidate pair averaged **80.124 s** versus **82.291 s** for the controls,
+a **2.6%** improvement with about **3.22 billion** fewer preparation cycles
+per run. The AMD interval remains about **3.3×** the historical Intel
+24.087-second workload. Logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-global-diag-1011/` and
+`target/boxctl-evidence/amd-rejected-guard-1011/`.

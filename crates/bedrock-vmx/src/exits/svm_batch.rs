@@ -2068,8 +2068,8 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
     let memo = &ctx.state().svm_guard.hazard_memos[index];
     // Pages with more hazards than the four debug registers remain NX, but
     // their exact-byte rejection is still reusable while writes are trapped.
-    // Guard only very hot rejected pages and give them additional slots so
-    // they do not displace ordinary hazardous code proofs.
+    // Guard only very hot rejected pages and give them eight extra slots
+    // before considering stale-guard replacement.
     if (!memo.rejected && memo.proof.count == 0)
         || memo.hits < if memo.rejected { 4096 } else { 16 }
     {
