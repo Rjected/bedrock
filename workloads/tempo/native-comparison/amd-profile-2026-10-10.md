@@ -1134,3 +1134,24 @@ not a cycle decomposition, but they point to the still-high exit rate and
 per-exit code-page preparation as the next bottlenecks. The log, marker
 snapshots, and perf report are under ignored
 `target/boxctl-evidence/amd-profile-adaptive-1011/`.
+
+### Retain sixteen active code guards
+
+With stale guards now replaced, the eight-page write-guard limit can leave
+frequently used hazardous pages unguarded. An isolated sixteen-guard build
+passed 257 VMX and 40 VM library tests, the EPYC 4245P box SVM suite, and two
+complete 10,000-transfer runs. In candidate/control/candidate order on the
+same box, using identical guest artifacts:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Sixteen guards | 82.804 s | 23,833,530 | 122.47 billion |
+| Eight guards | 84.514 s | 23,842,225 | 127.04 billion |
+| Sixteen guards repeat | 82.233 s | 23,911,842 | 120.14 billion |
+
+The sixteen-guard pair averaged **82.519 s**, **2.4% faster** than the
+same-box control. Fault counts were nearly unchanged; the lower VM-entry
+preparation cycles in both candidate runs are consistent with more code-byte
+proofs being retained. This is a small paired gain, not a claim that the
+remaining **3.4×** gap to the historical Intel run is solved. Guest logs and
+marker snapshots are under ignored `target/boxctl-evidence/amd-guard16-1011/`.
