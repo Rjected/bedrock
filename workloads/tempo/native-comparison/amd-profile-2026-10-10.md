@@ -1211,3 +1211,25 @@ The AMD interval remains about **3.3×** the historical Intel 24.087-second
 result. Diagnostic and run logs are under ignored
 `target/boxctl-evidence/box-a5046a49/` and
 `target/boxctl-evidence/amd-second-order-1011/`.
+
+### Check a third page of prediction history
+
+An isolated diagnostic also keyed the next-page prediction by the two pages
+preceding the current page. Across 28 million transitions in snapshots near
+the transfer markers, the two-page-context predictor hit **60.0%**, while
+three-page context hit **70.8%**; three-page lookup was cold **3.0%** of the
+time. The diagnostic completed all 10,000 transfers. The production variant
+passed 258 VMX and 40 VM library tests, box smoke and transition checks, and
+two complete Tempo runs, but the extra accuracy did not improve elapsed time:
+
+| Same EPYC 4245P box | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Two-page context, two-run mean | 80.265 s | 22,289,527 | 121.21 billion |
+| Three-page context | 80.989 s | 21,947,097 | 124.97 billion |
+| Three-page context repeat | 80.318 s | 21,920,328 | 123.15 billion |
+
+The three-page pair averaged **80.653 s**, about **0.4 s slower** despite
+roughly 0.36 million fewer faults per run. The larger table and lookup path
+remain isolated; the shared branch retains two-page context. Diagnostic and
+run evidence is under ignored `target/boxctl-evidence/box-a5046a49/` and
+`target/boxctl-evidence/amd-third-order-1011/`.
