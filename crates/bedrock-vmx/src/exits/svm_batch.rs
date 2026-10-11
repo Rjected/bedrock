@@ -2205,7 +2205,9 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
             & 0x000f_ffff_ffff_f000;
         let predicted = predicted_successor(&ctx.state().svm_guard, root, current_linear);
         for previous_linear in predicted.into_iter().chain(recent) {
-            if hazard_count >= batch.page_breakpoints.len() || batch.code_page_count == 3 {
+            if hazard_count >= batch.page_breakpoints.len()
+                || batch.code_page_count == hazards.len()
+            {
                 break;
             }
             if previous_linear == u64::MAX || previous_linear == current_linear {
@@ -4230,6 +4232,52 @@ mod tests {
                     & 2,
                 0
             );
+        }
+    }
+
+    #[test]
+    fn global_counter_can_use_all_four_breakpoints() {
+        let mut ctx = paged_context(&[0x90]);
+        let pages = [0x1000usize, 0x2000, 0x9000, 0xa000];
+        for page in pages {
+            ctx.memory[page..page + 4096].fill(0x90);
+            ctx.memory[page + 0x100..page + 0x103]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in pages {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page as u64),
+                HostPhysAddr::new(page as u64 + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        for page in pages {
+            ctx.set_guest_rip(page as u64);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
+                .unwrap().code_page_count, 1);
+        }
+        for page in pages {
+            let hazard = cached_page_hazards(&mut ctx, page as u64).unwrap();
+            assert!(cached_single_page_alias_proof(&ctx, 0x3000, page as u64, &hazard).is_some());
+        }
+        ctx.set_guest_rip(0x1000);
+        ctx.state_mut().svm_recent_pages[..4]
+            .copy_from_slice(&[0x1000, 0x2000, 0x9000, 0xa000]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(batch.code_page_count, 4);
+        assert_eq!(batch.page_breakpoint_count, 4);
+        for page in pages {
+            assert!(batch.page_breakpoints[..4].contains(&(page as u64 + 0x100)));
         }
     }
 
