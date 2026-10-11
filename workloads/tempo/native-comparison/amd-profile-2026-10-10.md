@@ -1892,3 +1892,38 @@ executable page set is attempted again. Snapshots and logs are under ignored
 `target/boxctl-evidence/amd-prep-buckets-1011/` and
 `target/boxctl-evidence/amd-clean-combined-stop-1011/`. All kernel builds,
 loads, and hardware tests ran in the disposable box.
+
+### Test an additional cached successor and the host PMU read
+
+The global batch planner formerly chose the contextual page successor when
+available and only fell back to the ordinary successor if the contextual
+entry was absent. A candidate tried both distinct predictions before recent
+pages, with a focused test showing that the ordinary successor could be
+admitted even when absent from the recent-page list. All 261 VMX tests and
+the in-box SVM suite passed. Two same-box full Tempo pairs on an EPYC 4245P
+completed 10,000 transfers each:
+
+| Run order | Variant | Fair interval | Nested-page faults | VM-entry preparation cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Two predictions | 70.779 s | 21,350,406 | 92.02 billion |
+| 2 | Unchanged | 71.806 s | 21,717,767 | 92.57 billion |
+| 3 | Two predictions | 70.823 s | 21,299,652 | 92.09 billion |
+| 4 | Unchanged | 69.668 s | 21,043,011 | 89.63 billion |
+
+The first pair favored the candidate and the second favored the control.
+Their averages differ by only **0.064 s**, with no consistent fault-count
+gain. The predictor change was reverted. An initial box had an EPYC 4244P
+and failed the control-flow acceleration assertion on both candidate and
+unchanged builds; it was retired. These paired measurements came from a
+fresh 4245P box. Logs and snapshots are under ignored
+`target/boxctl-evidence/amd-dual-predictor-1011/`.
+
+The pinned host perf event's count is not used for guest retirement, so a
+separate candidate removed the hardware `event->pmu->read(event)` call
+after counted SVM exits while keeping its active-event check. The box SVM
+suite and all 10,000 transfers passed, but the full interval was **71.267 s**
+against an adjacent unchanged **70.455 s**. Faults rose from **21,271,457
+to 21,739,843**, and preparation rose from **91.20 to 91.86 billion
+cycles**. That candidate was also reverted; this run does not support a
+PMU-read optimization. Logs and snapshots are under ignored
+`target/boxctl-evidence/amd-pmu-read-1011/`.
