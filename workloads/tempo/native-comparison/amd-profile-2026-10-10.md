@@ -1948,3 +1948,28 @@ The runner/guest cycles per exit show no consistent improvement. Most of the
 first pair's interval difference coincided with a lower exit count. The
 candidate was reverted. Logs and snapshots are under ignored
 `target/boxctl-evidence/amd-hostsave-1011/`; no module was loaded locally.
+
+### Index the hot code-proof and translation caches
+
+The 64-entry code-proof and translation caches scanned linearly even for
+repeated pages. A direct, one-based index now points to a likely entry; the
+lookup checks the active count and full page key, then falls back to the
+existing scan on a miss. Stale indices after eviction or proof invalidation
+therefore cannot return an old proof. The candidate passed all 261 VMX unit
+tests and the in-box SVM suite. Two alternating same-box Tempo pairs on an
+EPYC 4245P completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | Nested-page faults | VM-entry preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Indexed caches | 68.781 s | 28,289,760 | 20,801,078 | 3,052 |
+| 2 | Unchanged | 69.916 s | 28,569,353 | 21,004,004 | 3,142 |
+| 3 | Indexed caches | 69.496 s | 28,518,609 | 20,982,084 | 3,063 |
+| 4 | Unchanged | 69.801 s | 28,578,145 | 20,997,632 | 3,106 |
+
+Both pairs favored the index. Mean fair interval fell from **69.858 to
+69.138 s** (about **1.0%**), and preparation cycles per exit fell in both
+pairs. The second pair had nearly equal exit counts, supporting a real
+planning-cost reduction. This is a modest gain; the remaining ~3x gap to the
+earlier Intel result still requires a larger reduction in VM exits or entry
+work. Logs and snapshots are under ignored
+`target/boxctl-evidence/amd-indexed-cache-1011/`.

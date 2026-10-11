@@ -1373,10 +1373,18 @@ pub(super) fn cached_code_translation<C: VmContext>(ctx: &mut C, linear: u64) ->
                 & 0x000f_ffff_ffff_f000);
     if ctx.state().svm_guard.valid || gate_guarded {
         let cache = &ctx.state().svm_guard;
-        if let Some(&(_, physical)) = cache.translations[..cache.translation_count]
-            .iter()
-            .find(|&&(page, _)| page == linear)
-        {
+        let key = ((linear >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56) as usize;
+        let hint = usize::from(cache.translation_lookup[key]);
+        let found = if hint != 0 && hint <= cache.translation_count
+            && cache.translations[hint - 1].0 == linear {
+            Some(hint - 1)
+        } else {
+            cache.translations[..cache.translation_count]
+                .iter().position(|&(page, _)| page == linear)
+        };
+        if let Some(index) = found {
+            let physical = cache.translations[index].1;
+            ctx.state_mut().svm_guard.translation_lookup[key] = (index + 1) as u8;
             return Some(physical);
         }
     }
@@ -1393,6 +1401,8 @@ pub(super) fn cached_code_translation<C: VmContext>(ctx: &mut C, linear: u64) ->
             slot
         };
         cache.translations[slot] = (linear, physical);
+        let key = ((linear >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56) as usize;
+        cache.translation_lookup[key] = (slot + 1) as u8;
     }
     Some(physical)
 }
@@ -1851,17 +1861,25 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
         }
     }
     let cache = &ctx.state().svm_guard;
-    if let Some(proof) = cache.code[..cache.code_count]
-        .iter()
-        .find(|p| p.page == physical)
-    {
-        return Some(PageHazards {
+    let key = ((physical >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56) as usize;
+    let hint = usize::from(cache.code_lookup[key]);
+    let found = if hint != 0 && hint <= cache.code_count
+        && cache.code[hint - 1].page == physical {
+        Some(hint - 1)
+    } else {
+        cache.code[..cache.code_count].iter().position(|p| p.page == physical)
+    };
+    if let Some(index) = found {
+        let proof = &cache.code[index];
+        let hazards = PageHazards {
             boundary: proof.boundary,
             boundary_guarded: proof.boundary_guarded,
             edge: proof.edge,
             offsets: proof.offsets,
             count: proof.count,
-        });
+        };
+        ctx.state_mut().svm_guard.code_lookup[key] = (index + 1) as u8;
+        return Some(hazards);
     }
     let hazards = page_hazards_memo(ctx, physical)?;
     let cache = &mut ctx.state_mut().svm_guard;
@@ -1882,6 +1900,7 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
         offsets: hazards.offsets,
         count: hazards.count,
     };
+    cache.code_lookup[key] = (index + 1) as u8;
     Some(hazards)
 }
 

@@ -62,6 +62,8 @@ pub(crate) struct SvmGuardScratch {
     pub code: [SvmCodeProof; SVM_CODE_PAGE_CAPACITY],
     pub code_count: usize,
     pub code_cursor: usize,
+    // One-based hint into `code`; the page and active count are checked on hit.
+    pub code_lookup: [u8; 256],
     pub hazard_memos: [SvmHazardMemo; SVM_HAZARD_MEMO_CAPACITY],
     pub hazard_memo_cursor: usize,
     pub hazard_guard_clock: u64,
@@ -73,6 +75,8 @@ pub(crate) struct SvmGuardScratch {
     pub translations: [(u64, u64); SVM_CODE_PAGE_CAPACITY],
     pub translation_count: usize,
     pub translation_cursor: usize,
+    // One-based hint into `translations`, safe across cache resets/evictions.
+    pub translation_lookup: [u8; 256],
     /// Last observed destination from each virtual code page in a guarded CR3.
     /// Predictions only affect page selection; alias and byte proofs still gate execution.
     pub successors: [SvmPageSuccessor; SVM_SUCCESSOR_CAPACITY],
