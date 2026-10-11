@@ -1180,3 +1180,34 @@ combined runs had fewer nested-page faults than either sixteen-guard run.
 The guest reported `TEMPO_TXGEN_PASS` every time. Logs and marker snapshots
 are under ignored `target/boxctl-evidence/amd-fourpage-1011/` and
 `target/boxctl-evidence/amd-combined-1011/`.
+
+### Condition the next-page prediction on the previous page
+
+A diagnostic table keyed by guarded CR3, previous code page, and current code
+page compared next-page predictions against the existing current-page-only
+table without changing execution. Across 28 million observed transitions in
+the dmesg snapshots near the transfer markers, the existing predictor hit
+**24.7%** and the contextual predictor hit **59.8%**; contextual lookup was
+cold **2.0%** of the time. The snapshots bracket nearby million-transition
+logging points rather than the exact marker instants. The diagnostic guest
+completed all 10,000 transfers.
+
+The production change uses the contextual destination first, falling back to
+the current-page predictor when no contextual entry exists. Every proposed
+page still passes the translation, exact-byte, boundary, alias, and hardware
+breakpoint proofs before execution is enabled. The 258 VMX and 40 VM library
+tests, box SVM checks, and complete Tempo workload passed. On the same EPYC
+4245P box, in candidate/control/candidate order:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Contextual predictor | 79.935 s | 22,021,776 | 121.96 billion |
+| Current-page predictor | 82.876 s | 23,473,794 | 124.03 billion |
+| Contextual predictor repeat | 80.596 s | 22,557,277 | 120.47 billion |
+
+The contextual pair averaged **80.265 s**, **3.1% faster** than the same-box
+control, and saved roughly **0.9–1.5 million** nested-page faults per run.
+The AMD interval remains about **3.3×** the historical Intel 24.087-second
+result. Diagnostic and run logs are under ignored
+`target/boxctl-evidence/box-a5046a49/` and
+`target/boxctl-evidence/amd-second-order-1011/`.
