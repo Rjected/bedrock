@@ -303,8 +303,6 @@ impl InstructionBatch {
 pub trait VmRunner {
     type Vmcs: VirtualMachineControlStructure;
 
-    fn set_instruction_batch(&mut self, _batch: Option<InstructionBatch>) {}
-
     fn can_count_instructions(&self) -> bool {
         false
     }
@@ -348,5 +346,6 @@ pub trait VmRunner {
         &mut self,
         ctx: &mut super::VmxContext,
         vmcs: &Self::Vmcs,
+        batch: Option<&InstructionBatch>,
     ) -> Result<(), VmEntryError>;
 }

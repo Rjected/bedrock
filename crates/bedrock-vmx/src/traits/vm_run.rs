@@ -530,7 +530,6 @@ where
                 software_exit,
             );
         }
-        runner.set_instruction_batch(batch);
         let pre_guest_tsc = rdtsc();
         ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
             pre_guest_tsc.saturating_sub(pre_entry_tsc);
@@ -540,7 +539,7 @@ where
         let run_result = if software_exit {
             Ok(())
         } else {
-            unsafe { runner.run(&mut state.vmx_ctx, &state.vmcs) }
+            unsafe { runner.run(&mut state.vmx_ctx, &state.vmcs, batch.as_ref()) }
         };
         let post_guest_tsc = rdtsc();
         ctx.state_mut().exit_stats.guest_cycles += post_guest_tsc.saturating_sub(pre_guest_tsc);
@@ -787,7 +786,7 @@ mod tests {
     use crate::events::{EventCategories, EventKind, EVENT_BUFFER_SIZE, EVENT_HEADER_SIZE};
     use crate::test_mocks::{MockFrameAllocator, MockMachine, MockVmcs};
     use crate::tests::MockVmContext;
-    use crate::traits::{VmEntryError, VmxContext};
+    use crate::traits::{InstructionBatch, VmEntryError, VmxContext};
 
     struct MustNotEnterGuest;
 
@@ -798,6 +797,7 @@ mod tests {
             &mut self,
             _ctx: &mut VmxContext,
             _vmcs: &Self::Vmcs,
+            _batch: Option<&InstructionBatch>,
         ) -> Result<(), VmEntryError> {
             panic!("guest entered before draining the staged timer event");
         }

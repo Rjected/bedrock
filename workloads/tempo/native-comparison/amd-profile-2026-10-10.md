@@ -2205,3 +2205,46 @@ VM-entry preparation cycles fell from **81.00 to 78.19 billion**, about
 The first pair did not improve wall time, so the measured benefit is modest
 and subject to workload variation. Marker snapshots are under ignored
 `target/boxctl-evidence/amd-batch-into-1011/`.
+
+### Recheck TLB flush and profile the in-place batch build
+
+A fresh 25-second, 99 Hz host profile of the pushed in-place batch build
+collected 2,479 samples with none lost while the full 10,000-transfer Tempo
+run completed in **64.081 s**. `svm_run_guest` had 30.17% self samples,
+breakpoint collection 4.61%, `__pi_memcpy` 4.33%, code-hazard memo lookup
+4.12%, and `prepare_global_into` 2.66%. The profile and marker snapshots
+are under ignored `target/boxctl-evidence/amd-after-batch-1011/`.
+
+The SVM backend currently requests a TLB flush on every VMRUN.
+[AMD's APM Volume 2, section 15.16.1](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2)
+says VMRUN reads but does not clear the VMCB `TLB_CONTROL` field, so this is
+a persistent cost. A disposable diagnostic build set that field to zero to
+measure whether it could simply be removed. The first mixed-memory box test
+failed: the guest computed the expected checksum but a guest memory word
+read back as zero. The execution guard changes NPT permissions and mappings
+across entries; omitting the invalidation is incorrect. The diagnostic edit
+remained in an isolated worktree and was never pushed.
+
+### Borrow the instruction batch at VM entry
+
+The run loop previously copied its `InstructionBatch` into the SVM runner on
+every entry, even though the batch remained live on the run-loop stack and
+was used again after the exit. `VmRunner::run` now borrows the batch for that
+single entry, and the real runner no longer stores a copy. All 262 VMX
+library tests and the in-box SVM suite passed, including COW and replay.
+
+Two same-box EPYC 4245P pairs completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | VM-entry preparation cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Borrowed batch | 60.988 s | 28,378,786 | 74.21 billion |
+| 2 | Copied-batch control | 63.765 s | 29,467,016 | 79.31 billion |
+| 3 | Borrowed batch | 63.411 s | 29,269,324 | 78.27 billion |
+| 4 | Copied-batch control | 62.852 s | 28,919,223 | 78.48 billion |
+
+Mean fair interval fell from **63.308 to 62.199 s** (about **1.75%**).
+The candidate had **1.26%** fewer exits overall, which explains part of
+the wall-time gain; the second pair favored the control on wall time.
+Across both pairs, preparation cycles per exit fell from **2,703 to 2,645**
+(about **2.13%**), supporting a real reduction in per-entry work. Marker
+snapshots are under ignored `target/boxctl-evidence/amd-borrowed-batch-1011/`.
