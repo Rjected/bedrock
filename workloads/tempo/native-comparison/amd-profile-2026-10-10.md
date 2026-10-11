@@ -1597,3 +1597,15 @@ one-hour expiry; it contributed no timing result. Logs, marker snapshots,
 and the candidate patch are under ignored
 `target/boxctl-evidence/amd-guard128-1011/`. The remaining gap to the
 historical Intel 24.087-second interval is about **3×**.
+
+An isolated 192-guard candidate (200 slots for very hot rejected pages)
+passed 260 VMX tests, the box suite, and all 10,000 Tempo transfers, but did
+not improve the application interval on the same second EPYC 4245P box:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| 192 guards | 71.401 s | 22,329,125 | 89.91 billion |
+| 128 guards | 71.390 s | 22,059,410 | 90.50 billion |
+
+The 192-guard cap was reverted. Its patch, logs, and marker snapshots are
+under ignored `target/boxctl-evidence/amd-guard192-1011/`.
