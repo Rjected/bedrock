@@ -1004,3 +1004,39 @@ hazard-hint misses. Logs, marker JSON and diagnostic dmesg are in the ignored
 `target/boxctl-evidence/amd-hazard-guard-limit-1010/` and
 `target/boxctl-evidence/amd-npf-diag-1010/` directories. The diagnostic
 instrumentation and guard-limit variants remain in isolated worktrees.
+
+### Select a likely successor code page
+
+A same-box test of retaining the current hazardous page after three-page
+global batches passed local and SVM tests but only reduced the fair interval
+from **89.889 s** to **89.136 s** and nested-page faults from **25,181,771**
+to **25,013,709**. This is too small against observed run-to-run variation;
+the change remains isolated.
+
+An execute-fault diagnostic on the unchanged branch recorded where the faulting
+guest RIP appeared in the recent-page set. SVM did not provide a valid guest
+linear address for these faults, so the diagnostic used guest RIP plus CS base.
+Over a 25,165,824-fault window aligned to the transfer interval, **0.5%** were
+on the same page, **12.1%** on the previous page, **10.0%** on the second most
+recent page, **44.3%** on older recent pages, and **33.0%** outside the eight-page
+set. The full diagnostic run passed in **88.158 s**; the rank percentages use
+nearby dmesg snapshots rather than exact timing markers.
+
+The next candidate records the last observed successor for each virtual code
+page and guarded CR3. When forming a global batch, it tries that page before
+the existing recent-page list. It still requires the exact translation, byte,
+cross-page boundary, alias, and breakpoint proofs before enabling execution.
+The 256 local VMX tests, box SVM smoke and transition checks, and two complete
+10,000-transfer runs passed. The same-box fair results so far are:
+
+| Variant | Transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Unchanged branch | 89.889 s | 25,181,771 | 132.72 billion |
+| Successor-guided guard | 86.217 s | 23,698,509 | 128.26 billion |
+| Successor-guided guard repeat | 87.102 s | 23,844,310 | 130.55 billion |
+| Unchanged branch repeat | 89.088 s | 25,019,706 | 131.28 billion |
+
+The two successor runs average **86.659 s** versus **89.489 s** for the
+bracketing unchanged runs, a **3.2%** improvement. They remove roughly
+1.3–1.5 million nested-page faults in each matched comparison. Raw logs and
+marker snapshots are under ignored `target/boxctl-evidence/amd-successor-1011/`.
