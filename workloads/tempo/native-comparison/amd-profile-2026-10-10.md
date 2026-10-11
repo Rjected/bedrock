@@ -2248,3 +2248,42 @@ the wall-time gain; the second pair favored the control on wall time.
 Across both pairs, preparation cycles per exit fell from **2,703 to 2,645**
 (about **2.13%**), supporting a real reduction in per-entry work. Marker
 snapshots are under ignored `target/boxctl-evidence/amd-borrowed-batch-1011/`.
+
+### Skip guarded leaf tables without selected code aliases
+
+The post-borrowing 25-second host profile completed the workload in
+**62.005 s** with 2,479 samples and no loss. `__pi_memcpy` fell from 4.33%
+before the borrowed-batch change to 2.87% self samples. Breakpoint
+collection remained 4.41%, code-hazard memo lookup 3.66%, and
+`svm_run_guest` 31.78%. An isolated diagnostic of the breakpoint collector
+showed over 99% proof-cache hits during the transfer phase. The remaining
+full alias walks almost all succeeded; the breakpoint-limit failure counter
+stayed at 41 across the entire run. Caching negative results would therefore
+miss the hot case. The profile and diagnostic counters are under ignored
+`target/boxctl-evidence/amd-after-borrow-1011/` and
+`target/boxctl-evidence/amd-alias-walk-diag-1011/`.
+
+The alias walker now caches a small Bloom filter of executable guest-physical
+pages for each leaf translation table while that table is NPT write-guarded.
+If no selected code page's bits are present, the walker skips the leaf's
+512-entry scan. A positive filter result still takes the original exact
+walk, so collisions only cost time. Full tree rebuilds and rearming after
+page-table writes clear the filters; a dirty gate, an NPT mapping-generation
+mismatch, or untrusted table links also disable their use. A focused unit test
+populates a filter, then verifies host and guest page-table changes are
+observed. All 262 VMX library tests and the in-box SVM suite passed.
+
+Two same-box EPYC 4245P pairs completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | VM-entry preparation cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Guarded leaf filter | 60.169 s | 28,589,856 | 69.62 billion |
+| 2 | Unchanged | 63.774 s | 29,226,028 | 80.04 billion |
+| 3 | Guarded leaf filter | 61.098 s | 29,213,439 | 69.69 billion |
+| 4 | Unchanged | 63.694 s | 29,480,251 | 78.26 billion |
+
+Mean fair interval fell from **63.734 to 60.633 s**, a **4.9%** gain.
+Candidate runs had **1.5%** fewer exits overall, but preparation cycles
+per exit also fell from **2,696 to 2,410** (about **10.6%**). Both pairs
+favored the filter on wall time and normalized preparation cost. Marker
+snapshots are under ignored `target/boxctl-evidence/amd-alias-bloom-1011/`.
