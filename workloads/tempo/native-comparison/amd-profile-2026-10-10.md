@@ -1927,3 +1927,24 @@ to 21,739,843**, and preparation rose from **91.20 to 91.86 billion
 cycles**. That candidate was also reverted; this run does not support a
 PMU-read optimization. Logs and snapshots are under ignored
 `target/boxctl-evidence/amd-pmu-read-1011/`.
+
+### Save the host VMCB once per pinned run loop
+
+The SVM assembly issues `VMSAVE` for the host VMCB before every entry. A
+candidate cached that save across one VM_RUN loop, which pins the thread to a
+single CPU, and reset the cache before each new loop. The in-box SVM suite
+passed, including replay and masked-breakpoint cases. Two same-box Tempo
+pairs on EPYC 4245P completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | Nested-page faults | VM exits | VM runner and guest cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Cached host VMSAVE | 70.268 s | 21,194,438 | 28,827,311 | 5,505 |
+| 2 | Unchanged | 71.833 s | 21,866,140 | 29,695,406 | 5,495 |
+| 3 | Cached host VMSAVE | 70.373 s | 21,416,693 | 29,126,902 | 5,486 |
+| 4 | Unchanged | 70.127 s | 21,239,543 | 28,935,062 | 5,489 |
+
+The first pair favored the candidate, but the second favored the control.
+The runner/guest cycles per exit show no consistent improvement. Most of the
+first pair's interval difference coincided with a lower exit count. The
+candidate was reverted. Logs and snapshots are under ignored
+`target/boxctl-evidence/amd-hostsave-1011/`; no module was loaded locally.
