@@ -440,7 +440,7 @@ where
             && !force_single_step
             && scalar_page.is_none()
         {
-            instruction_window.as_ref().and_then(|window| {
+            instruction_window.as_mut().and_then(|window| {
                 super::super::exits::prepare_global(
                     ctx,
                     allocator,
@@ -449,6 +449,7 @@ where
                     window,
                 )
                 .or_else(|| {
+                    window.fill_full(ctx).ok()?;
                     super::super::exits::prepare_instruction_batch(
                         ctx,
                         runner.can_count_instructions(),
@@ -466,15 +467,18 @@ where
                 allocator, GuestPhysAddr::new(page))) {
                 None
             } else {
-                instruction_window.as_ref().and_then(|window| {
+                instruction_window.as_mut().and_then(|window| {
                     super::super::exits::prepare_global(ctx, allocator,
                         runner.can_count_instructions(), true, window)
-                        .or_else(|| super::super::exits::prepare_instruction_batch(
-                            ctx,
-                            runner.can_count_instructions(),
-                            runner.can_guard_page_tables(),
-                            window,
-                        ))
+                        .or_else(|| {
+                            window.fill_full(ctx).ok()?;
+                            super::super::exits::prepare_instruction_batch(
+                                ctx,
+                                runner.can_count_instructions(),
+                                runner.can_guard_page_tables(),
+                                window,
+                            )
+                        })
                 })
             }
         } else {

@@ -34,17 +34,29 @@ impl InstructionWindow {
     }
 
     pub(crate) fn read<C: VmContext>(ctx: &C) -> Result<Self, ExitError> {
+        Self::read_with_limit(ctx, 256)
+    }
+
+    fn read_with_limit<C: VmContext>(ctx: &C, limit: usize) -> Result<Self, ExitError> {
         let v = &ctx.state().vmcs;
         let linear = v
             .read_natural(VmcsFieldNatural::GuestRip)?
             .wrapping_add(v.read_natural(VmcsFieldNatural::GuestCsBase)?);
         let physical = physical(ctx, linear)?;
-        Self::read_at(ctx, linear, physical)
+        Self::read_at(ctx, linear, physical, limit)
     }
 
     /// Reuse a translation only while the global gate guards every reachable
     /// guest page-table page. A table write revokes the gate before reentry.
     pub(crate) fn read_cached<C: VmContext>(ctx: &mut C) -> Result<Self, ExitError> {
+        Self::read_cached_with_limit(ctx, 256)
+    }
+
+    pub(crate) fn read_cached_prefix<C: VmContext>(ctx: &mut C) -> Result<Self, ExitError> {
+        Self::read_cached_with_limit(ctx, 32)
+    }
+
+    fn read_cached_with_limit<C: VmContext>(ctx: &mut C, limit: usize) -> Result<Self, ExitError> {
         let v = &ctx.state().vmcs;
         let root = v.read_natural(VmcsFieldNatural::GuestCr3)?
             & 0x000f_ffff_ffff_f000;
@@ -52,7 +64,7 @@ impl InstructionWindow {
             || ctx.state().svm_guard.gate_dirty
             || ctx.state().svm_guard.gate_root != root
         {
-            return Self::read(ctx);
+            return Self::read_with_limit(ctx, limit);
         }
         let linear = v
             .read_natural(VmcsFieldNatural::GuestRip)?
@@ -61,15 +73,16 @@ impl InstructionWindow {
         let physical = super::svm_batch::cached_code_translation(ctx, page)
             .map(|address| GuestPhysAddr::new(address | (linear & 4095)))
             .ok_or(ExitError::Fatal("SVM instruction address is not mapped"))?;
-        Self::read_at(ctx, linear, physical)
+        Self::read_at(ctx, linear, physical, limit)
     }
 
     fn read_at<C: VmContext>(
         ctx: &C,
         linear: u64,
         physical: GuestPhysAddr,
+        limit: usize,
     ) -> Result<Self, ExitError> {
-        let length = (4096 - (linear & 4095) as usize).min(256);
+        let length = (4096 - (linear & 4095) as usize).min(limit);
         let mut window = Self {
             linear,
             physical,
@@ -79,6 +92,19 @@ impl InstructionWindow {
         ctx.read_guest_memory(physical, &mut window.bytes[..length])
             .map_err(|_| ExitError::Fatal("SVM instruction fetch failed"))?;
         Ok(window)
+    }
+
+    pub(crate) fn fill_full<C: VmContext>(&mut self, ctx: &C) -> Result<(), ExitError> {
+        let end = (4096 - (self.linear & 4095) as usize).min(self.bytes.len());
+        if self.length < end {
+            ctx.read_guest_memory(
+                GuestPhysAddr::new(self.physical.as_u64() + self.length as u64),
+                &mut self.bytes[self.length..end],
+            )
+            .map_err(|_| ExitError::Fatal("SVM instruction fetch failed"))?;
+            self.length = end;
+        }
+        Ok(())
     }
 
     fn fetch<C: VmContext>(&self, ctx: &C, offset: usize) -> Result<u8, ExitError> {
@@ -315,7 +341,7 @@ pub(crate) fn prepare_instruction_exit<
     if super::svm_interrupts::pending_event(ctx, allocator)? {
         return Ok(true);
     }
-    *window = InstructionWindow::read_cached(ctx).ok();
+    *window = InstructionWindow::read_cached_prefix(ctx).ok();
     if let Some(window) = window.as_ref() {
         super::svm_batch::remember_page(ctx, window.linear);
     }
@@ -636,6 +662,30 @@ mod tests {
         ctx.vmcs_setup()
             .set_field32(VmcsField32::GuestSsAccessRights, 0x93);
         ctx
+    }
+
+    #[test]
+    fn short_instruction_window_fills_only_the_current_page() {
+        let mut ctx = context();
+        ctx.vmcs_setup()
+            .set_field_natural(VmcsFieldNatural::GuestCr3, 0);
+        for (index, byte) in ctx.memory[0x1000..0x1100].iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        let mut short = InstructionWindow::read_cached_prefix(&mut ctx).unwrap();
+        assert_eq!(short.length, 32);
+        assert_eq!(&short.bytes[..32], &ctx.memory[0x1000..0x1020]);
+        assert_eq!(short.bytes[32], 0);
+        short.fill_full(&ctx).unwrap();
+        assert_eq!(short.length, 256);
+        assert_eq!(&short.bytes, &ctx.memory[0x1000..0x1100]);
+
+        ctx.set_guest_rip(0x1ff0);
+        let mut edge = InstructionWindow::read_cached_prefix(&mut ctx).unwrap();
+        assert_eq!(edge.length, 16);
+        edge.fill_full(&ctx).unwrap();
+        assert_eq!(edge.length, 16);
+        assert_eq!(edge.bytes[16], 0);
     }
 
     #[test]

@@ -1973,3 +1973,26 @@ planning-cost reduction. This is a modest gain; the remaining ~3x gap to the
 earlier Intel result still requires a larger reduction in VM exits or entry
 work. Logs and snapshots are under ignored
 `target/boxctl-evidence/amd-indexed-cache-1011/`.
+
+### Read only the instruction prefix until the fallback planner needs more
+
+`prepare_instruction_exit` previously read up to 256 guest code bytes before
+trying a global counted batch, even though that path checks only the first
+instruction. It now reads at most 32 bytes initially and fills the remainder
+of the same page only before the fallback batch planner. A focused unit test
+checks both the full fill and a fetch near the page edge. All 262 VMX unit
+tests and the in-box SVM suite passed. Two more alternating same-box Tempo
+pairs on the indexed-cache build completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | Nested-page faults | VM-entry preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Short first read | 69.662 s | 29,000,685 | 21,354,914 | 3,000 |
+| 2 | Indexed-cache baseline | 70.723 s | 29,141,536 | 21,453,444 | 3,048 |
+| 3 | Short first read | 70.430 s | 29,236,847 | 21,508,571 | 2,994 |
+| 4 | Indexed-cache baseline | 70.759 s | 29,083,460 | 21,377,471 | 3,074 |
+
+Both pairs favored the short read. Mean fair interval fell from **70.741 to
+70.046 s** (about **1.0%**), while preparation cycles per exit fell in both
+pairs. The second candidate had more exits yet still used fewer total entry
+preparation cycles. Logs and snapshots are under ignored
+`target/boxctl-evidence/amd-short-window-1011/`.
