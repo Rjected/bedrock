@@ -62,7 +62,7 @@
 #define VMXCTX_SVM_HOST_FPU_RESERVED 296
 #define VMXCTX_SVM_GUEST_FPU_RESIDENT 304
 
-/* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints, PMU mask,
+/* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints, PMU available,
  * guest VMCB virtual pointer. The final argument exposes hardware writes to
  * the compiler; assembly uses the physical address. Host RSP is saved by
  * VMRUN, so the stack remains our anchor without guest-visible scratch GPRs. */
@@ -218,8 +218,8 @@ SYM_FUNC_START(svm_run_guest)
 .Lsvm_skip_guest_xrstor_entry:
 
 .Lsvm_skip_xsave_entry:
- /* Preserve host counter enables; only our perf-owned GuestOnly event runs
-  * in the guest. Linux 7 restricts amd_pmu_enable_virt to KVM modules. */
+ /* PMC virtualization loads guest counter controls from the VMCB. Save the
+  * host global control so it can be verified and restored after VMRUN. */
  cmpq $0, 48(%rsp)
  je .Lsvm_skip_pmu_entry
  mov $0xc0000301, %ecx
@@ -227,11 +227,6 @@ SYM_FUNC_START(svm_run_guest)
  shl $32, %rdx
  or %rdx, %rax
  mov %rax, 40(%rsp)
- mov 48(%rsp), %rax
- btr $63, %rax
- mov %rax, %rdx
- shr $32, %rdx
- wrmsr
 .Lsvm_skip_pmu_entry:
  mov 8(%rsp), %rax
  vmload %rax
@@ -274,6 +269,11 @@ SYM_FUNC_START(svm_run_guest)
  cmpq $0, 48(%rsp)
  je .Lsvm_skip_pmu_exit
  mov $0xc0000301, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ cmp 40(%rsp), %rax
+ je .Lsvm_skip_pmu_exit
  mov 40(%rsp), %rax
  mov %rax, %rdx
  shr $32, %rdx

@@ -16,6 +16,13 @@ pub struct PmcEntry {
 }
 
 impl PmcEntry {
+    /// Prevent a previous counted batch from leaving a guest PMC armed on a
+    /// later scalar entry. Host PMC state is switched by SVM hardware.
+    pub fn disarm(v: &mut Vmcb) {
+        v.write(o::PERF_CTL0, 8, 0);
+        v.write(o::PERF_GLOBAL_CONTROL, 8, 0);
+    }
+
     pub fn overflow_nmi(v: &Vmcb) -> bool {
         v.read(o::EXIT_CODE, 8) == 0x4d
             && v.read(o::EXIT_INT_INFO, 4) & 0x800007ff == 0x80000202
@@ -153,6 +160,18 @@ mod tests {
             assert_eq!(v.read(o::INTERCEPT_MISC1, 4), misc);
             assert_eq!(v.read(o::RFLAGS, 8), flags);
         }
+    }
+
+    #[test]
+    fn disarm_clears_guest_counter_after_counted_entry() {
+        let mut v = Vmcb::new();
+        v.initialize();
+        PmcEntry::prepare(&mut v, 100).unwrap();
+        assert_ne!(v.read(o::PERF_CTL0, 8), 0);
+        assert_eq!(v.read(o::PERF_GLOBAL_CONTROL, 8), 1);
+        PmcEntry::disarm(&mut v);
+        assert_eq!(v.read(o::PERF_CTL0, 8), 0);
+        assert_eq!(v.read(o::PERF_GLOBAL_CONTROL, 8), 0);
     }
 
     #[test]

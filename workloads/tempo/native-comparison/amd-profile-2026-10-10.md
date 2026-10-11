@@ -2033,3 +2033,36 @@ perf-owned counter bit, so the shortcut cannot fire while the host value is
 `target/boxctl-evidence/amd-pmu-entry-1011/`. The assembly path still needs
 a larger architectural reduction in per-exit switching or in the number of
 execute-fault transitions.
+
+### Let PMC virtualization load the VMCB counter controls
+
+[AMD APM Volume 2, section 15.39](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2)
+defines the guest PMC controls in the VMCB when PMC virtualization is
+enabled. The host assembly had additionally read the host global-control MSR,
+written a guest enable mask before every entry, and restored the host mask
+after every exit. The new path leaves the guest controls to the VMCB. For an
+uncounted entry, it clears the previous guest PMC event and global enable.
+Assembly still reads the host control before and after `VMRUN` and restores
+it if hardware or another component changed it. The fallback when PMC
+virtualization is unavailable is unchanged.
+
+The 21 SVM-library tests, including a new guest-counter disarm test, and the
+in-box SVM suite passed. Two alternating same-box EPYC 4245P Tempo pairs
+completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | VM runner and guest cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | VMCB PMC controls | 68.629 s | 29,074,955 | 5,355 |
+| 2 | Unchanged | 69.812 s | 29,025,265 | 5,560 |
+| 3 | VMCB PMC controls | 67.633 s | 28,618,546 | 5,361 |
+| 4 | Unchanged | 69.747 s | 28,841,826 | 5,569 |
+
+Mean fair interval fell from **69.779 to 68.131 s** (about **2.4%**).
+Runner cycles per exit fell by 205–208 in both pairs, including the first
+pair where the candidate had slightly more exits. A separate 25-second host
+profile with 2,478 samples completed the full workload in **68.025 s**;
+its assembly annotation attributed no samples to the conditional host
+restore `WRMSR`. The host global-control register read `0x3f` after that
+run. Sampling cannot prove the restore never executes, so the conditional
+restore remains. Logs, snapshots, perf data, and annotation are under ignored
+`target/boxctl-evidence/amd-pmu-autoswap-1011/`.

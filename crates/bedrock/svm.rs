@@ -242,13 +242,12 @@ pub(crate) unsafe fn run(
     } else {
         None
     };
-    // Retain the serialized host PMU handoff around hardware autoswap.
-    // The host event supplies readiness, not the guest retirement count.
-    let guest_mask = if pmu_mask != 0 {
-        (1 << 63) | if counting { pmu_mask } else { 0 }
-    } else {
-        0
-    };
+    // PMC virtualization loads the guest controls from the VMCB. Disable
+    // the guest event for entries that do not use a counted batch; the
+    // assembly verifies that the host global control survives VMRUN.
+    if pmu_mask != 0 && !counting {
+        PmcEntry::disarm(v);
+    }
     if batch.is_some_and(|batch| batch.page_execution) {
         if let Some(counter) = counter.as_ref() {
             // TF is clear for guarded native execution. NPT catches PUSHF
@@ -260,7 +259,7 @@ pub(crate) unsafe fn run(
         // Pass the virtual pointer as well as the physical address: VMRUN
         // modifies this allocation, which the compiler must see at the FFI
         // boundary. Assembly uses the physical address and ignores arg six.
-        svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), guest_mask, v);
+        svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), u64::from(pmu_mask != 0), v);
     }
     let mut host_count = 0;
     let pmu_ready = !counting || unsafe { c_helpers::bedrock_svm_pmu_read(&mut host_count) } == 0;
