@@ -20,6 +20,7 @@ pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
 pub(crate) const SVM_HAZARD_MEMO_CAPACITY: usize = 256;
 pub(crate) const SVM_HAZARD_LOOKUP_CAPACITY: usize = 1024;
 pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
+pub(crate) const SVM_SUCCESSOR_CAPACITY: usize = 2048;
 pub(crate) const SVM_ALIAS_EDGE_CAPACITY: usize = 2048;
 pub(crate) const SVM_ALIAS_WALK_CAPACITY: usize = 2048;
 pub(crate) const SVM_ALIAS_PROOF_CAPACITY: usize = 2048;
@@ -68,6 +69,9 @@ pub(crate) struct SvmGuardScratch {
     pub translations: [(u64, u64); SVM_CODE_PAGE_CAPACITY],
     pub translation_count: usize,
     pub translation_cursor: usize,
+    /// Last observed destination from each virtual code page in a guarded CR3.
+    /// Predictions only affect page selection; alias and byte proofs still gate execution.
+    pub successors: [SvmPageSuccessor; SVM_SUCCESSOR_CAPACITY],
     // Code pages, up to four entry-walk tables, and the guarded tree.
     pub saved: [SvmGuardSaved; SVM_TABLE_CAPACITY + SVM_CODE_PAGE_CAPACITY + 4],
     pub aliases: [SvmAliasWalk; SVM_ALIAS_WALK_CAPACITY],
@@ -179,6 +183,14 @@ pub(crate) struct SvmPagePlan {
     pub code_epoch: u64,
     pub tree_generation: u64,
     pub batch: core::mem::MaybeUninit<InstructionBatch>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SvmPageSuccessor {
+    pub root: u64,
+    pub from: u64,
+    pub to: u64,
+    pub valid: bool,
 }
 
 #[derive(Clone, Copy)]
