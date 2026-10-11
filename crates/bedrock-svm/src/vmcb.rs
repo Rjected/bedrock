@@ -104,6 +104,21 @@ impl Vmcb {
         self.bytes[offset::CLEAN_BITS..offset::CLEAN_BITS + 4].fill(0);
     }
 
+    /// Mirror an SVM exit into the software-only VMCS fields. Hardware does
+    /// not cache this VMCB region, so these writes leave clean bits intact.
+    pub fn record_exit(&mut self, e: &super::exits::Exit) {
+        self.bytes[0xd08..0xd0c].copy_from_slice(&e.reason.to_le_bytes());
+        self.bytes[0xdd0..0xdd8].copy_from_slice(&e.qualification.to_le_bytes());
+        self.bytes[0xd10..0xd14].copy_from_slice(&e.interruption_info.to_le_bytes());
+        self.bytes[0xd18..0xd1c].copy_from_slice(&e.interruption_error.to_le_bytes());
+        self.bytes[0xd30..0xd34].copy_from_slice(&e.instruction_len.to_le_bytes());
+        self.bytes[0xdc8..0xdd0].copy_from_slice(&e.guest_physical_address.to_le_bytes());
+        let exit_int_info = self.read(offset::EXIT_INT_INFO, 4) as u32;
+        let exit_int_error = self.read(offset::EXIT_INT_INFO + 4, 4) as u32;
+        self.bytes[0xd20..0xd24].copy_from_slice(&exit_int_info.to_le_bytes());
+        self.bytes[0xd28..0xd2c].copy_from_slice(&exit_int_error.to_le_bytes());
+    }
+
     /// Intercept numbers are bit indices starting at byte zero of the VMCB.
     pub fn intercept(&mut self, bit: usize, enabled: bool) {
         assert!(bit < 192);
@@ -213,5 +228,35 @@ mod tests {
         assert_eq!(v.read(offset::NESTED_CONTROL, 8), 1 | (1 << 6));
         v.configure_nested_features(1 << 6); // FlushByAsid is a different feature.
         assert_eq!(v.read(offset::NESTED_CONTROL, 8), 1);
+    }
+
+    #[test]
+    fn normalized_exit_fields_do_not_dirty_hardware_state() {
+        let mut v = Vmcb::new();
+        v.write(offset::EXIT_INT_INFO, 8, 0x1234_5678_8765_4321);
+        v.bytes[offset::CLEAN_BITS..offset::CLEAN_BITS + 4]
+            .copy_from_slice(&0xffff_ffffu32.to_le_bytes());
+        let e = crate::exits::Exit {
+            reason: 48,
+            qualification: 0x1122_3344_5566_7788,
+            interruption_info: 0x0102_0304,
+            interruption_error: 0x0506_0708,
+            guest_physical_address: 0xa000,
+            instruction_len: 3,
+        };
+        v.record_exit(&e);
+        assert_eq!(v.read(offset::CLEAN_BITS, 4), 0xffff_ffff);
+        for (field, value) in [
+            (0x4402, 48),
+            (0x6400, 0x1122_3344_5566_7788),
+            (0x4404, 0x0102_0304),
+            (0x4406, 0x0506_0708),
+            (0x440c, 3),
+            (0x2400, 0xa000),
+            (0x4408, 0x8765_4321),
+            (0x440a, 0x1234_5678),
+        ] {
+            assert_eq!(crate::fields::read(&v, field), Ok(value));
+        }
     }
 }

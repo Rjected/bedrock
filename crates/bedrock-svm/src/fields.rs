@@ -116,19 +116,7 @@ pub fn write(v: &mut Vmcb, field: u32, value: u64) -> Result<(), UnsupportedFiel
 }
 
 pub fn record_exit(v: &mut Vmcb, e: &super::exits::Exit) {
-    for (field, value) in [
-        (0x4402, e.reason as u64),
-        (0x6400, e.qualification),
-        (0x4404, e.interruption_info as u64),
-        (0x4406, e.interruption_error as u64),
-        (0x440c, e.instruction_len as u64),
-        (0x2400, e.guest_physical_address),
-    ] {
-        // These fields are supported unconditionally by the adapter.
-        let _ = write(v, field, value);
-    }
-    let _ = write(v, 0x4408, v.read(o::EXIT_INT_INFO, 4));
-    let _ = write(v, 0x440a, v.read(o::EXIT_INT_INFO + 4, 4));
+    v.record_exit(e);
 }
 
 #[cfg(test)]

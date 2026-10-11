@@ -2136,3 +2136,47 @@ The candidate mean was **65.564 s** versus **66.209 s** unchanged (about
 **1.0%** faster). It had more exits in both adjacent comparisons yet lower
 preparation cycles per exit. Logs and markers are under ignored
 `target/boxctl-evidence/amd-field-fastpath-1011/`.
+
+### Recheck entry assembly and exit-path diagnostics
+
+An updated 25-second host sample of the AMD transfer interval collected
+2,479 samples with no loss. The `svm_run_guest` annotation attributed 35.01%
+of its samples to `VMRUN`, 7.60% to the two `XSETBV` instructions, and visible
+shares to debug-register swaps, `VMLOAD`, and guest `XSAVEOPT`. The annotation
+is under ignored `target/boxctl-evidence/amd-vmcb-access-1011/`. Earlier
+isolated tests already found that host/guest XCR0 differs on this EPYC host
+and that caching the host `VMSAVE` did not speed up the application interval.
+
+The compiled batch planner also still contained `lock inc` instructions for
+39 diagnostic counters that nothing reads. Removing them reduced the module's
+static `lock` instruction count from 128 to 26 and passed 262 VMX tests and
+the in-box SVM suite. It did **not** speed up the application: a baseline run
+took **64.991 s** with 29,073,238 exits, while two counter-free runs took
+**64.988 and 65.551 s** with 28,549,237 and 29,066,737 exits. Both candidates
+spent more VM-entry preparation cycles despite the removed instructions. The
+diagnostic-counter removal was reverted. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-unread-counters-1011/`.
+
+### Record normalized AMD exits in the software VMCB area directly
+
+Each SVM exit mirrored eight normalized VMCS fields through the generic
+VMCS-to-VMCB mapper. Those writes target only the VMCB's software area, but
+the generic path also cleared hardware clean bits after every field. The new
+path writes the same values at their fixed software offsets without touching
+clean bits. A focused test checks all eight field values and unchanged clean
+bits; 23 SVM-library tests and the in-box SVM suite passed.
+
+Two same-box EPYC 4245P pairs completed all 10,000 transfers:
+
+| Run order | Variant | Fair interval | VM exits | VM-exit bookkeeping cycles |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Generic exit recording | 64.991 s | 29,073,238 | 12.08 billion |
+| 2 | Direct software writes | 63.698 s | 29,255,646 | 12.04 billion |
+| 3 | Generic exit recording | 66.224 s | 29,335,438 | 12.39 billion |
+| 4 | Direct software writes | 64.593 s | 29,393,131 | 12.06 billion |
+
+Mean fair interval fell from **65.607 to 64.145 s**, a **2.2%** gain. Both
+candidate runs had more exits than their adjacent controls, so the gain is
+not explained by a lower exit count. The counters bucket only part of the
+exit-recording work; the full interval is the outcome measure. Marker
+snapshots are under ignored `target/boxctl-evidence/amd-exit-record-1011/`.
