@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static REFRESH_PENDING: AtomicU64 = AtomicU64::new(0);
@@ -57,11 +57,33 @@ const _: () = assert!(SVM_CODE_PAGE_CAPACITY <= NptExecutionGuard::MAX_PAGES);
 const _: () = assert!(SVM_TABLE_CAPACITY % 64 == 0);
 const _: () = assert!(SVM_TABLE_CAPACITY.is_power_of_two() && SVM_TABLE_CAPACITY <= u16::MAX as usize);
 const _: () = assert!(SVM_SUCCESSOR_CAPACITY.is_power_of_two());
+const _: () = assert!(SVM_SECOND_SUCCESSOR_CAPACITY.is_power_of_two());
 
 fn successor_slot(root: u64, from: u64) -> usize {
     let key = (from >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15)
         ^ (root >> 12).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     ((key ^ (key >> 32)) as usize) & (SVM_SUCCESSOR_CAPACITY - 1)
+}
+
+fn second_successor_slot(root: u64, previous: u64, from: u64) -> usize {
+    let key = (from >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (previous >> 12).wrapping_mul(0x94d0_49bb_1331_11eb)
+        ^ (root >> 12).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    ((key ^ (key >> 32)) as usize) & (SVM_SECOND_SUCCESSOR_CAPACITY - 1)
+}
+
+fn predicted_second_successor(
+    guard: &super::super::vm_state::SvmGuardScratch,
+    root: u64,
+    previous: u64,
+    from: u64,
+) -> Option<u64> {
+    if previous == u64::MAX {
+        return None;
+    }
+    let entry = &guard.second_successors[second_successor_slot(root, previous, from)];
+    (entry.valid && entry.root == root && entry.previous == previous && entry.from == from)
+        .then_some(entry.to)
 }
 
 fn predicted_successor(
@@ -2203,7 +2225,9 @@ pub(crate) fn prepare_global<C: VmContext, A: CowAllocator<C::CowPage>>(
         let mut hazard_count = hazard.count;
         let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
             & 0x000f_ffff_ffff_f000;
-        let predicted = predicted_successor(&ctx.state().svm_guard, root, current_linear);
+        let predicted = predicted_second_successor(
+            &ctx.state().svm_guard, root, recent[1], current_linear,
+        ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
         for previous_linear in predicted.into_iter().chain(recent) {
             if hazard_count >= batch.page_breakpoints.len()
                 || batch.code_page_count == hazards.len()
@@ -3362,6 +3386,13 @@ pub(crate) fn remember_page<C: VmContext>(ctx: &mut C, linear: u64) {
     if from != u64::MAX {
         if let Ok(root) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3) {
             let root = root & 0x000f_ffff_ffff_f000;
+            let previous = ctx.state().svm_recent_pages[1];
+            if previous != u64::MAX {
+                let slot = second_successor_slot(root, previous, from);
+                ctx.state_mut().svm_guard.second_successors[slot] = SvmSecondSuccessor {
+                    root, previous, from, to: page, valid: true,
+                };
+            }
             let slot = successor_slot(root, from);
             ctx.state_mut().svm_guard.successors[slot] = SvmPageSuccessor {
                 root,
@@ -4200,6 +4231,13 @@ mod tests {
         let predicted = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(&predicted.pages[..predicted.code_page_count], &[0x1000, 0x9000, 0x2000]);
         assert_eq!(predicted.page_breakpoint_count, 3);
+        ctx.state_mut().svm_guard.second_successors
+            [second_successor_slot(0x3000, 0x2000, 0x1000)] = SvmSecondSuccessor {
+                root: 0x3000, previous: 0x2000, from: 0x1000, to: 0x2000, valid: true,
+            };
+        let contextual = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(&contextual.pages[..contextual.code_page_count],
+            &[0x1000, 0x2000, 0x9000]);
         for proof in &mut ctx.state_mut().svm_guard.alias_proofs {
             if proof.page_count == 1 && proof.pages[0] != 0x1000 {
                 proof.valid = false;
