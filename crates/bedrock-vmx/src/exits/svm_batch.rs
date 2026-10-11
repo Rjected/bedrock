@@ -1733,6 +1733,8 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
     // Unguarded pages always compare exact bytes before reusing a scan.
     // Recurrent guarded pages can skip that comparison while the NPT mapping
     // stays fixed: guest writes fault, and host writes invalidate the memo.
+    let clock = ctx.state().svm_guard.hazard_guard_clock.wrapping_add(1);
+    ctx.state_mut().svm_guard.hazard_guard_clock = clock;
     let (key, memo) = hazard_memo_lookup(ctx, physical);
     if let Some(index) = memo {
         ctx.state_mut().svm_guard.hazard_lookup[key] = (index + 1) as u16;
@@ -1748,6 +1750,9 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
     if unchanged {
         let memo = &mut ctx.state_mut().svm_guard.hazard_memos[memo.unwrap()];
         memo.hits = memo.hits.saturating_add(1);
+        if memo.guarded {
+            memo.last_guard_use = clock;
+        }
         return (!memo.rejected).then_some(PageHazards {
             boundary: memo.proof.boundary,
             boundary_guarded: memo.proof.boundary_guarded,
@@ -2021,7 +2026,9 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
         let guard = cache.hazard_memos[index].write_guard;
         if cache.hazard_memos[index].rejected || cache.hazard_memos[index].proof.count == 0 {
             guard.restore(&mut ctx.state_mut().ept, allocator);
-            ctx.state_mut().svm_guard.hazard_memos[index].guarded = false;
+            let cache = &mut ctx.state_mut().svm_guard;
+            cache.hazard_memos[index].guarded = false;
+            cache.hazard_guard_count -= 1;
             return;
         }
         let generation = ctx.state().ept.mapping_generation();
@@ -2032,22 +2039,53 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
             ctx.state_mut().svm_guard.hazard_memos[index].guarded_mapping_generation = generation;
             return;
         }
-        ctx.state_mut().svm_guard.hazard_memos[index].guarded = false;
+        let cache = &mut ctx.state_mut().svm_guard;
+        cache.hazard_memos[index].guarded = false;
+        cache.hazard_guard_count -= 1;
     }
     let memo = &ctx.state().svm_guard.hazard_memos[index];
     if memo.rejected || memo.proof.count == 0 || memo.hits < 16 {
         return;
     }
-    if ctx.state().svm_guard.hazard_memos.iter().filter(|memo| memo.guarded).count() >= 8 {
-        return;
+    if ctx.state().svm_guard.hazard_guard_count >= 8 {
+        let cache = &mut ctx.state_mut().svm_guard;
+        let now = cache.hazard_guard_clock;
+        if now.wrapping_sub(cache.hazard_guard_last_check) < 1 << 16 {
+            return;
+        }
+        cache.hazard_guard_last_check = now;
+        // Boot code can occupy every write guard indefinitely. Replace only
+        // a page not consulted for a long interval; active guards stay put.
+        let cache = &ctx.state().svm_guard;
+        let Some((victim, stale)) = cache.hazard_memos.iter().enumerate()
+            .filter(|(_, memo)| memo.guarded)
+            .map(|(index, memo)| (index,
+                cache.hazard_guard_clock.wrapping_sub(memo.last_guard_use)))
+            .max_by_key(|&(_, stale)| stale)
+        else { return; };
+        if stale < 1 << 20 {
+            return;
+        }
+        let old_guard = cache.hazard_memos[victim].write_guard;
+        old_guard.restore(&mut ctx.state_mut().ept, allocator);
+        let cache = &mut ctx.state_mut().svm_guard;
+        cache.hazard_memos[victim].guarded = false;
+        cache.hazard_guard_count -= 1;
+        cache.hazard_memos[victim].valid = false;
+        cache.hazard_memos[victim].hits = 0;
+        cache.code_epoch = cache.code_epoch.wrapping_add(1);
+        cache.code_count = 0;
     }
     if let Ok(Some(write_guard)) = ctx.state_mut().ept
         .restrict_write_4k(allocator, GuestPhysAddr::new(physical)) {
         let mapping_generation = ctx.state().ept.mapping_generation();
+        let clock = ctx.state().svm_guard.hazard_guard_clock;
         let memo = &mut ctx.state_mut().svm_guard.hazard_memos[index];
         memo.write_guard = write_guard;
         memo.guarded = true;
         memo.guarded_mapping_generation = mapping_generation;
+        memo.last_guard_use = clock;
+        ctx.state_mut().svm_guard.hazard_guard_count += 1;
     }
 }
 
@@ -2064,6 +2102,7 @@ pub(crate) fn release_recurrent_code_write<C: VmContext, A: CowAllocator<C::CowP
     write_guard.restore(&mut ctx.state_mut().ept, allocator);
     let cache = &mut ctx.state_mut().svm_guard;
     cache.hazard_memos[index].guarded = false;
+    cache.hazard_guard_count -= 1;
     cache.hazard_memos[index].valid = false;
     cache.hazard_memos[index].hits = 0;
     cache.code_epoch = cache.code_epoch.wrapping_add(1);
@@ -6230,6 +6269,44 @@ mod tests {
         assert!(!ctx.state().svm_guard.hazard_memos[0].valid);
         assert_ne!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x1000))
             .unwrap().1.bits() & 2, 0);
+    }
+
+    #[test]
+    fn stale_guard_replacement_rechecks_evicted_code_bytes() {
+        let mut ctx = paged_context(&[0x90]);
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for index in 1..=9u64 {
+            let page = index * 4096;
+            ctx.memory[page as usize..page as usize + 4096].fill(0x90);
+            ctx.memory[page as usize + 0x100..page as usize + 0x103]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page), HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+            for _ in 0..17 { assert!(!globally_safe_code(&mut ctx, page)); }
+            if index < 9 { protect_recurrent_code(&mut ctx, &allocator, page); }
+        }
+        assert_eq!(ctx.state().svm_guard.hazard_memos.iter()
+            .filter(|memo| memo.guarded).count(), 8);
+        assert_eq!(ctx.state().svm_guard.hazard_guard_count, 8);
+        ctx.state_mut().svm_guard.hazard_guard_clock += 1 << 20;
+        protect_recurrent_code(&mut ctx, &allocator, 9 * 4096);
+        let old = ctx.state().svm_guard.hazard_memos.iter()
+            .position(|memo| memo.proof.page == 4096).unwrap();
+        let (_, Some(new)) = hazard_memo_lookup(&ctx, 9 * 4096) else { panic!("new memo missing"); };
+        assert!(!ctx.state().svm_guard.hazard_memos[old].guarded);
+        assert!(!ctx.state().svm_guard.hazard_memos[old].valid);
+        assert!(ctx.state().svm_guard.hazard_memos[new].guarded);
+        assert_eq!(ctx.state().svm_guard.hazard_guard_count, 8);
+        assert_ne!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(4096))
+            .unwrap().1.bits() & 2, 0);
+        ctx.memory[0x1100..0x1103].fill(0x90);
+        assert_eq!(page_hazards_memo(&mut ctx, 4096).unwrap().count, 0);
     }
 
     #[test]

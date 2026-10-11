@@ -63,6 +63,9 @@ pub(crate) struct SvmGuardScratch {
     pub code_cursor: usize,
     pub hazard_memos: [SvmHazardMemo; SVM_HAZARD_MEMO_CAPACITY],
     pub hazard_memo_cursor: usize,
+    pub hazard_guard_clock: u64,
+    pub hazard_guard_last_check: u64,
+    pub hazard_guard_count: usize,
     // One-based memo index. The pointed-to page is checked before every hit,
     // so hash collisions and evictions only lose acceleration opportunities.
     pub hazard_lookup: [u16; SVM_HAZARD_LOOKUP_CAPACITY],
@@ -249,6 +252,7 @@ pub(crate) struct SvmHazardMemo {
     pub rejected: bool,
     pub guarded: bool,
     pub hits: u16,
+    pub last_guard_use: u64,
     pub write_guard: NptWriteGuard,
     pub guarded_mapping_generation: u64,
     pub revision: u64,
