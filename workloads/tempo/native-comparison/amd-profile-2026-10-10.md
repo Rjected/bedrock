@@ -1453,3 +1453,24 @@ but its transfer interval was **76.310 s** versus the unchanged **74.529 s**.
 It also added 416,459 nested-page faults and 3.47 billion VM-entry overhead
 cycles. It was reverted; the log and marker snapshots are under ignored
 `target/boxctl-evidence/amd-code-mru-1011/`.
+
+A subsequent experiment cached a singleton global execution plan for a
+write-guarded code page, keyed by linear page and translation root. Reuse
+required the current code-hazard memo revision, NPT mapping generation,
+translation-tree generation, and alias-breakpoint proof to match. Initial
+exact-RIP and page-level probes had no hits because the short-lived code proof
+was cleared between calls. Restricting reuse to write-guarded memos yielded
+about 1.05 million hits in the first 5 million probes. The guarded version
+passed 261 VMX tests, 40 VM library tests, the box suite, and repeated full
+10,000-transfer runs. On the same EPYC 4245P box, three candidate runs took
+77.112, 76.747, and 75.242 seconds; interleaved unchanged controls took
+77.949, 76.603, and 76.853 seconds. The candidate mean was 76.367 seconds
+versus 77.135 seconds for the controls, a gain of about 1% within run noise.
+
+The cache-hit path also needed to maintain the hazard memo's use clock and
+hit count, which govern write-guard retention. After that correction, all
+tests and 10,000 transfers still passed, but the fair interval was **77.502
+seconds**, slightly slower than the unchanged control mean. The code added
+substantial cache state for no reliable application-level gain, so it was
+reverted. Logs, marker snapshots, and the final candidate patch remain in
+ignored `target/boxctl-evidence/amd-global-plan-cache-1011/`.
