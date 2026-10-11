@@ -2097,7 +2097,9 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
     {
         return;
     }
-    if ctx.state().svm_guard.hazard_guard_count >= if memo.rejected { 136 } else { 128 } {
+    // Leave at least 56 of the 256 memo slots replaceable while retaining
+    // more hot code pages under NPT write protection across entries.
+    if ctx.state().svm_guard.hazard_guard_count >= if memo.rejected { 200 } else { 192 } {
         let cache = &mut ctx.state_mut().svm_guard;
         let now = cache.hazard_guard_clock;
         if now.wrapping_sub(cache.hazard_guard_last_check) < 1 << 16 {
@@ -6769,12 +6771,12 @@ mod tests {
     #[test]
     fn stale_guard_replacement_rechecks_evicted_code_bytes() {
         let mut ctx = paged_context(&[0x90]);
-        ctx.memory.resize(130 * 4096, 0);
+        ctx.memory.resize(194 * 4096, 0);
         let mut allocator = crate::test_mocks::MockFrameAllocator::new();
         ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
             &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
         ).unwrap();
-        for index in 1..=129u64 {
+        for index in 1..=193u64 {
             let page = index * 4096;
             ctx.memory[page as usize..page as usize + 4096].fill(0x90);
             ctx.memory[page as usize + 0x100..page as usize + 0x103]
@@ -6785,20 +6787,20 @@ mod tests {
                 bedrock_ept::EptMemoryType::WriteBack,
             ).unwrap();
             for _ in 0..17 { assert!(!globally_safe_code(&mut ctx, page)); }
-            if index < 129 { protect_recurrent_code(&mut ctx, &allocator, page); }
+            if index < 193 { protect_recurrent_code(&mut ctx, &allocator, page); }
         }
         assert_eq!(ctx.state().svm_guard.hazard_memos.iter()
-            .filter(|memo| memo.guarded).count(), 128);
-        assert_eq!(ctx.state().svm_guard.hazard_guard_count, 128);
+            .filter(|memo| memo.guarded).count(), 192);
+        assert_eq!(ctx.state().svm_guard.hazard_guard_count, 192);
         ctx.state_mut().svm_guard.hazard_guard_clock += 1 << 20;
-        protect_recurrent_code(&mut ctx, &allocator, 129 * 4096);
+        protect_recurrent_code(&mut ctx, &allocator, 193 * 4096);
         let old = ctx.state().svm_guard.hazard_memos.iter()
             .position(|memo| memo.proof.page == 4096).unwrap();
-        let (_, Some(new)) = hazard_memo_lookup(&ctx, 129 * 4096) else { panic!("new memo missing"); };
+        let (_, Some(new)) = hazard_memo_lookup(&ctx, 193 * 4096) else { panic!("new memo missing"); };
         assert!(!ctx.state().svm_guard.hazard_memos[old].guarded);
         assert!(!ctx.state().svm_guard.hazard_memos[old].valid);
         assert!(ctx.state().svm_guard.hazard_memos[new].guarded);
-        assert_eq!(ctx.state().svm_guard.hazard_guard_count, 128);
+        assert_eq!(ctx.state().svm_guard.hazard_guard_count, 192);
         assert_ne!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(4096))
             .unwrap().1.bits() & 2, 0);
         ctx.memory[0x1100..0x1103].fill(0x90);

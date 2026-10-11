@@ -2506,3 +2506,32 @@ slots currently limit the admitted set. Diagnostic source is isolated in
 `/tmp/bedrock-amd-npfdiag-1011`; copied logs and markers are under ignored
 `target/boxctl-evidence/amd-hazard-types-1011/` and
 `target/boxctl-evidence/amd-hazard-rip-1011/`.
+
+### Retain more recurrent code write guards
+
+The hazard memo has 256 slots, but the recurrent-code path formerly stopped
+retaining NPT write guards after 128 ordinary hazardous pages (136 for
+rejected pages). Raising those limits to **192/200** leaves at least 56 memo
+slots replaceable while allowing more hot pages to reuse their exact-byte
+proof without another 4 KiB comparison. The stale-guard replacement test was
+expanded to the new limit. All 262 VMX tests and the in-box SVM suite passed,
+including replay, masked breakpoints, and stale-code rechecking.
+
+Three alternating same-box EPYC 4245P pairs completed all 10,000 transfers:
+
+| Run order | Guard cap | Fair interval | VM exits | Nested-page faults | Preparation cycles/exit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 192 | 60.480 s | 29,824,758 | 21,985,832 | 2,278 |
+| 2 | 128 | 58.760 s | 28,641,135 | 21,052,332 | 2,344 |
+| 3 | 192 | 58.881 s | 29,193,902 | 21,493,189 | 2,259 |
+| 4 | 128 | 59.962 s | 29,197,930 | 21,472,434 | 2,356 |
+| 5 | 192 | 58.599 s | 28,908,893 | 21,273,546 | 2,278 |
+| 6 | 128 | 61.475 s | 29,686,793 | 21,843,482 | 2,411 |
+
+The larger cap averaged **59.320 s** versus **60.066 s** for the control,
+about **1.2%** faster. Preparation cost per exit fell in every pair, by
+roughly **3–6%**. The first candidate had 1.18 million more exits and was
+1.72 s slower; the second had nearly identical exit counts and was 1.08 s
+faster. This is a repeatable per-entry reduction with a modest, noisy
+end-to-end benefit. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-guard192-1011/`.
