@@ -1076,3 +1076,43 @@ count also varied across the control. The second successor remains isolated;
 the shared branch still uses one. Raw logs and marker snapshots are in the
 ignored `target/boxctl-evidence/amd-pred-diag-1011/` and
 `target/boxctl-evidence/amd-successor-two-1011/` directories.
+
+### Reuse write guards for active hazardous code
+
+A 25-second sample of the shared one-successor build during the transfer phase
+had 2,498 samples with none lost. The leading host-cycle symbols were
+`svm_run_guest` **25.46%**, `page_hazards_memo` **9.38%**,
+`collect_page_breakpoints` **4.85%**, and `protect_recurrent_code` about **2.07%**.
+The memo skips a full code-byte comparison only for NPT write-guarded pages,
+but the existing eight slots stay with the first pages guarded during boot.
+
+An initial stale-guard replacement reduced faults but regressed to **89.520 s**
+on the first box. Its profile showed `protect_recurrent_code` around **6.3%**
+of samples because every full-cache attempt scanned all 256 memo entries for a
+victim. The corrected version keeps an exact guard count, considers eviction
+only every 65,536 hazard lookups, and replaces a page only if it has not been
+consulted for at least 1,048,576 lookups. It invalidates the evicted byte proof
+before restoring write permission. A focused test confirms that changed code
+bytes are rescanned after eviction. The 257 VMX and 40 VM library tests and
+box SVM smoke, transition, and workload checks passed.
+
+The corrected build first passed the complete 10,000-transfer test in
+**83.524 s** on the original box. A fresh EPYC 4245P box then measured the
+same artifacts in candidate/control/candidate order:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles | Total run cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Adaptive guard | 81.571 s | 23,081,515 | 121.94 billion | 316.51 billion |
+| Unchanged one-successor branch | 88.815 s | 24,326,179 | 133.70 billion | 344.60 billion |
+| Adaptive guard repeat | 83.122 s | 23,694,563 | 123.08 billion | 322.52 billion |
+| Guard count only, no replacement | 86.018 s | 23,982,616 | 132.02 billion | 333.76 billion |
+
+The adaptive pair averaged **82.347 s**, **7.3% faster** than the same-box
+control and about **3.4×** the historical Intel 24.087-second interval. The
+count-only result shows that avoiding repeated scans helps, but rotating old
+guards adds a further measurable gain. The AMD-to-native comparison remains
+roughly **6.3×** against the historical 13.109-second AMD native mean. Logs,
+marker snapshots and perf reports are in ignored
+`target/boxctl-evidence/amd-profile-successor-1011/`,
+`target/boxctl-evidence/amd-stale-guard-1011/`, and
+`target/boxctl-evidence/amd-stale-guard-ab-1011/`.
