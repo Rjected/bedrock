@@ -1780,3 +1780,42 @@ precise throughput estimate. It remains about **2.9×** the historical Intel
 24.087-second interval. Logs and marker snapshots are under ignored
 `target/boxctl-evidence/amd-trusted-pred-1011/`. All module builds, loads,
 and application tests ran inside `box-e6354dd8`, not on the local machine.
+
+### Check broader scalar continuation and early breakpoint masking
+
+A fresh 25-second, 99 Hz transfer-phase profile of the pushed trusted-page
+candidate collected 2,479 samples with none lost. `svm_run_guest` still led
+at **30.97%** of samples; breakpoint collection used **4.19%** and code-hazard
+memo lookup **3.92%**. The profiled full transfer took **70.488 s**, with
+**21,212,520** nested-page faults and **89.41 billion** VM-entry preparation
+cycles. Profiling and full-run evidence are under ignored
+`target/boxctl-evidence/amd-multipage-scalar-1011/`.
+
+One candidate extended the existing two-page scalar continuation rule to
+global batches with three or four selected pages. It passed 261 VMX tests,
+the in-box SVM suite, and all 10,000 transfers. Its **70.530 s** interval
+and **21,127,245** nested-page faults compared with an adjacent unprofiled
+control at **70.665 s** and **21,275,678** faults. The **0.135 s** difference
+is too small relative to run variation to establish a useful speedup; the
+change was reverted.
+
+A second candidate eagerly merged unsafe entries within a 16-byte range
+into one masked hardware breakpoint and removed the planner's raw-hazard
+count cutoff. A focused five-hazard, four-slot test, all 261 VMX tests, 40
+VM-library tests, and the in-box SVM suite passed. Both full application
+runs completed all 10,000 transfers. Compared with the same adjacent
+control, the first candidate run reduced nested-page faults by **1.52
+million** but increased the fair interval from **70.665 s to 81.055 s** and
+VM-entry preparation from **89.66 to 117.38 billion cycles**. A repeat with
+a 25-second host profile took **81.088 s**, with **19,746,998** nested-page
+faults and **116.72 billion** preparation cycles. Debug-exception counts
+changed little, so extra harmless debug traps do not explain the regression.
+The candidate's profile still led with `svm_run_guest` at **33.58%**, followed
+by breakpoint collection at **4.71%** and hazard memo lookup at **4.57%**;
+it does not isolate a single new function cost. The early masking and raw
+count changes were reverted. Logs, marker snapshots, and the profile are
+under ignored `target/boxctl-evidence/amd-early-mask-1011/`.
+
+These results show that admitting more pages can reduce execute faults yet
+lose more time in preparation and VM running. Future page-selection changes
+need full transfer timings and phase-cycle counts, not fault counts alone.
