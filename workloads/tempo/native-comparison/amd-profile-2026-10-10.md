@@ -2470,3 +2470,39 @@ exit fell consistently by about **3.7–4.1%** on the fresh box, so the local
 copy reduction is repeatable while its end-to-end benefit is modest relative
 to run-to-run variation. Marker snapshots are under ignored
 `target/boxctl-evidence/amd-borrow-alias-repeat-1011/`.
+
+### Classify the remaining hazardous execute faults
+
+An isolated diagnostic on the same disposable EPYC 4245P box classified the
+page hazards responsible for scalar execute faults, then measured the
+faulting fetch address against the page's recorded hazardous entries. Both
+diagnostic builds passed all 262 VMX tests and the in-box SVM suite, and both
+completed the full 10,000-transfer Tempo command. The counters below subtract
+the nearest million-fault kernel-log snapshots to the fair markers, so they
+approximate rather than exactly match the marker-bounded exit statistics.
+
+The hazard-type run recorded about **20.88 million** classified scalar faults
+between snapshots around its **21.09 million** marker-bounded nested-page
+faults. About **14.01 million (67%)** were on pages with REP-string entries,
+**1.74 million (8%)** on pages with SYSRET entries, and **0.76 million (4%)**
+on pages with RDRAND/RDSEED/RDPID entries. Another **0.10 million** had both
+REP and SYSRET entries, and **4.28 million (20%)** had entries the lightweight
+classifier did not identify, including cross-page suffix hazards. These
+categories describe *pages containing* opcodes, not instructions executed.
+
+The second run compared the faulting guest-physical fetch offset with all
+recorded hazardous offsets on that page. Between snapshots near the fair
+markers, **0 of 20,897,854** scalar faults matched an exact hazardous offset,
+**0** fell within 15 bytes, and all **20,897,854** were elsewhere on the
+page. The marker-bounded run had **21,361,326** nested-page faults and a
+**63.309 s** fair interval; diagnostic reads and logging make its elapsed
+time unsuitable as a performance baseline. This confirms that most execute
+faults occur when entering a page *containing* a possible hazard rather than
+when reaching that entry. It does not prove those hazards unreachable: the
+hardware breakpoint still has to stop an actual REP, SYSRET, or RNG entry.
+The principal remaining optimization is a safe way to keep more such pages
+executable with effective instruction-entry traps; four AMD debug-register
+slots currently limit the admitted set. Diagnostic source is isolated in
+`/tmp/bedrock-amd-npfdiag-1011`; copied logs and markers are under ignored
+`target/boxctl-evidence/amd-hazard-types-1011/` and
+`target/boxctl-evidence/amd-hazard-rip-1011/`.
