@@ -1267,3 +1267,21 @@ variant was merged. Logs and marker snapshots are under ignored
 `target/boxctl-evidence/box-91a9ef06/`,
 `target/boxctl-evidence/amd-two-pred-1011/`, and
 `target/boxctl-evidence/amd-fallback-1011/`.
+
+### Check redundant XCR0 switching
+
+The current profile attributes about **7% of `svm_run_guest` samples** to its
+two `XSETBV` instructions. An isolated assembly variant skipped those writes
+when the saved host XCR0 equaled the guest XCR0. It passed box SVM smoke and
+transition checks and all 10,000 transfers in two full runs. The same-box
+candidate/control/candidate intervals were **79.289 / 82.714 / 81.281 s**;
+the earlier unchanged run on that box was **80.343 s**. Fault counts differed
+by more than a million between runs, so the wall-time variation is not
+evidence of an XCR0 improvement.
+
+The box's measured host XCR0 was **`0x2e7`**. Bedrock exposes only x87, SSE,
+and AVX to this guest, initializes its XCR0 to **`0x7`**, and recorded zero
+guest XSETBV exits in both candidate and control transfer intervals. Thus the
+equality branch could not skip the writes on this workload. The variant was
+not merged. Evidence is under ignored
+`target/boxctl-evidence/amd-skip-xcr0-1011/`.
