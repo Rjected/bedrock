@@ -1573,3 +1573,27 @@ same box, both 32 and 64 guards returned to about 0.3% overhead. Logs,
 marker snapshots, and the candidate patch are under ignored
 `target/boxctl-evidence/amd-guard64-1011/`. The Tempo interval is still about
 **3.1×** the historical Intel 24.087-second result.
+
+### Retain 128 active code write guards
+
+A further increase from 64 to 128 active guards, with eight extra slots for
+very hot rejected pages, passed 260 VMX tests, 40 VM library tests, the EPYC
+4245P box suite, and two complete 10,000-transfer Tempo runs. The first pair
+used the same box as the 64-guard comparison above; the second pair used a
+fresh box with the same EPYC 4245P, HWE kernel, and guest artifacts:
+
+| Box / variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| First / 128 guards | 71.893 s | 22,280,600 | 91.60 billion |
+| First / 64 guards | 73.813 s | 22,478,708 | 95.95 billion |
+| Second / 128 guards | 71.365 s | 22,243,287 | 89.24 billion |
+| Second / 64 guards | 74.999 s | 22,956,320 | 96.79 billion |
+
+The 128-guard pair averaged **71.629 s** versus **74.406 s** for the 64-guard
+controls, about **3.7% faster**. Both pairs reduced VM-entry preparation
+cycles and nested-page faults. All four runs reported 10,000 successful
+transfers. A confirmation attempt on the first box was cut short by its
+one-hour expiry; it contributed no timing result. Logs, marker snapshots,
+and the candidate patch are under ignored
+`target/boxctl-evidence/amd-guard128-1011/`. The remaining gap to the
+historical Intel 24.087-second interval is about **3×**.
