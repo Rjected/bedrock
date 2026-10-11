@@ -1049,3 +1049,30 @@ entries. The next useful diagnostic is to separate failed successor predictions
 from candidates rejected by the existing alias, boundary, or breakpoint proof:
 the predictor removed only about 1.4 million faults despite most remaining
 faults targeting pages beyond the two most recent.
+
+### Diagnose successor accuracy
+
+On a fresh EPYC 4245P box, an instrumented one-successor run passed all
+10,000 transfers in **86.624 s**. During an 18.9-million-transition window
+near the transfer markers, the last observed successor was correct **25.8%**
+of the time, wrong **73.7%**, and absent **0.6%**. A larger table cannot fix
+mostly wrong predictions. Planner counters also showed that an expected
+successor was often admissible, so a second candidate might help.
+
+A two-successor experiment retained the two most recent distinct destinations
+per source page and tried both before the general recent-page list. It passed
+257 local VMX tests, 40 VM tests, box SVM smoke and transition checks, and two
+complete Tempo runs. The same-box fair transfer results were:
+
+| Variant | Transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Two successors | 84.989 s | 22,953,175 | 126.82 billion |
+| One successor, uninstrumented | 85.980 s | 23,403,932 | 129.04 billion |
+| Two successors repeat | 86.844 s | 23,543,467 | 129.30 billion |
+
+The candidate's first-run improvement did not repeat. Its two-run average was
+**85.917 s**, effectively the same as the one-successor control, and its fault
+count also varied across the control. The second successor remains isolated;
+the shared branch still uses one. Raw logs and marker snapshots are in the
+ignored `target/boxctl-evidence/amd-pred-diag-1011/` and
+`target/boxctl-evidence/amd-successor-two-1011/` directories.
