@@ -1233,3 +1233,37 @@ roughly 0.36 million fewer faults per run. The larger table and lookup path
 remain isolated; the shared branch retains two-page context. Diagnostic and
 run evidence is under ignored `target/boxctl-evidence/box-a5046a49/` and
 `target/boxctl-evidence/amd-third-order-1011/`.
+
+### Diagnose prediction admission and try a fallback candidate
+
+A box-only diagnostic of the shared two-page predictor passed the full Tempo
+workload in **79.072 s**. Across 26 million observed transitions in dmesg
+snapshots near the transfer markers, the planner had a predicted candidate
+22.58 million times and admitted it 15.00 million times (**66.4%**).
+Of the remaining attempts, 2.86 million failed hazard or boundary rules,
+1.24 million had no free breakpoint slot, 3.00 million targeted an already
+selected or otherwise ineligible page, 0.46 million lacked a usable hazard
+proof, and only 0.03 million lacked a cached alias proof. These categories
+count planner attempts rather than distinct page faults. The primary
+prediction matched 8.99 million of the 26 million *remaining observed*
+transitions; prediction changes which transitions are observed, so this rate
+must not be compared directly with the earlier baseline diagnostic's 59.8%.
+
+An isolated variant tried the current-page predictor after the contextual
+prediction on every global plan. A second variant tried that fallback only
+when the contextual page could not be admitted. Both passed 258 VMX and 40 VM
+library tests, box smoke and transition checks, and all 10,000 transfers.
+On the same EPYC 4245P box:
+
+| Variant | Fair transfer interval | Nested-page faults | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: |
+| Two candidates unconditionally | 82.415 s | 22,417,832 | 127.44 billion |
+| Unchanged shared branch | 80.343 s | 22,259,765 | 122.00 billion |
+| Fallback only after admission failure | 80.377 s | 22,164,127 | 122.26 billion |
+
+Unconditionally checking both candidates regressed by **2.07 s**. The
+conditional fallback was effectively tied with the control, so neither
+variant was merged. Logs and marker snapshots are under ignored
+`target/boxctl-evidence/box-91a9ef06/`,
+`target/boxctl-evidence/amd-two-pred-1011/`, and
+`target/boxctl-evidence/amd-fallback-1011/`.
