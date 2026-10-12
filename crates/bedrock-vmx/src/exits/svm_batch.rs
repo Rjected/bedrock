@@ -6421,6 +6421,45 @@ mod tests {
     }
 
     #[test]
+    fn five_hazard_region_does_not_admit_a_page_reentering_an_unvisited_hazard() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        ctx.memory[0x1010] = 0xc3;
+        for offset in [0x100, 0x200, 0x300, 0x400, 0x500] {
+            ctx.memory[0x1000 + offset..0x1000 + offset + 3]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.memory[0x2000..0x2005].copy_from_slice(&[0xe9, 0xfb, 0xf0, 0xff, 0xff]);
+        ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator,
+                GuestPhysAddr::new(page),
+                HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        ctx.set_guest_rip(0x2000);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(prepare_global(&mut ctx, &allocator, true, true, &window).is_some());
+        ctx.set_guest_rip(0x1000);
+        let hazard = cached_page_hazards(&mut ctx, 0x1000).unwrap();
+        assert_eq!(hazard.count, 5);
+        ctx.state_mut().svm_recent_pages[0] = 0x2000;
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000]);
+        assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1010]);
+    }
+
+    #[test]
     fn endbr64_retains_proofs_and_bounds_the_decoded_instruction() {
         let bytes = [0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x89, 0x07];
         assert_eq!(safe_len(&bytes, true, false), Some((4, false, false)));

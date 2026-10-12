@@ -3715,3 +3715,30 @@ the adjacent control, not a claim of general AMD virtualization overhead.
 The historical Intel workload was 24.087 s on different hardware, leaving
 this AMD run about 1.97x slower. Logs and fair-marker exit snapshots are
 under ignored `target/boxctl-evidence/amd-regionproof-1012/`.
+
+### Check region-proof widening and host perf sampling
+
+An isolated candidate let a five-hazard page's reachable-region proof use
+its spare breakpoint slots to admit a predicted second page. It passed the
+then-existing 263 VMX library tests and in-box SVM suite, and the complete
+Tempo run had
+10,000 successful transfers. The candidate took **47.510 s** with
+18,137,503 NPT faults; the adjacent unchanged control took **47.132 s** with
+17,902,462 faults. More importantly, a targeted unit test found a real
+proof gap: a direct branch from the second page can re-enter the first at an
+unvisited hazard offset. The candidate admits that page without guarding
+the target. It was discarded; the pushed single-page region proof remains
+safe, and the re-entry case is retained as a regression test. Candidate
+source is isolated in `/tmp/bedrock-amd-regionwiden-1012`; logs and marker
+snapshots are under ignored `target/boxctl-evidence/amd-regionwiden-1012/`.
+
+Host `perf` hardware-cycle sampling during a complete pinned run collected
+only 306 samples, mostly during guest-memory allocation, because Bedrock
+uses the CPU performance counters while the guest runs. Software-clock
+sampling collected about 36,000 samples and completed 10,000/10,000
+transfers, but 99% landed at `bedrock_local_irq_enable` as guest exits
+re-enabled interrupts. Neither profile resolves the interrupt-disabled
+VM-entry preparation path. The next profile needs low-rate cycle probes
+inside that path. The software-clock diagnostic and report share the ignored
+evidence directory above; the hardware-cycle report is under
+`target/boxctl-evidence/amd-regionproof-1012/`.
