@@ -3391,3 +3391,26 @@ Its normalized runner and preparation costs were both higher, so there is
 no evidence that clean-field tracking speeds this workload. The candidate
 was reverted. Logs and marker snapshots are under ignored
 `target/boxctl-evidence/amd-vmcb-clean-1012/`.
+
+### Sample the remaining trap-flag exits
+
+An isolated diagnostic build sampled every 2,048th SVM trap-flag exit on the
+same 4245P HWE box, recording the next guest RIP, opcode prefix, CR3, and
+synthetic-exit qualification. The in-box SVM suite and full 10,000-transfer
+workload passed. The measured transfer had **25,690,594 exits**, including
+**19,049,572 NPT faults** and **4,424,251 trap-flag exits**. Its fair interval
+was **75.226 s**, versus roughly 52 s without instrumentation: guest-memory
+reads and kernel logging make this run unsuitable as a speed comparison.
+
+The kernel ring retained 1,798 samples from the final 31 seconds of the
+75-second transfer interval, around 83% of the 2,160 samples expected from
+its total trap-flag count. Of the retained samples, 974 had ordinary
+qualification and 786 had the synthetic page-execution plus scalar-replay
+qualification. The largest single RIP was the guest kernel's `SYSRETQ`
+(`ffffffff810001c9`), at 120 samples (6.7%). The next two RIPs were userspace
+`CMP RAX, ...` sequences at 79 and 25 samples. No one instruction dominates
+the remaining trap exits, so optimizing only one opcode is unlikely to close
+the roughly twofold gap to Intel. The repeated NPT fault/entry path remains
+the higher-value target. Diagnostic source is isolated in
+`/tmp/bedrock-amd-mtf-profile-1012`; marker snapshots and kernel log are
+under ignored `target/boxctl-evidence/amd-mtf-sample-1012/`.
