@@ -3128,3 +3128,30 @@ successful `prepare_global_into` calls is the immediate target; removing
 scalar fallback or speeding decode cannot account for a large workload gain.
 The probe remains unmerged in `/tmp/bedrock-amd-plansplit-1012`; snapshots
 and kernel logs are under ignored `target/boxctl-evidence/amd-plansplit-1012/`.
+
+On a fresh EPYC 4245P box, the follow-up diagnostic timed substeps in
+`prepare_global_into` while running the exact native-comparison compose file,
+10,000-transfer image archive, and guest kernel matching the initrd's module
+build ID. All 262 VMX tests, the box SVM suite, and the full workload passed.
+The fair interval was **54.093 s**, with **18,935,772 nested-page faults**.
+Nearest marker logs cover about **27.26 million** global-plan calls:
+**13.87 billion** cycles in optional candidate-page selection,
+**9.83 billion** in breakpoint-proof collection, **2.04 billion** in current
+page hazard lookup, and **0.92 billion** in the trusted-page prediction path.
+The remaining global-plan cost includes eligibility checks and batch setup.
+Diagnostic source remains isolated in `/tmp/bedrock-amd-plansplit-1012`;
+evidence is under ignored `target/boxctl-evidence/amd-plandetail-1012/`.
+
+A second full run sampled one in 64 candidate loops to apportion selection
+cost without adding a timer to every candidate. It passed the same checks
+and finished the fair interval in **54.579 s**, with **19,266,164 faults**.
+Marker-nearest snapshots contain **901,808 sampled candidate visits** (roughly
+58 million estimated visits) and only **261 translation misses**. Within those
+sampled visits, current/optional-page hazard lookup took **60.9 million**
+cycles, translation lookup **29.7 million**, screening **29.9 million**,
+boundary checks **25.1 million**, and alias-proof lookup **18.1 million**.
+The whole candidate loop took **13.87 billion** cycles across all calls.
+There is no single dominant lookup or miss path: reducing candidate-page
+visits or improving selection quality is more promising than only optimizing
+one lookup. Evidence is under ignored
+`target/boxctl-evidence/amd-canddetail-1012/`; the probe remains unmerged.
