@@ -2710,3 +2710,30 @@ stopped, and the pushed module was reloaded and passed the complete box
 suite. This variant also remains isolated in
 `/tmp/bedrock-amd-maskedcapacity-1012`; its log and the raw-count marker
 snapshots are under ignored `target/boxctl-evidence/amd-maskedcapacity-1012/`.
+
+### Hint recently used AMD alias proofs
+
+The breakpoint-proof collector already hits its cache on more than 99% of
+transfer-phase calls, but alternating code pages still search a four-way
+proof set. A one-based direct hint now points to a recent proof for each
+hash bucket. Every hinted hit still validates the guarded root, proof key,
+physical page, hazard count, and exact offsets; collisions and evictions
+fall through to the original search. A focused VMX test poisons the hint
+with a different page's proof and verifies that the correct proof is found.
+All 262 VMX tests and the in-box SVM suite passed.
+
+On the same EPYC 4245P box, two candidate runs and an intervening unchanged
+control completed all 10,000 transfers:
+
+| Run order | Proof lookup | Fair interval | VM exits | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Direct hint | 58.942 s | 29,257,691 | 2,309 |
+| 2 | Unchanged | 59.344 s | 29,268,518 | 2,321 |
+| 3 | Direct hint | 58.059 s | 28,785,223 | 2,303 |
+
+The first adjacent pair improved by **0.402 s** with nearly identical exit
+counts. Preparation was **12 cycles/exit** lower in that pair; the repeat
+candidate was **18 cycles/exit** below its intervening control. This is a
+small local gain, and the repeat's lower elapsed time also reflects fewer
+exits. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-aliaslookup-1012/`.
