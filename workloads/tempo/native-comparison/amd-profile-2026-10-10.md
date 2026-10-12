@@ -3779,3 +3779,12 @@ claim. A simpler variant using the existing 1,024-entry memo hint took
 `/tmp/bedrock-amd-hot-hazard-1012`. Logs and fair-marker snapshots are under
 ignored `target/boxctl-evidence/amd-hazard-fast-1012/`; diagnostic sources
 are isolated in `/tmp/bedrock-amd-entryfine-1012`.
+
+A follow-up safety test found that a closed reachable loop on an untrusted
+five-hazard page could produce a global plan with zero breakpoints. That plan
+did not write-protect the code page, so its decoded-region proof could become
+stale. The global path now uses the page-wide breakpoint proof when the
+reachable proof has no breakpoints. The targeted regression test, all 266
+VMX library tests, and the full in-box SVM suite pass. This is a correctness
+guard for the accelerated path; it does not explain the large Tempo timing
+gap.

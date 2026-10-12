@@ -2313,6 +2313,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // points within the same region reuse it under the same code revision.
         if hazard.count == 5
             && collect_reachable_breakpoints(ctx, batch, window.linear).is_some()
+            && batch.page_breakpoint_count != 0
         {
             return Some(());
         }
@@ -6499,6 +6500,31 @@ mod tests {
         let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000]);
         assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1010]);
+    }
+
+    #[test]
+    fn unguarded_closed_region_keeps_a_write_protection_breakpoint() {
+        let mut ctx = paged_context(&[0xeb, 0xfe]);
+        ctx.memory[0x1002..0x2000].fill(0x90);
+        for offset in [0x100, 0x200, 0x300, 0x400, 0x500] {
+            ctx.memory[0x1000 + offset..0x1000 + offset + 3]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        ctx.state_mut().ept.map_4k(
+            &mut allocator, GuestPhysAddr::new(0x1000), HostPhysAddr::new(0x101000),
+            bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+            bedrock_ept::EptMemoryType::WriteBack,
+        ).unwrap();
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(cached_page_hazards(&mut ctx, 0x1000).unwrap().count, 5);
+        assert!(batch.page_breakpoint_count > 0);
     }
 
     #[test]
