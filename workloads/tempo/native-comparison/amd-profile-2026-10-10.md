@@ -3958,3 +3958,15 @@ the candidate and **51.77 billion** for the control, showing no meaningful
 reduction in the intended cost. The change remains isolated in
 `/tmp/bedrock-amd-alias-upperindex-1012`, with logs under ignored
 `target/boxctl-evidence/amd-upperindex-1012/`.
+
+A separate isolated candidate grew the set-associative alias-proof cache
+from 2,048 to 8,192 entries and its direct lookup from 1,024 to 4,096.
+It passed all 266 VMX library tests, the in-box SVM suite, and two complete
+10,000-transfer runs on the same EPYC 4245P box. Fair intervals were
+**41.640 s** and **42.966 s**, versus **42.328 s** for the adjacent unchanged
+control. The candidate's NPT fault counts were **16.625 million** and
+**16.759 million**, versus the control's **16.770 million**. Its VM-entry
+preparation cycles moved from **50.73 billion** to **54.21 billion** across
+those two runs, versus **51.77 billion** for the control. A larger cache
+did not yield a repeatable application gain, so this 1.6 MiB-per-VM
+expansion remains isolated in `/tmp/bedrock-amd-alias-capacity-1012`.
