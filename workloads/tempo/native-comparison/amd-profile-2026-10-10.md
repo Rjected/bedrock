@@ -4383,3 +4383,47 @@ This patch affects the shared guest kernel used by both backends and changes
 code addresses, so old replay traces for the previous image cannot be used
 as a comparison. Marker snapshots are under ignored
 `target/boxctl-evidence/amd-guest-layout-1012/`.
+
+### IRPERF / unguarded-REP ceiling probe (2026-10-12)
+
+This diagnostic used a disposable EPYC 4245P `boxctl` box with HWE
+`7.0.0-38-generic`; no module was built or loaded on the workstation. The
+guest was the aligned-fallback kernel above, with the same 10,000-transfer
+image, seed, CPU pin, and fair markers. Experimental source remains in the
+isolated `/tmp/bedrock-amd-irperf-probe-1012` worktree and was **not merged**.
+
+| Diagnostic variant | Fair 10,000-transfer interval | VM exits | NPT faults | Replay result |
+| --- | ---: | ---: | ---: | --- |
+| Guarded control, AMD RDRAND CPUID masked, original counter correction | 38.975 s | 19.073 million | 15.734 million | 128/128 fork replays passed; separate guarded run with revised correction passed 1,024/1,024 |
+| Normal page validation, REP omitted from hazard scanner, raw IRPERF | 13.324 s and 13.432 s | 5.428 million in first run | 2.387 million in first run | Failed 128-fork replay even with REP guarded when all PMC correction was removed |
+| Normal page validation, REP omitted, selective PMC correction | Not timed | Not timed | Not timed | 128/128 passed; 1,024-fork replay diverged at replay 59 |
+| Treat every code page as safe, raw IRPERF, REP unguarded | 7.545 s | 2.879 million | 0.103 million | Unsafe: bypasses runtime code and RNG guards |
+| Same all-safe probe with AMD RDRAND CPUID hidden | 7.522 s | 2.893 million | 0.109 million | Unsafe: CPUID hiding does not intercept raw RDRAND |
+
+All timed runs completed 10,000/10,000 transfers, but that application check
+does not establish deterministic replay. The 7.5-second variant deliberately
+disabled runtime hazard enforcement and is only an upper-bound diagnostic.
+The 13.3-second variant retained the other page hazards, but omitting REP is
+also not correctness-ready. The current guarded code is the only timed row
+that preserves the existing REP policy. These intervals are on the same box;
+the historical Intel interval of 24.087 seconds was on different hardware.
+
+The proposed clock uses VMCB IRPERF as the guest retirement count, treating
+an entire REP instruction as one retired instruction rather than accounting
+for each repeated iteration as the current stepped path does. This changes
+virtual-time deadlines and replay checkpoints. AMD RDRAND CPUID masking
+steers optional callers away from hardware RNG but does not make raw RDRAND
+safe. The page hazard scanner must remain unless an equally strong runtime
+mechanism replaces it.
+
+A 16 MiB REP STOSB probe with host IBS sampling showed why the existing
+single-tick PMC correction cannot simply be reused for unguarded REP: its
+virtual count changed from 111 without IBS to 299--306 with IBS. Removing
+the correction kept this narrow probe at 111 with and without IBS, but Linux
+fork replay then diverged at replay 13 (and at replay 27 with REP guarded).
+Excluding host-interrupt exits from the correction preserved 1,024 replays
+with REP guarded; with REP unguarded, it still diverged at replay 59. The
+remaining work is a REP-aware interruption/retirement accounting rule that
+passes long fork replay and heavy host sampling before this speedup can be
+considered safe. Fair-marker snapshots for the timed runs are in ignored
+`target/boxctl-evidence/amd-irperf-ceiling-1012/`.
