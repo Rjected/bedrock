@@ -3463,3 +3463,33 @@ reducing faults, so this measurement does not justify a wider merge policy.
 Diagnostic source is isolated in `/tmp/bedrock-amd-maskwidth-1012`; full
 logs and marker snapshots are under ignored
 `target/boxctl-evidence/amd-maskwidth-1012/`.
+
+### Probe IBS interrupts during REP execution
+
+AMD [IBS operation sampling](https://docs.amd.com/r/en-US/68658-uProf-getting-started-guide/Introduction-to-IBS-Instruction-Based-Sampling)
+counts sampled micro-ops rather than the programmable retired-instruction
+event used by the SVM deadline path. On the same 4245P box, a native program
+repeatedly executed 64 MiB `REP STOSB`. `perf record -e ibs_op// -c 1000000`
+collected about 1,000 samples, with 96.9% attributed to the REP function and
+none lost. A separate perf-event SIGIO probe observed **678** interruptions
+with the interrupted RIP at `REP STOSB` and RCX partway through the operation.
+Thus IBS can interrupt a long REP before it completes on this CPU.
+
+An **unsafe diagnostic-only** SVM build then omitted REP from the page hazard
+scanner and ran a 16 MiB guest `REP STOSB` under host IBS sampling at period
+100,000. The VMCB reported repeated NMI exits (`code=0x61`) with RIP still
+at REP and RCX decreasing. The guest eventually shut down at virtual count
+**191** despite a requested stop at **1,000**; the same unsafe probe without
+IBS shut down at count **111**. With the normal module restored, the identical
+guest stopped exactly at count **1,000**, with RCX reduced by 900 and only
+**seven** exits. The full in-box SVM suite passed again after restoration.
+
+IBS can supply an asynchronous mid-REP exit, but it does not reveal the RCX
+value when execution *entered* a REP reached later in an unguarded code page.
+Without that starting value, Bedrock cannot account for its iterations or
+enforce an exact deadline. Sampling also adds exits to a REP that the current
+guarded bounded-chunk path executes efficiently. It is not a drop-in
+replacement for REP entry traps. The unsafe module was not retained. Probe
+source is isolated in `/tmp/bedrock-amd-ibs-guest-probe-1012`, and native
+SIGIO/perf and guest VMCB logs are under ignored
+`target/boxctl-evidence/amd-ibs-rep-1012/`.
