@@ -3548,3 +3548,14 @@ simply removing their guards was already shown to undercount. The diagnostic
 module was removed and the tested module restored. Source is isolated in
 `/tmp/bedrock-amd-mtf-after-sysret-1012`; logs and marker snapshots are under
 ignored `target/boxctl-evidence/amd-mtf-after-sysret-1012/`.
+
+A follow-up diagnostic tried to log the page's hazard proof at the exact
+virtual address observed in that sampled run. The address did not recur in
+the next guest: no targeted log was emitted by the first transfer marker.
+The probe was stopped, and the tested module was restored and passed the full
+in-box suite. This attempt yielded no hazard-proof conclusion. The next probe
+must identify the page by its instruction bytes or resolve its mapping in
+each run instead of relying on the prior run's user-space address. The
+aborted run's log and first marker are under ignored
+`target/boxctl-evidence/amd-rep-hotdiag-1012/`; isolated source is in
+`/tmp/bedrock-amd-rep-hotdiag-1012`.
