@@ -2780,3 +2780,33 @@ The earlier same-box control took **58.134 s** with **29,200,650** exits and
 lower exit count; normalized preparation did not improve. The cache is
 unmerged in `/tmp/bedrock-amd-nptleaf-1012`; snapshots are under ignored
 `target/boxctl-evidence/amd-nptleaf-1012/`.
+
+A narrower follow-up to the 32-byte mask test precomputed just one cheap
+merge pair from an already-full four-slot plan and admitted only a successor
+with one cached breakpoint. Its focused case, all 263 VMX tests, and the box
+suite passed. The complete Tempo run took **57.929 s** with **29,209,354**
+exits, **21,534,280** nested-page faults, and **2,264 preparation cycles/exit**.
+The same-box unchanged control had **58.134 s**, **29,200,650** exits,
+**21,505,404** nested-page faults, and **2,267 preparation cycles/exit**.
+The bounded merge did not reduce faults or meaningful preparation cost, so
+it remains unmerged in `/tmp/bedrock-amd-maskpair-1012`. Snapshots are under
+ignored `target/boxctl-evidence/amd-maskpair-1012/`.
+
+An isolated SVM assembly candidate skipped the guest and host `XSETBV`
+instructions when the already-read host XCR0 exactly equaled the guest XCR0
+mask. It retained the existing XSAVE/XRSTOR handling and passed the in-box
+SVM suite. Two candidate runs around an unchanged same-box control completed
+all 10,000 transfers:
+
+| Run order | XCR0 switch | Fair interval | VM exits | Runner and guest cycles/exit | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Skip equal writes | 55.492 s | 28,083,824 | 4,764 | 2,239 |
+| 2 | Unchanged control | 57.875 s | 29,127,177 | 4,769 | 2,271 |
+| 3 | Skip equal writes | 57.993 s | 29,194,534 | 4,745 | 2,290 |
+
+The fast first candidate had about a million fewer exits; the second candidate
+closely tracked its control in both exits and wall time. The small normalized
+runner reduction was offset by preparation variation and did not establish
+an end-to-end gain. The change remains unmerged in
+`/tmp/bedrock-amd-xcr0equal-1012`; snapshots are under ignored
+`target/boxctl-evidence/amd-xcr0equal-1012/`.
