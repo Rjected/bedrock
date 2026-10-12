@@ -2737,3 +2737,34 @@ candidate was **18 cycles/exit** below its intervening control. This is a
 small local gain, and the repeat's lower elapsed time also reflects fewer
 exits. Marker snapshots are under ignored
 `target/boxctl-evidence/amd-aliaslookup-1012/`.
+
+### Bound extra breakpoint masks to 32 bytes
+
+An isolated follow-up allowed a full four-slot plan to merge two existing
+breakpoint ranges only when the combined range covered at most 32 bytes.
+Its focused test admitted a five-REP page together with another hazardous
+page; all 263 VMX tests and the in-box SVM suite passed. Unlike the earlier
+wide-mask variant, it reached the first Tempo fair marker near normal startup
+time and completed all 10,000 transfers. The same-box comparison showed a
+clear throughput regression:
+
+| Policy | Fair interval | VM exits | Nested-page faults | Preparation cycles/exit |
+| --- | ---: | ---: | ---: | ---: |
+| Extra 32-byte merges | 64.834 s | 27,242,973 | 19,568,082 | 3,077 |
+| Unchanged control | 58.134 s | 29,200,650 | 21,505,404 | 2,267 |
+
+The extra merges prevented **1.94 million** page faults, but preparation
+rose by about **810 cycles per exit**, and VM-runner cycles rose from
+**139.34** to **150.04 billion** despite fewer exits. The net cost was
+**6.70 seconds**. The variant remains isolated in
+`/tmp/bedrock-amd-maskedcapacity-1012`; snapshots are under ignored
+`target/boxctl-evidence/amd-mask32-1012/`.
+
+An independent isolated candidate removed seven redundant-looking VMCB PMC
+stores on counted entries, retaining disabled controls for counters 1–5 and
+programming only counter 0. The 23 SVM-core tests and box suite passed, and
+all transfers completed. It took **57.492 s** versus the same **58.134 s**
+control, but had **442 thousand fewer exits**; preparation was **2,289**
+versus **2,267 cycles/exit**. There is no measured per-entry gain, so that
+variant also remains unmerged in `/tmp/bedrock-amd-pmcstores-1012`.
+Snapshots are under ignored `target/boxctl-evidence/amd-pmcstores-1012/`.
