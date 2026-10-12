@@ -25,6 +25,7 @@ pub(crate) const SVM_SECOND_SUCCESSOR_CAPACITY: usize = 8192;
 pub(crate) const SVM_ALIAS_EDGE_CAPACITY: usize = 2048;
 pub(crate) const SVM_ALIAS_WALK_CAPACITY: usize = 2048;
 pub(crate) const SVM_ALIAS_PROOF_CAPACITY: usize = 2048;
+pub(crate) const SVM_ALIAS_PROOF_LOOKUP_CAPACITY: usize = 1024;
 pub(crate) const SVM_ALIAS_PROOF_WAYS: usize = 4;
 pub(crate) const SVM_ALIAS_PROOF_PAGE_CAPACITY: usize = 4;
 pub(crate) const SVM_LEAF_PAGE_INDEX_CAPACITY: usize = 1024;
@@ -86,6 +87,9 @@ pub(crate) struct SvmGuardScratch {
     pub aliases: [SvmAliasWalk; SVM_ALIAS_WALK_CAPACITY],
     pub alias_proof: SvmAliasProof,
     pub alias_proofs: [SvmAliasProof; SVM_ALIAS_PROOF_CAPACITY],
+    /// One-based hint into `alias_proofs`; every hit rechecks the proof key,
+    /// guarded root, and exact hazardous offsets after cache replacement.
+    pub alias_lookup: [u16; SVM_ALIAS_PROOF_LOOKUP_CAPACITY],
     // Exact physical-page set used while checking a released leaf table.
     pub leaf_pages: [u64; SVM_LEAF_PAGE_INDEX_CAPACITY],
     pub leaf_snapshots: [SvmLeafSnapshot; SVM_LEAF_SNAPSHOT_CAPACITY],

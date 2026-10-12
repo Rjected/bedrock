@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static REFRESH_PENDING: AtomicU64 = AtomicU64::new(0);
@@ -58,6 +58,7 @@ const _: () = assert!(SVM_TABLE_CAPACITY % 64 == 0);
 const _: () = assert!(SVM_TABLE_CAPACITY.is_power_of_two() && SVM_TABLE_CAPACITY <= u16::MAX as usize);
 const _: () = assert!(SVM_SUCCESSOR_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_SECOND_SUCCESSOR_CAPACITY.is_power_of_two());
+const _: () = assert!(SVM_ALIAS_PROOF_LOOKUP_CAPACITY.is_power_of_two());
 
 fn successor_slot(root: u64, from: u64) -> usize {
     let key = (from >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -2602,6 +2603,8 @@ fn remember_alias_proof<C: VmContext>(
         .unwrap_or(set + cache.alias_cursor % SVM_ALIAS_PROOF_WAYS);
     cache.alias_proofs[cursor] = cache.alias_proof;
     cache.alias_last_hit = cursor;
+    let lookup = ((key_hash >> 32) as usize) & (SVM_ALIAS_PROOF_LOOKUP_CAPACITY - 1);
+    cache.alias_lookup[lookup] = (cursor + 1) as u16;
     cache.alias_cursor = cache.alias_cursor.wrapping_add(1);
 }
 
@@ -2718,13 +2721,19 @@ fn collect_page_breakpoints<C: VmContext>(
     };
     let cache = &ctx.state().svm_guard;
     let last = cache.alias_last_hit;
+    let lookup = ((key_hash >> 32) as usize) & (SVM_ALIAS_PROOF_LOOKUP_CAPACITY - 1);
+    let hint = usize::from(cache.alias_lookup[lookup]);
     let cached = if last < cache.alias_proofs.len() && matches(&cache.alias_proofs[last]) {
         Some(last)
+    } else if hint != 0 && hint <= cache.alias_proofs.len()
+        && matches(&cache.alias_proofs[hint - 1]) {
+        Some(hint - 1)
     } else {
         cache.alias_proofs[set..set + SVM_ALIAS_PROOF_WAYS]
             .iter()
             .enumerate()
-            .find(|(way, proof)| set + *way != last && matches(proof))
+            .find(|(way, proof)| set + *way != last
+                && set + *way + 1 != hint && matches(proof))
             .map(|(way, _)| set + way)
     };
     if let Some(index) = cached {
@@ -2733,7 +2742,9 @@ fn collect_page_breakpoints<C: VmContext>(
         batch.page_breakpoints = proof.breakpoints;
         batch.page_breakpoint_masks = proof.breakpoint_masks;
         batch.page_breakpoint_count = proof.breakpoint_count;
-        ctx.state_mut().svm_guard.alias_last_hit = index;
+        let cache = &mut ctx.state_mut().svm_guard;
+        cache.alias_last_hit = index;
+        cache.alias_lookup[lookup] = (index + 1) as u16;
         return Some(());
     }
     if hazard_pages > 1 && matches(&cache.alias_proof) {
@@ -5713,7 +5724,15 @@ mod tests {
             &second.page_breakpoints[..second.page_breakpoint_count],
             &[0x7100]
         );
-        assert_ne!(ctx.state().svm_guard.alias_last_hit, first_slot);
+        let second_slot = ctx.state().svm_guard.alias_last_hit;
+        assert_ne!(second_slot, first_slot);
+
+        // A collided or evicted direct hint must be rechecked against the
+        // exact page and hazard proof before it can supply breakpoints.
+        let first_hazard = cached_page_hazards(&mut ctx, 0x1000).unwrap();
+        let key = alias_proof_key(0x3000, &first, &[first_hazard]);
+        let lookup = ((key >> 32) as usize) & (SVM_ALIAS_PROOF_LOOKUP_CAPACITY - 1);
+        ctx.state_mut().svm_guard.alias_lookup[lookup] = (second_slot + 1) as u16;
 
         ctx.state_mut().svm_guard.aliases[0].table = 0;
         ctx.set_guest_rip(0x1000);
@@ -5725,6 +5744,7 @@ mod tests {
             &[0x1100]
         );
         assert_eq!(ctx.state().svm_guard.alias_last_hit, first_slot);
+        assert_eq!(ctx.state().svm_guard.alias_lookup[lookup], (first_slot + 1) as u16);
         assert_eq!(ctx.state().svm_guard.aliases[0].table, 0);
     }
 
