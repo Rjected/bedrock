@@ -41,6 +41,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_boundary_rep_prefix()?;
     test_boundary_rdrand()?;
     test_masked_breakpoints()?;
+    test_fpu_reservation()?;
+    Ok(())
+}
+
+fn test_fpu_reservation() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    let expected = *b"SVM FPU state OK";
+    memory[0x2000..0x2010].copy_from_slice(&expected);
+    // MOVDQU XMM0,[RIP+0xff8]; CPUID exits cross the 64-entry FPU
+    // reservation boundary; RDRAND exits to userspace for a fork; then more
+    // CPUID exits, MOVDQU [RIP+0xef9],XMM0, and VMMCALL.
+    memory[0x1000..0x1008].copy_from_slice(&[0xf3, 0x0f, 0x6f, 0x05, 0xf8, 0x0f, 0, 0]);
+    for index in 0..70 {
+        memory[0x1008 + index * 2..0x100a + index * 2]
+            .copy_from_slice(&[0x0f, 0xa2]);
+    }
+    memory[0x1094..0x1097].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+    for index in 0..60 {
+        memory[0x1097 + index * 2..0x1099 + index * 2]
+            .copy_from_slice(&[0x0f, 0xa2]);
+    }
+    memory[0x110f..0x1117].copy_from_slice(&[0xf3, 0x0f, 0x7f, 0x05, 0xf9, 0x0e, 0, 0]);
+    memory[0x1117..0x111e].copy_from_slice(&[0x48, 0x8b, 0x1d, 0xf2, 0x0e, 0, 0]);
+    memory[0x111e..0x1125].copy_from_slice(&[0x48, 0x8b, 0x0d, 0xf3, 0x0e, 0, 0]);
+    memory[0x1125..0x112a].copy_from_slice(&[0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.control_regs.cr4.set(1 << 9); // CR4.OSFXSR permits SSE instructions.
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 57, "missed FPU snapshot RDRAND");
+        assert!(vm.get_exit_stats()?.total_exit_count() > 64);
+        break;
+    }
+    let check_resumed = |resumed: &Vm| -> Result<(), Box<dyn std::error::Error>> {
+        resumed.set_rdrand_value(0x1234)?;
+        loop {
+            let exit = resumed.run()?;
+            if exit.exit_reason == 256 { continue; }
+            assert_eq!(exit.exit_reason, 258, "FPU guest did not shut down");
+            let got = resumed.get_regs()?;
+            assert_eq!(got.gprs.rbx, u64::from_le_bytes(expected[..8].try_into()?));
+            assert_eq!(got.gprs.rcx, u64::from_le_bytes(expected[8..].try_into()?));
+            break;
+        }
+        Ok(())
+    };
+    {
+        let child = vm.fork()?;
+        check_resumed(&child)?;
+    }
+    check_resumed(&vm)?;
+    println!("SVM_FPU_RESERVATION_PASS");
     Ok(())
 }
 

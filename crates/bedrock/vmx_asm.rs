@@ -15,6 +15,8 @@ extern "C" {
     fn kernel_fpu_end();
     fn irq_fpu_usable() -> bool;
 
+    fn svm_flush_guest_fpu(ctx: *mut VmxContext);
+
     /// Save host GPRs, load guest GPRs from `ctx`, and VMLAUNCH/VMRESUME; on
     /// exit, save guest GPRs and restore host. Returns 0 on VM exit, -1 on
     /// VM entry failure (check VMCS error fields).
@@ -28,6 +30,16 @@ extern "C" {
     /// HOST_RIP landing point for all VM exits; returns to vmx_run_guest's
     /// caller. Never call directly from Rust.
     fn vmx_exit_handler();
+}
+
+/// Persist resident SVM FPU registers before changing ownership or XCR0.
+///
+/// # Safety
+/// The caller must hold the kernel FPU reservation and disable local IRQs.
+pub(crate) unsafe fn flush_svm_guest_fpu(ctx: &mut VmxContext) {
+    if ctx.svm_guest_fpu_dirty != 0 {
+        unsafe { svm_flush_guest_fpu(ctx) };
+    }
 }
 
 /// Kernel-specific VmxContext methods backed by vmx_support.S.
@@ -93,6 +105,7 @@ impl VmRunner for RealVmRunner {
 
     fn begin_run(&mut self, ctx: &mut VmxContext) {
         ctx.svm_guest_fpu_resident = 0;
+        ctx.svm_guest_fpu_dirty = 0;
         if super::svm::supported() && ctx.xcr0_mask != 0 && unsafe { irq_fpu_usable() } {
             // Begin and end with interrupts enabled so the kernel's FPU API
             // balances its softirq lock. The outer VM_RUN pins this CPU.
@@ -114,8 +127,11 @@ impl VmRunner for RealVmRunner {
             && (self.svm_fpu_entries == 64
                 || host_tsc.saturating_sub(self.svm_fpu_started_tsc) >= 2_000_000)
         {
-            // Guest state is already saved and host XCR0/MSRs are restored.
-            // Briefly release the reservation so pending softirqs can run.
+            // Briefly disable IRQs while guest XCR0 is active for XSAVE.
+            super::c_helpers::local_irq_disable();
+            unsafe { flush_svm_guest_fpu(ctx) };
+            super::c_helpers::local_irq_enable();
+            // Release the reservation so pending softirqs can run.
             ctx.svm_guest_fpu_resident = 0;
             unsafe { kernel_fpu_end() };
             unsafe { kernel_fpu_begin_mask(2) };
@@ -126,6 +142,9 @@ impl VmRunner for RealVmRunner {
 
     fn finish_run(&mut self, ctx: &mut VmxContext) {
         if self.svm_fpu_active {
+            super::c_helpers::local_irq_disable();
+            unsafe { flush_svm_guest_fpu(ctx) };
+            super::c_helpers::local_irq_enable();
             ctx.svm_host_fpu_reserved = 0;
             ctx.svm_guest_fpu_resident = 0;
             unsafe { kernel_fpu_end() };

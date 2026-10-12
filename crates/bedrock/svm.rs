@@ -292,6 +292,11 @@ pub(crate) unsafe fn run(
     ctx.guest_rax = v.read(o::RAX, 8);
     ctx.guest_cr2 = v.read(o::CR2, 8);
     let code = v.read(o::EXIT_CODE, 8);
+    // The XSETBV handler changes the XSAVE mask. Persist registers using
+    // the old mask first, while the run loop still has IRQs disabled.
+    if code == 0x08d && ctx.svm_guest_fpu_dirty != 0 {
+        unsafe { super::vmx_asm::flush_svm_guest_fpu(ctx) };
+    }
     if let Some(batch) = batch.filter(|b| b.global_execution) {
         v.write(o::DR7, 8, original_dr7);
         v.write(o::DR6, 8, original_dr6);

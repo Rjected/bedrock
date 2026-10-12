@@ -61,6 +61,7 @@
 #define VMXCTX_SVM_GUEST_XSAVEOPT 288
 #define VMXCTX_SVM_HOST_FPU_RESERVED 296
 #define VMXCTX_SVM_GUEST_FPU_RESIDENT 304
+#define VMXCTX_SVM_GUEST_FPU_DIRTY 312
 
 /* SVM entry: ctx, guest VMCB PA, host VMCB PA, breakpoints,
  * guest VMCB virtual pointer. The final argument exposes hardware writes to
@@ -283,7 +284,16 @@ SYM_FUNC_START(svm_run_guest)
 	test	%rax, %rax
 	jz	.Lsvm_skip_xsave_exit
 
-	/* Save guest FPU/SSE state to guest_xsave_ptr (XCR0 is still guest's value) */
+	/* A kernel FPU reservation keeps guest registers live across VM exits.
+	 * Defer XSAVE until the reservation rotates, the run ends, or XSETBV
+	 * changes the component mask. No host FPU user can touch them here. */
+	cmpq	$0, VMXCTX_SVM_HOST_FPU_RESERVED(%rdi)
+	je	.Lsvm_guest_xsave_now
+	movq	$1, VMXCTX_SVM_GUEST_FPU_DIRTY(%rdi)
+	movq	$1, VMXCTX_SVM_GUEST_FPU_RESIDENT(%rdi)
+	jmp	.Lsvm_guest_xsave_done
+.Lsvm_guest_xsave_now:
+	/* Save guest FPU/SSE state to guest_xsave_ptr (guest XCR0 is active). */
 	mov	%rax, %rdx
 	shr	$32, %rdx		/* EDX = high 32 bits of mask */
 	mov	VMXCTX_GUEST_XSAVE_PTR(%rdi), %rcx
@@ -297,13 +307,9 @@ SYM_FUNC_START(svm_run_guest)
 	jne	.Lsvm_guest_xsave_done
 	movq	$2, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
 .Lsvm_guest_xsave_done:
-	/* XSAVE updated the guest image. Its registers also remain live while
-	 * the kernel FPU reservation prevents host use of those registers. */
 	cmpq	$0, VMXCTX_SVM_HOST_FPU_RESERVED(%rdi)
-	je	.Lsvm_guest_not_resident
-	movq	$1, VMXCTX_SVM_GUEST_FPU_RESIDENT(%rdi)
-	jmp	.Lsvm_guest_resident_done
-.Lsvm_guest_not_resident:
+	jne	.Lsvm_guest_resident_done
+	movq	$0, VMXCTX_SVM_GUEST_FPU_DIRTY(%rdi)
 	movq	$0, VMXCTX_SVM_GUEST_FPU_RESIDENT(%rdi)
 .Lsvm_guest_resident_done:
 
@@ -399,3 +405,38 @@ SYM_FUNC_START(svm_run_guest)
  RET
 SYM_FUNC_END(svm_run_guest)
 STACK_FRAME_NON_STANDARD(svm_run_guest)
+
+/* Flush a resident guest image before host FPU ownership changes or XSETBV
+ * replaces the guest mask. Caller holds a kernel FPU reservation and has
+ * disabled local IRQs. The current host XCR0 is restored before returning. */
+SYM_FUNC_START(svm_flush_guest_fpu)
+	cmpq	$0, VMXCTX_SVM_GUEST_FPU_DIRTY(%rdi)
+	je	.Lsvm_flush_done
+	movq	VMXCTX_XCR0_MASK(%rdi), %rax
+	movq	%rax, %rdx
+	shrq	$32, %rdx
+	xorl	%ecx, %ecx
+	xsetbv
+	movq	VMXCTX_XCR0_MASK(%rdi), %rax
+	movq	%rax, %rdx
+	shrq	$32, %rdx
+	movq	VMXCTX_GUEST_XSAVE_PTR(%rdi), %rcx
+	cmpq	$2, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
+	jne	.Lsvm_flush_full
+	xsaveopt64 (%rcx)
+	jmp	.Lsvm_flush_saved
+.Lsvm_flush_full:
+	xsave64	(%rcx)
+	cmpq	$1, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
+	jne	.Lsvm_flush_saved
+	movq	$2, VMXCTX_SVM_GUEST_XSAVEOPT(%rdi)
+.Lsvm_flush_saved:
+	movq	VMXCTX_HOST_XCR0(%rdi), %rax
+	movq	%rax, %rdx
+	shrq	$32, %rdx
+	xorl	%ecx, %ecx
+	xsetbv
+	movq	$0, VMXCTX_SVM_GUEST_FPU_DIRTY(%rdi)
+.Lsvm_flush_done:
+	RET
+SYM_FUNC_END(svm_flush_guest_fpu)

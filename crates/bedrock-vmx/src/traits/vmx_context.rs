@@ -70,13 +70,17 @@ pub struct VmxContext {
     // group, allowing assembly to omit its per-entry host XSAVE/XRSTOR.
     pub svm_host_fpu_reserved: u64,
 
-    // Guest registers remain resident until the reservation rotates. Guest
-    // XSAVE still updates the memory image after every VM exit.
+    // Guest registers remain resident until the reservation rotates.
     pub svm_guest_fpu_resident: u64,
+
+    // The guest XSAVE image needs flushing before a reservation ends, a fork,
+    // or an XSETBV changes the component mask (offset 312).
+    pub svm_guest_fpu_dirty: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_guest_fpu_resident) == 304);
+const _: () = assert!(core::mem::offset_of!(VmxContext, svm_guest_fpu_dirty) == 312);
 
 impl Default for VmxContext {
     fn default() -> Self {
@@ -127,6 +131,7 @@ impl VmxContext {
             svm_guest_xsaveopt: 0,
             svm_host_fpu_reserved: 0,
             svm_guest_fpu_resident: 0,
+            svm_guest_fpu_dirty: 0,
         }
     }
 }

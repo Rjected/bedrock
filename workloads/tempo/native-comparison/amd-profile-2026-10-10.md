@@ -3339,3 +3339,28 @@ alone cannot close the roughly twofold gap to the historical Intel interval;
 the fault and repeated VM entry/exit volume remain the main target. Full
 logs, marker snapshots, and `perf.data` files are under ignored
 `target/boxctl-evidence/amd-ibs-1012/`.
+
+### Defer guest XSAVE while the FPU reservation is held
+
+The SVM runner previously issued `XSAVEOPT` after every VM exit, even though
+the kernel FPU reservation kept the guest registers resident for up to 64
+entries. The new path marks the memory image dirty during that reservation
+and flushes it before the reservation rotates or ends. It also flushes before
+an intercepted XSETBV changes the component mask. A dedicated in-box test
+checks XMM contents after more than 64 intercepted instructions, then forks
+at a userspace RNG exit and checks both the child and parent after resuming.
+All 262 VMX library tests, the in-box SVM suite, and two complete Tempo runs
+passed on the same EPYC 4245P HWE box.
+
+| Same-box order | Fair transfer interval | VM exits | Nested-page faults | Runner plus guest cycles/exit |
+| --- | ---: | ---: | ---: | ---: |
+| Deferred XSAVE | 51.758 s | 25,926,638 | 19,226,293 | 4,700 |
+| Unchanged control | 51.857 s | 25,769,978 | 19,071,485 | 4,773 |
+| Deferred XSAVE repeat | 51.646 s | 25,915,841 | 19,195,199 | 4,696 |
+
+The two candidate runs saved about **75 normalized runner cycles per exit**
+against the adjacent control. Their wall times averaged only 0.155 s lower;
+fault-count variation prevents claiming an end-to-end gain of that exact
+size. The change is retained because it removes repeated FPU saves while
+preserving snapshot and fork state. Marker snapshots and full logs are under
+ignored `target/boxctl-evidence/amd-fpudefer-1012/`.
