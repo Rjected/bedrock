@@ -3078,3 +3078,39 @@ The filter increased faults by about 944 thousand, so preserving
 cross-half predictions is valuable for this workload. The candidate remains
 unmerged in `/tmp/bedrock-amd-samehalf-1012`; snapshots are under ignored
 `target/boxctl-evidence/amd-samehalf-1012/`.
+
+### Attribute VM-entry preparation with direct phase timers
+
+On the same EPYC 4245P box, Linux `perf` hardware-cycle sampling during a
+full transfer recorded only 16 samples, almost all during VM teardown.
+Software `cpu-clock:k` sampling recorded 15,600 samples, but 89.5% landed
+at `bedrock_local_irq_enable`, where deferred timer interrupts resume after
+guest execution. Neither sampled profile can reliably attribute the
+interrupt-disabled VM-entry preparation work. Reports are under ignored
+`target/boxctl-evidence/amd-phaseprobe-1012/`.
+
+An isolated run-loop probe instead measured TSC deltas around translation-tree
+refresh, instruction-exit preparation, global page planning, NPT protection,
+and remaining pre-entry work. It passed all 262 VMX tests, the in-box SVM
+suite, and the full Tempo workload. The fair transfer interval was **59.486
+s**, with **21,417,396 nested-page faults** and **66.73 billion** total
+VM-entry preparation cycles. Kernel-log snapshots spanning 58.82 seconds near
+the transfer markers measured approximately:
+
+| Phase | TSC cycles |
+| --- | ---: |
+| Global page planning and scalar/replay decisions | **38.11 billion** |
+| Instruction-exit preparation | 12.72 billion |
+| Translation-tree refresh and host-write checks | 6.93 billion |
+| NPT protection, temporary execution permission, translation retention | 6.51 billion |
+| Other pre-entry work | 0.91 billion |
+
+The phase timers and atomic counters perturb timing, and the kernel-log
+snapshots do not align exactly with fair markers. Their roughly 65.2-billion
+cycle sum is nevertheless close to the independent 66.7-billion preparation
+counter. The planner is the largest directly measured preparation component.
+Probe source remains unmerged in `/tmp/bedrock-amd-phaseprobe-1012`; marker
+snapshots and phase logs are under ignored
+`target/boxctl-evidence/amd-phaseprobe-1012/`. The next diagnostic should
+split the planner into global-plan proof, scalar fallback, and window decode
+costs before changing admission policy again.
