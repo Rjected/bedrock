@@ -4277,3 +4277,52 @@ After both diagnostic runs, `contrib/run-boxctl-svm.sh test` restored the
 production branch's module on the disposable box. The complete in-box SVM
 suite passed, including exact deadlines, masked breakpoints, fork CoW,
 replay, and both native-loop comparisons.
+
+### Test predicted-page deduplication and classify widening outcomes
+
+The recent-page list is unique, but its predicted successor can also occur
+among those recent pages. An isolated candidate skipped the second screening
+of that virtual page after prediction had priority. It passed all 267 VMX
+library tests, the in-box SVM suite, and three full Tempo runs (one on the
+preceding box). Its two same-box comparisons on a fresh EPYC 4245P HWE box
+used the identical pinned guest artifacts and CLI:
+
+| Order | Variant | Fair interval | VM exits | NPT faults | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Unchanged | **40.265 s** | 19,800,506 | 16,468,312 | 2,398 |
+| 2 | Deduplicate | 41.067 s | 20,448,527 | 16,972,008 | 2,321 |
+| 3 | Unchanged | **40.729 s** | 20,256,026 | 16,852,962 | 2,340 |
+| 4 | Deduplicate | 41.798 s | 20,537,820 | 17,038,923 | 2,407 |
+
+The candidate was slower in both pairs, and the normalized preparation
+advantage in the first pair did not repeat. It was discarded. Source remains
+isolated in `/tmp/bedrock-amd-dedup-1012`; fair-marker JSON is under ignored
+`target/boxctl-evidence/amd-pred-dedup-1012/`.
+
+A second isolated diagnostic classified each optional-page candidate at one
+in 256 `prepare_global_into` calls. It passed the 267 VMX tests, the in-box
+SVM suite, and all 10,000 Tempo transfers. The diagnostic interval was
+**42.613 s** with instrumentation overhead. Marker-bounded kernel counters
+span 20 million planner calls, about 78,125 sampled calls:
+
+| Outcome | Count | Per sampled call |
+| --- | ---: | ---: |
+| Additional hazardous page admitted | 98,848 | 1.265 |
+| Raw hazards exceed four slots | 39,218 | 0.502 |
+| Empty or current recent-page entry | 50,566 | 0.647 |
+| Previously trusted page | 20,509 | 0.263 |
+| Already selected page | 7,797 | 0.100 |
+| Missing alias proof | 86 | 0.001 |
+| Predicted page repeated among recent pages (overlaps outcomes above) | 15,318 | 0.196 |
+
+The loop also stops early when the plan fills its slots or page capacity;
+the outcomes therefore do not sum to all candidate iterations. No sampled
+candidate failed the page-boundary check. Widening is frequently productive,
+so simply truncating the loop would sacrifice page coverage. The four-slot
+limit and cost of screening admitted pages matter more than duplicate
+prediction. Diagnostic source is isolated in
+`/tmp/bedrock-amd-phasecurrent-1012`; marker snapshots and kernel logs are
+under ignored `target/boxctl-evidence/amd-plan-outcomes-1012/`.
+
+The unchanged production module was restored on the box afterward and the
+full in-box SVM suite passed.
