@@ -253,6 +253,9 @@ impl InstructionBatch {
     /// state. They are distinct from an exact hardware single-step.
     pub(crate) const PAGE_EXECUTION_BOUNDARY: u64 = 1 << 62;
     pub(crate) const PAGE_SCALAR_REPLAY: u64 = 1 << 61;
+    /// The replay came specifically from an AMD page breakpoint, rather
+    /// than from a write fault or an intercepted instruction.
+    pub(crate) const PAGE_BREAKPOINT_REPLAY: u64 = 1 << 60;
 
     // AMD PMC overflow interrupts are asynchronous. Leave room for their
     // delivery before an exact deadline, then fail closed if one arrives late.

@@ -1902,6 +1902,18 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
     Some(hazards)
 }
 
+/// A masked hardware breakpoint can cover ordinary instructions as well as
+/// the unsafe entries it protects. Only a guarded exact-byte proof permits
+/// resuming one ordinary instruction with RF instead of scalar replay.
+pub(crate) fn proven_nonhazard<C: VmContext>(ctx: &mut C, physical: u64) -> bool {
+    let page = physical & !4095;
+    let offset = (physical & 4095) as u16;
+    cached_page_hazards(ctx, page).is_some_and(|hazards| {
+        hazards.boundary_guarded
+            && !hazards.offsets[..hazards.count].contains(&offset)
+    })
+}
+
 fn hazardous_entry(bytes: &[u8]) -> bool {
     let mut repeat = false;
     for index in 0..15 {
@@ -3692,7 +3704,7 @@ pub(crate) fn remember_page<C: VmContext>(ctx: &mut C, linear: u64) {
     recent[0] = page;
 }
 
-fn instruction_budget<C: VmContext>(ctx: &C) -> u64 {
+pub(crate) fn instruction_budget<C: VmContext>(ctx: &C) -> u64 {
     let state = ctx.state();
     let current = state.last_instruction_count + state.tsc_offset;
     let mut budget = u64::MAX;

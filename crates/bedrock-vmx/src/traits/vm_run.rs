@@ -295,6 +295,11 @@ where
     }
 
     let mut force_single_step = false;
+    // A masked #DB may stop at a proven ordinary instruction. RF skips that
+    // one instruction breakpoint on the next guest entry. Keep this state
+    // local so synthetic RF can never survive a return to userspace.
+    let mut masked_retry_rip = None;
+    let mut masked_retry_plan: Option<(super::InstructionBatch, u64, u64)> = None;
     if Ctx::V::uses_nested_paging() && !ctx.state().svm_host_memory_stable {
         // Userspace may have changed RAM between RUN calls.
         ctx.state_mut().svm_guard.valid = false;
@@ -436,11 +441,38 @@ where
             force_single_step = true;
         }
         let mut batch = None;
+        // A false address-mask hit retires no instruction at its RIP. The
+        // guarded code and translation proofs remain valid, so reusing their
+        // four-breakpoint plan avoids another alias walk before RF retry.
+        if let (Some(rip), Some((mut previous, code_epoch, mapping_generation)), Some(window)) =
+            (masked_retry_rip, masked_retry_plan, instruction_window.as_ref())
+        {
+            let budget = super::super::exits::instruction_budget(ctx);
+            if !software_exit && !force_single_step
+                && budget > super::super::traits::InstructionBatch::COUNTER_DEADLINE_MARGIN
+                && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(rip)
+                && ctx.state().svm_guard.valid
+                && ctx.state().svm_guard.gate_ready && !ctx.state().svm_guard.gate_dirty
+                && ctx.state().svm_guard.code_epoch == code_epoch
+                && ctx.state().ept.mapping_generation() == mapping_generation
+                && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()
+                    .is_some_and(|root| root & 0x000f_ffff_ffff_f000
+                        == ctx.state().svm_guard.gate_root)
+                && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags).ok()
+                    .is_some_and(|flags| flags & ((1 << 8) | (1 << 16)) == 0)
+                && !ctx.state().mtf_enabled && !ctx.state().svm_gate_pending_write
+                && previous.pages[..previous.code_page_count]
+                    .contains(&(window.physical.as_u64() & !4095))
+            {
+                previous.instruction_budget = budget;
+                batch = Some(previous);
+            }
+        }
         if Ctx::V::uses_nested_paging() && !software_exit && !force_single_step {
             let trusted_scalar = scalar_page.is_some_and(|page| {
                 ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
             });
-            if !trusted_scalar {
+            if !trusted_scalar && batch.is_none() {
                 if let Some(window) = instruction_window.as_mut() {
                     if super::super::exits::prepare_global_into(
                         ctx,
@@ -463,6 +495,23 @@ where
             }
         }
         force_single_step = false;
+        let mut arm_masked_retry = masked_retry_rip.is_some_and(|rip| {
+            batch.as_ref().is_some_and(|batch| batch.global_execution)
+                && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(rip)
+                && ctx.state().vmcs.read16(VmcsField16::GuestCsSelector)
+                    .ok().is_some_and(|cs| cs & 3 == 3)
+                && ctx.state().vmcs.read32(VmcsField32::VmEntryInterruptionInfo)
+                    .ok().is_some_and(|info| info & (1 << 31) == 0)
+                && instruction_window.as_ref().is_some_and(|window| {
+                    batch.as_ref().is_some_and(|batch| batch.pages[..batch.code_page_count]
+                        .contains(&(window.physical.as_u64() & !4095)))
+                        && super::super::exits::proven_nonhazard(ctx, window.physical.as_u64())
+                })
+        });
+        if !arm_masked_retry {
+            masked_retry_rip = None;
+            masked_retry_plan = None;
+        }
         let scalar_execute = if !software_exit {
             scalar_page
                 .map(|page| {
@@ -495,6 +544,13 @@ where
         });
         if batch.is_some() && guard.is_none() {
             batch = None;
+        }
+        // Protection can reject the batch after the retry decision was made.
+        // In that case the synthetic flag must not reach a scalar entry.
+        if batch.as_ref().is_none_or(|batch| !batch.global_execution) {
+            arm_masked_retry = false;
+            masked_retry_rip = None;
+            masked_retry_plan = None;
         }
         let mut paired_execute: [Option<NptExecuteGuard>; 3] = [None, None, None];
         if let Some(batch) = batch.as_ref().filter(|batch| batch.global_execution) {
@@ -534,6 +590,14 @@ where
         ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
             pre_guest_tsc.saturating_sub(pre_entry_tsc);
         let state = ctx.state_mut();
+        if arm_masked_retry {
+            state.vmcs.write_natural(
+                VmcsFieldNatural::GuestRflags,
+                state.vmcs.read_natural(VmcsFieldNatural::GuestRflags)
+                    .map_err(|_| VmRunError::ExitHandler(
+                        super::super::exits::ExitError::Fatal("SVM RF entry flags unavailable")))? | (1 << 16),
+            ).map_err(VmRunError::WriteHostRsp)?;
+        }
         // SAFETY: Caller guarantees VMCS is properly configured and loaded,
         // interrupts are disabled, and preemption cannot migrate us.
         let run_result = if software_exit {
@@ -543,6 +607,17 @@ where
         };
         let post_guest_tsc = rdtsc();
         ctx.state_mut().exit_stats.guest_cycles += post_guest_tsc.saturating_sub(pre_guest_tsc);
+        if arm_masked_retry {
+            let flags = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags)
+                .map_err(|_| VmRunError::ExitHandler(
+                    super::super::exits::ExitError::Fatal("SVM RF exit flags unavailable")))?;
+            ctx.state().vmcs.write_natural(VmcsFieldNatural::GuestRflags, flags & !(1 << 16))
+                .map_err(VmRunError::WriteHostRsp)?;
+            if runner.completed_instructions().is_some_and(|count| count != 0) {
+                masked_retry_rip = None;
+                masked_retry_plan = None;
+            }
+        }
         if replay_single_step
             && run_result.is_ok()
             && runner.completed_instructions() == Some(1)
@@ -573,14 +648,45 @@ where
                 .ok().is_some_and(|qual| qual & super::super::traits::InstructionBatch::PAGE_SCALAR_REPLAY != 0)
         {
             let window = super::super::exits::InstructionWindow::read_cached(ctx).ok();
-            ctx.state_mut().svm_gate_scalar_page = window.as_ref()
-                .map(|window| window.physical.as_u64() & !4095);
-            // A recognized REP can use its validated, deadline-bounded batch
-            // after the hazard breakpoint. Other intercepted instructions
-            // still replay once without preparing another global gate.
-            force_single_step = !window.as_ref().is_some_and(|window| {
-                super::super::exits::bounded_repeat_entry(&window.bytes)
+            let breakpoint_replay = ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
+                .ok().is_some_and(|qual| qual
+                    & super::super::traits::InstructionBatch::PAGE_BREAKPOINT_REPLAY != 0);
+            let harmless = breakpoint_replay
+                && ctx.state().vmcs.read16(VmcsField16::GuestCsSelector)
+                    .ok().is_some_and(|cs| cs & 3 == 3)
+                && window.as_ref().is_some_and(|window| {
+                batch.as_ref().is_some_and(|batch| batch.pages[..batch.code_page_count]
+                    .contains(&(window.physical.as_u64() & !4095)))
+                    && super::super::exits::proven_nonhazard(ctx, window.physical.as_u64())
             });
+            if harmless {
+                let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip)
+                    .map_err(|_| VmRunError::ExitHandler(
+                        super::super::exits::ExitError::Fatal("SVM masked breakpoint RIP unavailable")))?;
+                let qual = ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
+                    .map_err(|_| VmRunError::ExitHandler(
+                        super::super::exits::ExitError::Fatal("SVM masked breakpoint qualification unavailable")))?;
+                ctx.state().vmcs.write_natural(VmcsFieldNatural::ExitQualification,
+                    qual & !super::super::traits::InstructionBatch::PAGE_SCALAR_REPLAY)
+                    .map_err(VmRunError::WriteHostRsp)?;
+                masked_retry_rip = Some(rip);
+                masked_retry_plan = batch.map(|batch| (
+                    batch,
+                    ctx.state().svm_guard.code_epoch,
+                    ctx.state().ept.mapping_generation(),
+                ));
+                ctx.state_mut().svm_gate_scalar_page = window.as_ref()
+                    .map(|window| window.physical.as_u64() & !4095);
+            } else {
+                ctx.state_mut().svm_gate_scalar_page = window.as_ref()
+                    .map(|window| window.physical.as_u64() & !4095);
+                // A recognized REP can use its validated, deadline-bounded batch
+                // after the hazard breakpoint. Other intercepted instructions
+                // still replay once without preparing another global gate.
+                force_single_step = !window.as_ref().is_some_and(|window| {
+                    super::super::exits::bounded_repeat_entry(&window.bytes)
+                });
+            }
         }
         if let Some(guard) = guard {
             if guard.restore(ctx, allocator) && run_result.is_ok() {
@@ -591,6 +697,8 @@ where
                     .write32(VmcsField32::VmExitReason, 37)
                     .map_err(VmRunError::WriteHostRsp)?;
                 force_single_step = true;
+                masked_retry_rip = None;
+                masked_retry_plan = None;
             }
         }
         for execute in paired_execute.into_iter().flatten() {
@@ -605,7 +713,7 @@ where
                 .ok().is_some_and(|qual| qual
                     & super::super::traits::InstructionBatch::PAGE_SCALAR_REPLAY != 0);
             if (batch.as_ref().is_some_and(|batch| batch.global_execution)
-                && !replay && !force_single_step)
+                && !replay && !force_single_step && masked_retry_rip.is_none())
                 || (batch.as_ref().is_none_or(|batch| !batch.page_execution)
                     && runner.completed_instructions().is_some_and(|count| count != 0)
                     && ctx.state().svm_gate_scalar_page.is_some_and(|page| {

@@ -126,8 +126,14 @@ breakpoint slots. Alias enumeration uses a preallocated workspace of 512
 virtual table paths and falls back if that capacity is exceeded. When alias
 breakpoints do not fit, a reachable-region proof can instead stop at unknown
 instructions and indirect transfers before they can reach an unguarded alias.
-SYSRET uses the scalar path because it can restore guest
-TF from R11. Ambiguous encodings across page boundaries use the fallback.
+On user-mode code, a masked breakpoint can also stop at an ordinary instruction
+within its range. An exact guarded page proof distinguishes these false hits;
+Bedrock resumes that one instruction with RF and removes the synthetic flag
+before handling the next exit. Kernel-mode false hits keep scalar replay.
+SYSRET can stay in the counted global path: when it restores TF from R11,
+AMD raises #DB before the target instruction and Bedrock preserves that guest
+trap. Scalar SYSRET replay also synthesizes the architectural trap. Ambiguous
+encodings across page boundaries use the fallback.
 A temporary NPT guard makes the selected code pages read-only and blocks
 instruction fetch from every other page. It also protects all reachable guest
 page tables, preventing translation changes during the run. The code and guest
@@ -787,6 +793,15 @@ decoded-branch acceleration assertion: one case needs 40,131 exits with the glob
 branch result matched the stepped reference, but this host's acceleration
 failure remains unresolved. The same suite passes on the EPYC 4245P box.
 This backend requires SVM and nested paging.
+
+On an EPYC 4245P box, the 10,000-transfer Tempo DST interval took 45.42 seconds
+on the unchanged branch. A user-mode RF retry for false masked-breakpoint hits,
+with reuse of the guarded page plan, took 44.71 and 44.35 seconds in two runs;
+all transfers succeeded. The in-box user-mode breakpoint case fell from 44
+to 18 exits and its fork replay matched virtual time and final registers.
+Kernel-mode false hits retain scalar replay: applying the RF retry there
+stalled an early Linux boot in its idle path. The measured DST gain is modest,
+and the larger gap to the recorded Intel workload remains.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).

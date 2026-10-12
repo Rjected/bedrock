@@ -205,6 +205,11 @@ fn test_rep_pmu_deadline() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn test_masked_breakpoints() -> Result<(), Box<dyn std::error::Error>> {
+    test_masked_breakpoints_mode(false)?;
+    test_masked_breakpoints_mode(true)
+}
+
+fn test_masked_breakpoints_mode(user: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = Vm::create(2 * 1024 * 1024)?;
     vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
     let memory = vm.memory_mut()?;
@@ -217,29 +222,51 @@ fn test_masked_breakpoints() -> Result<(), Box<dyn std::error::Error>> {
     }
     memory[0x1150..0x1155].copy_from_slice(&[0x31, 0xc0, 0x0f, 0x01, 0xd9]);
     let mut regs = Regs::long_mode();
+    if user {
+        regs.segment_regs.cs = SegmentRegister::new(0x1b, 0xa0fb, u32::MAX, 0);
+        regs.segment_regs.ss = SegmentRegister::new(0x23, 0xc0f3, u32::MAX, 0);
+    }
     regs.control_regs.cr3 = Cr3::new(0x3000);
     regs.rip = 0x1000;
     regs.gprs.rsp = 0x9000;
     vm.set_regs(&regs)?;
-    let mut random_exits = 0;
-    loop {
-        let exit = vm.run()?;
-        match exit.exit_reason {
-            256 => continue,
-            57 => {
-                random_exits += 1;
-                vm.set_rdrand_value(0x1234)?;
+    let run_case = |vm: &Vm| -> Result<_, Box<dyn std::error::Error>> {
+        let mut random_exits = 0;
+        loop {
+            let exit = vm.run()?;
+            match exit.exit_reason {
+                256 => continue,
+                57 => {
+                    random_exits += 1;
+                    vm.set_rdrand_value(0x1234)?;
+                }
+                258 => {
+                    assert_eq!(random_exits, 5);
+                    let exits = vm.get_exit_stats()?.total_exit_count();
+                    assert!(exits < 150, "masked page fell back to stepping: {exits} exits");
+                    let regs = vm.get_regs()?;
+                    assert_eq!(regs.rflags & (1 << 16), 0, "synthetic RF leaked");
+                    return Ok((exit.emulated_tsc, regs, exits));
+                }
+                reason => return Err(format!("Unexpected masked breakpoint exit: {reason}").into()),
             }
-            258 => {
-                assert_eq!(random_exits, 5);
-                let exits = vm.get_exit_stats()?.total_exit_count();
-                assert!(exits < 150, "masked page fell back to stepping: {exits} exits");
-                println!("SVM_MASKED_BREAKPOINTS_PASS exits={exits}");
-                return Ok(());
-            }
-            reason => return Err(format!("Unexpected masked breakpoint exit: {reason}").into()),
         }
+    };
+    let replay_result = if user {
+        let replay = vm.fork()?;
+        Some(run_case(&replay)?)
+    } else {
+        None
+    };
+    let (tsc, regs, exits) = run_case(&vm)?;
+    if let Some((replay_tsc, replay_regs, _)) = replay_result {
+        assert_eq!(tsc, replay_tsc);
+        assert_eq!(regs.rip, replay_regs.rip);
+        assert_eq!(regs.rflags, replay_regs.rflags);
+        assert_eq!(regs.gprs.rax, replay_regs.gprs.rax);
     }
+    println!("SVM_MASKED_BREAKPOINTS_PASS user={user} exits={exits}");
+    Ok(())
 }
 
 fn test_boundary_rdrand() -> Result<(), Box<dyn std::error::Error>> {

@@ -334,7 +334,8 @@ pub(crate) unsafe fn run(
             let mut e = exits::decode(0x41, 0, 0, v.read(o::RIP, 8), 0, true)
                 .map_err(|_| VmEntryError::VmEntryFailed)?;
             e.qualification = InstructionBatch::PAGE_EXECUTION_BOUNDARY
-                | if replay { InstructionBatch::PAGE_SCALAR_REPLAY } else { 0 };
+                | if replay { InstructionBatch::PAGE_SCALAR_REPLAY } else { 0 }
+                | if hazard_breakpoint { InstructionBatch::PAGE_BREAKPOINT_REPLAY } else { 0 };
             e
         } else {
             exits::decode(code, v.read(o::EXIT_INFO1, 8), v.read(o::EXIT_INFO2, 8),
