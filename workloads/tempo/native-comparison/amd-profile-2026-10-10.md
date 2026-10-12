@@ -3310,3 +3310,32 @@ not close the workload gap. This diagnostic completed in **53.322 s** with
 are under ignored `target/boxctl-evidence/amd-maskpack-phase-1012/`. Further
 work should attack the repeated fault/entry path or change which code pages
 need traps, rather than only caching breakpoint arithmetic.
+
+### Profile the complete transfer with AMD IBS
+
+On an EPYC 4245P HWE box, `perf record -e ibs_op// -c 1000000 -C 1 -a`
+collected 224,957 samples during boot, then Bedrock rejected an SVM PMU
+deadline (`count=10 budget=16`); the host also reported unexpected NMIs.
+That run is not a valid workload result. Reducing the IBS sample rate to
+`-c 100000000` allowed the exact 10,000-transfer workload to pass, with
+fair markers **54.294 s** apart and no additional PMU budget failure. It
+collected 10,167 samples with none lost, about 2,736 in the approximate
+transfer time slice. The transfer sample had 30.6% in `svm_run_guest`, 9.5%
+in `handle_run`, 3.6% in `collect_page_breakpoints`, 2.6% in
+`prepare_global_into`, and 2.5% in `page_hazards_memo`. IBS attribution at
+`VMRUN` may include guest residency, so its 32.6% share within
+`svm_run_guest` must not be interpreted as VM transition overhead.
+
+A second complete run used the software `cpu-clock` event at 99 Hz and
+finished in **52.359 s**, with 10,000 transfers admitted and included.
+Its call-chain samples collapsed onto `bedrock_local_irq_enable`, where
+deferred timer interrupts were delivered, so that sampler did not locate
+the code consuming the interval. Bedrock's marker snapshots provide the
+usable cycle breakdown for this run: **26,168,249 exits**, including
+**19,419,225 nested-page faults**; **61.5%** of measured cycles in the VM
+runner plus guest, **29.7%** in VM-entry preparation, **5.6%** in exit
+bookkeeping, and **1.6%** in exit handlers. Reducing planner arithmetic
+alone cannot close the roughly twofold gap to the historical Intel interval;
+the fault and repeated VM entry/exit volume remain the main target. Full
+logs, marker snapshots, and `perf.data` files are under ignored
+`target/boxctl-evidence/amd-ibs-1012/`.
