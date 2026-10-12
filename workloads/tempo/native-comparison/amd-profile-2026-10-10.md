@@ -2670,3 +2670,28 @@ The candidate also had slightly fewer exits, so the exact wall-clock benefit
 remains noisy; the normalized preparation reduction supports the local change.
 Marker snapshots are under ignored
 `target/boxctl-evidence/amd-singletonproof-1012/`.
+
+### Check whether masked ranges can admit more code pages
+
+An isolated candidate removed the planner's raw-hazard-count admission limit
+while retaining the four actual breakpoint slots, boundary checks, and cached
+alias proofs. All 262 VMX tests, the in-box SVM suite, and the 10,000-transfer
+Tempo workload passed. Its fair interval was **57.511 s**, but it had only
+**28.24 million** exits, fewer than nearby runs; preparation rose to **2,374
+cycles/exit**, compared with **2,278–2,334** for recent control and proof-fast-
+path runs. A focused unit case with five REP hazards showed why: the existing
+masking algorithm reduces five raw entries to exactly four hardware slots,
+leaving no slot for the next page. The isolated raw-count change was not
+merged.
+
+A second isolated variant tried to merge already-proved masked ranges again
+when adding a successor page. Its focused unit case admitted the five-hazard
+page together with another hazardous page, and all 263 VMX tests and the
+in-box SVM suite passed. In the full Tempo boot, however, it reached only
+about **4.45 seconds of guest time after 4.5 host minutes** and had not
+reached the first transfer marker. The broader masks can trap harmless
+instruction entries, making this policy far too expensive. The run was
+stopped, and the pushed module was reloaded and passed the complete box
+suite. This variant also remains isolated in
+`/tmp/bedrock-amd-maskedcapacity-1012`; its log and the raw-count marker
+snapshots are under ignored `target/boxctl-evidence/amd-maskedcapacity-1012/`.
