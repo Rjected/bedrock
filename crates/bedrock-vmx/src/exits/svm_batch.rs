@@ -2695,19 +2695,26 @@ fn collect_page_breakpoints<C: VmContext>(
             && proof.key_hash == key_hash
             && proof.root == root
             && proof.page_count == hazard_pages
-            && hazards[..batch.code_page_count]
-                .iter()
-                .enumerate()
-                .all(|(i, h)| {
-                    h.count == 0
-                        || proof.pages[..proof.page_count]
-                            .iter()
-                            .position(|&page| page == batch.pages[i])
-                            .is_some_and(|slot| {
-                                proof.counts[slot] == h.count
-                                    && proof.offsets[slot][..h.count] == h.offsets[..h.count]
-                            })
-                })
+            && if batch.code_page_count == 1 && hazard_pages == 1 {
+                let hazard = &hazards[0];
+                proof.pages[0] == batch.pages[0]
+                    && proof.counts[0] == hazard.count
+                    && proof.offsets[0][..hazard.count] == hazard.offsets[..hazard.count]
+            } else {
+                hazards[..batch.code_page_count]
+                    .iter()
+                    .enumerate()
+                    .all(|(i, h)| {
+                        h.count == 0
+                            || proof.pages[..proof.page_count]
+                                .iter()
+                                .position(|&page| page == batch.pages[i])
+                                .is_some_and(|slot| {
+                                    proof.counts[slot] == h.count
+                                        && proof.offsets[slot][..h.count] == h.offsets[..h.count]
+                                })
+                    })
+            }
     };
     let cache = &ctx.state().svm_guard;
     let last = cache.alias_last_hit;
