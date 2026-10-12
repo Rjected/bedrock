@@ -3632,3 +3632,33 @@ they remain unmerged. Their source is isolated in
 `/tmp/bedrock-amd-majority-1012`, `/tmp/bedrock-amd-sticky-predict-1012`,
 and `/tmp/bedrock-amd-sticky-second-1012`; full logs and stats are under
 ignored `target/boxctl-evidence/amd-aliasprofile-1012/`.
+
+### Test an NPT leaf cache on the entry path
+
+An isolated direct-mapped cache stored the NPT leaf table and index by guest
+physical page and mapping generation. The first 64-entry inline version passed
+the EPT and VMX library tests, but the disposable box stopped answering SSH
+during `svm_smoke` after the module was loaded. No host panic log could be
+recovered before that box expired, so the cause is unproven. That variant was
+not retained. An eight-entry version reduced the inline footprint by about
+1.75 KiB and passed the library tests and full in-box SVM suite on a fresh
+EPYC 4245P HWE box. Kernel-module builds, loads, and tests stayed in boxes.
+
+The eight-entry version cached leaves used for permission changes. Its two
+10,000-transfer intervals were **50.599 s** and **50.559 s**, versus same-box
+unchanged controls of **51.120 s** and **48.731 s** in alternating order. All
+runs completed 10,000 successful and zero failed transfers. The unchanged
+runs varied by 2.39 s and roughly 1.0 million NPT faults, so the apparent
+first-pair gain is not evidence of an improvement. VM-entry preparation was
+about 2,767–2,833 cycles per exit across these runs, without a stable
+cache-specific reduction.
+
+A separate eight-entry variant also cached the read-only NPT leaf lookup used
+by the global planner. It passed the library tests and in-box suite, then ran
+the full workload in **50.478 s**, with 10,000 successful transfers and about
+2,798 preparation cycles per exit. This remains within the observed run
+variation. Both variants were discarded, and the unchanged module was
+restored and passed the in-box suite. Sources remain isolated in
+`/tmp/bedrock-amd-nptleafcache-1012` and
+`/tmp/bedrock-amd-nptleafcache-hot-1012`; logs and marker snapshots are under
+ignored `target/boxctl-evidence/amd-nptleaf-1012/`.
