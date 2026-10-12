@@ -4158,3 +4158,38 @@ this is a modest workload-specific result rather than a precise CPUID speedup
 or a route to the Intel 24.087 s interval. The mask is retained on AMD;
 marker snapshots are under ignored `target/boxctl-evidence/amd-erms-1012/`.
 The 267 local VMX tests and the in-box SVM suite passed with the mask.
+
+### Reject two small follow-up candidates
+
+Hiding RDRAND (leaf 1 ECX bit 30) in addition to ERMS passed the 267 local
+tests, the boxctl SVM suite, and all 10,000 transfers. Its fair interval was
+**40.974 s**, with **16,961,832** NPT faults and **1,198,906** synthetic trap
+exits. The earlier ERMS-only run had just **four** RDRAND exits during its
+transfer; the hidden-RDRAND run had zero. That feature mask cannot account for
+the remaining performance gap, so it was discarded.
+
+Another isolated candidate let the global page planner use actual occupied
+breakpoint slots, rather than the raw number of hazardous offsets, when
+deciding whether to try another page. This is safe only when the additional
+page's independent cached alias proof fits the remaining slots. It passed
+the same library and boxctl suites and all 10,000 transfers, but the adjacent
+same-box comparison favored the unchanged planner:
+
+| Variant | Fair interval | VM exits | NPT faults | Preparation cycles/exit |
+| --- | ---: | ---: | ---: | ---: |
+| Slot-based admission | 40.710 s | 20,197,099 | 16,807,889 | 2,387 |
+| Unchanged planner | **39.867 s** | 19,886,493 | 16,545,298 | **2,344** |
+
+Allowing the extra screening raised preparation cost without reducing page
+faults in this run. The candidate was discarded. Its source patch is kept at
+`/tmp/bedrock-amd-slotfit-1012.patch`; marker snapshots are under ignored
+`target/boxctl-evidence/amd-slotfit-1012/`. The production branch remains
+the ERMS-only CPUID change.
+
+The unchanged run's marker counters attribute **94.02 billion** host TSC
+ticks to the VM runner plus guest, **46.62 billion** to entry preparation,
+**8.54 billion** to exit bookkeeping, and **0.97 billion** to the host IRQ
+window during its 39.867 s fair interval. At about 19.9 million exits,
+the next high-value work is a sound way to avoid repeated guarded-page
+crossings or to reduce the per-exit entry path. The RDRAND and relaxed
+slot-admission experiments do neither on this workload.
