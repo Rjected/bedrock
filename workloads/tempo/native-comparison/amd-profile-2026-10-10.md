@@ -3414,3 +3414,24 @@ the roughly twofold gap to Intel. The repeated NPT fault/entry path remains
 the higher-value target. Diagnostic source is isolated in
 `/tmp/bedrock-amd-mtf-profile-1012`; marker snapshots and kernel log are
 under ignored `target/boxctl-evidence/amd-mtf-sample-1012/`.
+
+### Check repeated secondary PMC clearing
+
+An isolated candidate stopped clearing the ten secondary programmable-counter
+fields in the VMCB on every counted entry. The VMCB starts with zeroes,
+guest writes to these MSRs are intercepted, and SVM saves their guest values
+on exit. All 23 SVM and 262 VMX library tests, the in-box SVM suite, and two
+complete 10,000-transfer runs passed. On the same 4245P HWE box, the adjacent
+unchanged control was:
+
+| Run order | Variant | Fair interval | VM exits | NPT faults | Runner plus guest cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Skip redundant clears | 53.317 s | 26,545,707 | 19,698,494 | 4,736 |
+| 2 | Unchanged control | 51.306 s | 25,774,714 | 19,105,418 | 4,741 |
+| 3 | Skip redundant clears | 52.232 s | 26,142,953 | 19,394,007 | 4,736 |
+
+The candidate's apparent five-cycle runner improvement is negligible, and
+both candidate runs had more exits and longer wall intervals. The change
+remains isolated in `/tmp/bedrock-amd-pmu-zero-1012` and is not retained.
+Marker snapshots and full logs are under ignored
+`target/boxctl-evidence/amd-pmuzero-1012/`.
