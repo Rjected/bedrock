@@ -2556,3 +2556,24 @@ under the existing AMD PMU path: the counter accounts for the whole REP as
 one retired instruction in this experiment, so it cannot stop a long REP
 at the requested iteration. The unsafe source remains isolated in
 `/tmp/bedrock-amd-rep-pmu-probe-1011`; it was not merged.
+
+### Sample the reachable-code alternative
+
+An isolated diagnostic called the existing bounded single-page reachable-code
+proof for one in every 2,048 hazardous global-plan entries. It restored the
+batch breakpoint fields and proof-cache slot afterward, leaving the selected
+execution plan unchanged. All 262 VMX tests, the in-box SVM suite, and the
+complete 10,000-transfer workload passed. The fair interval was **59.229 s**
+with **21.60 million** nested-page faults.
+
+Subtracting the nearest diagnostic log snapshots around the fair markers
+gave **11,264** sampled plans: **101 (0.9%)** needed no breakpoints, **5,475
+(48.6%)** needed one, **1,573 (14.0%)** needed two, **819 (7.3%)** needed
+three, **742 (6.6%)** needed four, and **2,554 (22.7%)** could not be proved
+within the bounded analysis. The snapshots cover slightly less than the
+marker interval, and this diagnostic evaluates a single page from its current
+entry rather than a multi-page graph. Still, the tiny zero-breakpoint share
+does not support a general strategy of making hazardous pages free to execute
+by replacing the whole-page scan with this proof. The diagnostic remains
+isolated in `/tmp/bedrock-amd-reachdiag-1011`; logs and markers are under
+ignored `target/boxctl-evidence/amd-reachdiag-1012/`.
