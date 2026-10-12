@@ -3850,3 +3850,65 @@ exit counts; there is no measured preparation saving. The candidate stays
 isolated in `/tmp/bedrock-amd-pmu-lean-1012`; logs and fair-marker snapshots
 are under ignored `target/boxctl-evidence/amd-globalcompact-1012/`. The
 unchanged module is restored in the box and passed its SVM suite.
+
+### Cache only a global plan's relevant recent-page prefix
+
+A full-plan cache that checked only the recent-page prefix visited before the
+four-slot planner stopped passed 267 VMX library tests, the in-box SVM suite,
+and 10,000/10,000 transfers. On the same EPYC 4245P box, it took **42.662
+s**, with 16,831,930 NPT faults and about 2,619 VM-entry preparation cycles
+per exit; the unchanged control took **41.810 s**, with 16,658,500 faults and
+about 2,525 cycles per exit. A narrower variant stored only plans whose
+breakpoint capacity filled before scanning all eight recent pages. It also
+passed the checks and transfers, taking **42.075 s**, with 16,630,066 faults
+and about 2,609 preparation cycles per exit. Both cache variants added entry
+work and neither improved elapsed time. They remain isolated in
+`/tmp/bedrock-amd-globalcompact-1012`; the first variant is preserved as
+`/tmp/bedrock-amd-prefix-context-1012.patch`. Logs and marker snapshots are
+under ignored `target/boxctl-evidence/amd-prefixcache-1012/`.
+
+The first replacement `m4-metal-small` box had an EPYC 4244P whose SVM PMU
+initialization failed, so it could not run the accelerated path or provide a
+valid comparison. It was deleted. The runs above used a new EPYC 4245P box
+with HWE 7.0.0-38 and a passing SVM suite. CPU model and PMU availability
+must be checked on each provisioned box before interpreting performance.
+
+### Classify missed recent pages at global execute faults
+
+A one-in-64 diagnostic sampled global NPT execute faults during a complete
+10,000-transfer run. Nearest million-fault snapshots around the fair markers
+span about **16 million** global execute faults and **250,000** samples. About
+**172,000 (69%)** faulted at a virtual page in the eight-page recent set;
+roughly **148,000 (86% of those recent misses)** had all four breakpoint
+registers occupied. About **17,000 (10%)** had apparent space when comparing
+the target page's raw hazard count to free slots; this is only an upper bound
+because aliases and page-boundary rules can need more breakpoints. The
+remaining recent misses had a raw-count overflow or no guarded hazard memo.
+
+A follow-up run split the apparent-fit bucket. Only **309 of 17,178** sampled
+apparent-fit misses were stopped by the planner's raw-hazard cutoff, and only
+**1,348** had zero breakpoints on the current plan (the trusted-current-page
+path). Thus removing the raw cutoff or widening only trusted-page plans has
+limited headroom on this workload. The diagnostic sources stay isolated in
+`/tmp/bedrock-amd-faultalloc-1012`, with logs under ignored
+`target/boxctl-evidence/amd-faultalloc-1012/`.
+
+A third complete diagnostic run checked cached singleton alias proofs for
+the apparent-fit faults. Across the nearest fair-marker snapshots it took
+**41.806 s** and sampled 250,000 of 16 million global execute faults. Of
+**17,181** apparent-fit samples, **17,152** had a cached alias proof whose
+breakpoints would fit the remaining slots, **29** had no matching proof, and
+**zero** exceeded the slot count. These figures rule out alias slot overflow
+as the main explanation for the missed pages, but they do not establish that
+the pages could safely be admitted: the planner also checks code translation,
+page-boundary compatibility, and other guarded-tree conditions. The next
+diagnostic compares the faulting physical page with the translation of the
+faulting guest RIP before interpreting recent virtual-page rank.
+
+That physical-page check completed all 10,000 transfers in **41.780 s**. Of
+**16,779** sampled apparent-fit faults, **10,385** had a fault GPA matching
+the current RIP's physical page, while **6,394** did not. The virtual-page
+rank alone therefore overstates candidates for admitting the faulted page
+into the current global guard. Even among the matching cases, the planner's
+boundary and translation checks still need to be classified before making
+a change. This was another one-in-64 diagnostic, not an optimized build.
