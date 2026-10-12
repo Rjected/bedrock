@@ -3364,3 +3364,30 @@ fault-count variation prevents claiming an end-to-end gain of that exact
 size. The change is retained because it removes repeated FPU saves while
 preserving snapshot and fork state. Marker snapshots and full logs are under
 ignored `target/boxctl-evidence/amd-fpudefer-1012/`.
+
+### Recheck VMCB clean-field caching on the current fast path
+
+The earlier width-specific unaligned VMCB access candidate had already
+regressed on a matched Tempo run (see "Profile and test VMCB access costs").
+A duplicate of that candidate passed local and in-box tests on this branch,
+but was stopped during boot and reverted after locating the prior result.
+
+An isolated [VMCB clean-field](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2)
+candidate instead set the AMD hardware's clean bits after each successful
+VMRUN and invalidated only the field group written
+before the next entry. Unrecognized writes invalidated every group; forks,
+new VM_RUN calls, and failed VMRUNs forced a full reload. The 4245P host
+advertised `vmcb_clean`. All 24 SVM and 262 VMX library tests, the in-box SVM
+suite, and the complete 10,000-transfer workload passed. An adjacent
+unchanged-module control on the same box was:
+
+| Variant | Fair transfer interval | VM exits | Nested-page faults | Runner plus guest cycles/exit | Entry-preparation cycles/exit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Clean-field candidate | 51.655 s | 25,637,367 | 18,988,028 | 4,754 | 2,364 |
+| Unchanged control | 53.155 s | 26,601,607 | 19,738,396 | 4,743 | 2,318 |
+
+The candidate's lower wall time follows its roughly 964,000 fewer exits.
+Its normalized runner and preparation costs were both higher, so there is
+no evidence that clean-field tracking speeds this workload. The candidate
+was reverted. Logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-vmcb-clean-1012/`.
