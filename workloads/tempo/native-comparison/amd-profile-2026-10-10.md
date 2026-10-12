@@ -2557,6 +2557,17 @@ one retired instruction in this experiment, so it cannot stop a long REP
 at the requested iteration. The unsafe source remains isolated in
 `/tmp/bedrock-amd-rep-pmu-probe-1011`; it was not merged.
 
+An additional isolated 4245P probe logged the VMCB counters as the unguarded
+5,000-iteration `REP STOSB` finished. The exit after REP had `IRPERF=3`,
+`PERF_GLOBAL_STATUS=0`, and a non-overflowed virtual PMC; the guest reached
+shutdown at virtual count **103** rather than the requested 1,000 deadline.
+The unchanged module was reloaded afterward and passed the box suite. A
+native user-only `perf` comparison with and without a 10-million-byte REP
+also showed the `0xC0` retired-instruction event did not rise by the byte
+count. Event `0xC1` retired macro-ops rose substantially but not one-for-one
+with bytes. These checks reinforce that changing the retired event alone
+cannot supply an exact stop inside REP on this host.
+
 ### Sample the reachable-code alternative
 
 An isolated diagnostic called the existing bounded single-page reachable-code
@@ -2643,10 +2654,14 @@ snapshots and filtered kernel logs are under ignored
 A newly provisioned EPYC **4244P** box with the same HWE kernel failed the
 existing `svm_bench` control-flow acceleration assertion on both the unchanged
 branch and the diagnostic module, each using **20,029 exits** where the test
-requires fewer than 100. Its transition suite passed. All transfer-phase
-comparisons above used EPYC **4245P** boxes, where the full suite passed. The
-4244P behavior needs separate investigation before claiming this acceleration
-works across that host type.
+requires fewer than 100. Its transition suite passed. Its SVM CPUID leaf
+`0x8000000a` reports virtual NMI support but **no PMC virtualization**
+(`EDX=0x1ebfbcff`, bit 8 clear), and the module logs `SVM PMU unavailable;
+using instruction stepping`. The 4245P reports both capabilities
+(`EDX=0xfebfbdff`, bits 8 and 25 set) and passes the accelerated suite. This
+is a hardware feature gate, not a diagnostic-module regression: the present
+fast path requires PMC virtualization, so AMD-V alone does not provide it.
+All transfer-phase comparisons above used 4245P boxes.
 
 ### Specialize the cached single-page alias-proof hit
 
