@@ -4193,3 +4193,87 @@ window during its 39.867 s fair interval. At about 19.9 million exits,
 the next high-value work is a sound way to avoid repeated guarded-page
 crossings or to reduce the per-exit entry path. The RDRAND and relaxed
 slot-admission experiments do neither on this workload.
+
+### Recheck the hot-page and planner recommendations
+
+The guest logs `Disabled fast string operations` on this AMD box, including
+before the ERMS CPUID mask. `IA32_MISC_ENABLE` is read from the host or
+defaults to zero when unavailable, so the suggestion that the kernel had
+already disabled optional fast-string dispatch is supported. The retained
+ERMS mask can still change user-library dispatch and reduced synthetic trap
+exits in the A/B/A/B comparison above. It cannot remove unconditional REP
+instructions from either the guest kernel or the pinned Tempo executable.
+
+The proposed three-hazard breakpoint mask does not explain the hot page's
+current behavior. The existing `add_page_breakpoint` already packs five
+hazards into four masked AMD debug slots. More recently, the reachable-region
+proof has usually needed fewer exact slots on that page. Combining three
+hazards into one 1 KiB range might release another slot for a second page,
+but would enlarge the range of harmless #DB exits; earlier 32-byte packing
+and slot-based admission increased planning cost enough to erase their fault
+savings. The profile's 28 of 69 sampled synthetic exits on the hot page is
+40.6%, not the suggested 66.8%, and those synthetic exits include masked
+breakpoint hits rather than only hardware trap-flag steps. This idea remains
+an untested tradeoff, not an obvious missing correctness fix.
+
+The recommended 200,000-instruction forced-preemption test is useful, but its
+proposed mechanism is wrong for the current DST implementation. Forced
+preemption is checked at the first deterministic exit at or after its target;
+`preempt_deadline` is deliberately excluded from the precise PMU target.
+Consequently it does not force a 256-instruction exact-deadline approach on
+each preemption. The `200k` workload run below measures the actual behavior.
+Changing guest HZ or adding a second exact overflow would target a different
+cost and should not follow merely from this preemption setting.
+
+The REP-as-one-tick proposal has not been validated as a compatible change.
+An unguarded 5,000-iteration `REP STOSB` already showed AMD IRPERF counting
+the entire REP as one instruction and missing an exact stop at iteration
+900. The existing guarded path stopped exactly there. Redefining the virtual
+clock would change deadline and interrupt placement and would need a matching
+Intel/reference definition plus interruption tests. We have not tested a
+helper planning core, kernel REP removal/code layout, or guest huge-page
+layout. The kernel changes would alter the common guest environment, and
+relinking Tempo would alter the binary under test; these experiments
+prioritize hypervisor-only work.
+
+An isolated, low-rate in-kernel planner probe then passed the box SVM suite
+and completed all 10,000 Tempo transfers. The fair interval was **42.576 s**
+with probe overhead, so it is not a candidate speed result. Marker-bounded
+snapshots cover 21 million `prepare_global_into` calls, with one in 256 timed.
+Approximate TSC cycles per sampled call were:
+
+| Planner part | Cycles/call |
+| --- | ---: |
+| Current-page hazard lookup | 86 |
+| Region proof | 5 |
+| Breakpoint collection | 351 |
+| Optional-page widening, including nested work | 732 |
+| Widening: translation | 74 |
+| Widening: other-page hazard lookup | 162 |
+| Widening: alias proof | 68 |
+
+The widening loop considered about 3.32 candidate pages per sampled call.
+The nested subtasks account for roughly 304 of its 732 cycles; the remaining
+time includes candidate selection, control flow, and probe overhead. This
+narrows the next software target to the optional-page widening path, but a
+candidate must reduce preparation cost without increasing protected-page
+faults. Diagnostic source is isolated in `/tmp/bedrock-amd-phasecurrent-1012`;
+marker snapshots and kernel logs are under ignored
+`target/boxctl-evidence/amd-widenphase-1012/`.
+
+On that same instrumented build and box, setting
+`BEDROCK_PREEMPT_PERIOD=200000` and `BEDROCK_PREEMPT_SEED=12345` also passed
+all 10,000 transfers. The no-preemption run's fair interval was **42.576 s**
+with **20,291,514** exits, including **16,870,803** NPT faults and
+**1,179,269** synthetic trap exits. The 200k run took **43.053 s** with
+**20,575,829** exits, including **16,926,813** NPT faults and **1,266,020**
+synthetic trap exits. The 0.477-second, 1.1% difference is one adjacent
+comparison with changed guest scheduling, so it is not a pure overhead
+estimate. It does show that this setting did not cause an obvious 256-step
+per-preemption cliff. Marker snapshots are in the same ignored evidence
+directory.
+
+After both diagnostic runs, `contrib/run-boxctl-svm.sh test` restored the
+production branch's module on the disposable box. The complete in-box SVM
+suite passed, including exact deadlines, masked breakpoints, fork CoW,
+replay, and both native-loop comparisons.
