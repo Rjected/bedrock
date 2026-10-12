@@ -4021,3 +4021,17 @@ transition caused each subsequent fault. Diagnostic source remains isolated
 in `/tmp/bedrock-amd-slotdiag-1012`; its reproducible instrumentation patch
 is `diagnostics/slot-diag.patch`. Snapshots and kernel logs are under ignored
 `target/boxctl-evidence/amd-slotdiag-1012/`.
+
+An isolated follow-up added an early stop to the optional-page loop when
+the current plan already occupied all four actual breakpoint slots. This
+is safe because the planner rejects a candidate that adds no new breakpoint.
+All 266 VMX library tests, the in-box suite, and 10,000/10,000 transfers
+passed. The same-box candidate interval was **42.507 s**, versus **42.328 s**
+for the preceding unchanged control; NPT faults were **16.867 million** versus
+**16.770 million**. VM-entry preparation was **2,528 cycles per exit** versus
+**2,519** for the control. Thus the extra condition did not reduce normalized
+preparation cost or end-to-end time. The existing raw-hazard-count cutoff
+likely catches most full-slot plans; this inference needs a direct hit count
+before treating it as proven. The candidate remains isolated in
+`/tmp/bedrock-amd-fullslot-1012`, with marker snapshots under ignored
+`target/boxctl-evidence/amd-fullslot-1012/`.
