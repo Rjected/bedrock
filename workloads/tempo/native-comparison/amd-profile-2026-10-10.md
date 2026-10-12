@@ -3010,3 +3010,25 @@ so a new implementation would need to target the *actual faulting* five-slot
 combinations and demonstrate an end-to-end gain. Source remains isolated in
 `/tmp/bedrock-amd-proofslots-1012`; logs and snapshots are under ignored
 `target/boxctl-evidence/amd-proofslots-1012/`.
+
+### Test a narrow merge across the combined predicted-page breakpoint set
+
+An isolated candidate removed the raw hazard-count gates and, only when
+adding the predicted page produced exactly five distinct breakpoint ranges,
+searched for one 32-byte mask covering two ranges on the same virtual code
+page. This can merge a pair in an already-admitted page, which the earlier
+precomputed singleton alternative did not cover. A focused coverage test,
+all 263 VMX tests, the in-box SVM suite, and a full Tempo run passed on a
+fresh EPYC 4245P box. The candidate was worse than an adjacent unchanged
+control:
+
+| Variant | Fair interval | Nested-page faults | Preparation cycles |
+| --- | ---: | ---: | ---: |
+| Combined five-slot merge | 58.356 s | 20,823,570 | 67.99 billion |
+| Unchanged control | **56.028 s** | **20,610,934** | **63.32 billion** |
+
+The candidate increased preparation cycles per exit by roughly 5.8% and did
+not reduce faults. It remains unmerged in `/tmp/bedrock-amd-combine5-1012`;
+marker snapshots are under ignored
+`target/boxctl-evidence/amd-combine5-1012/`. This closes the narrow
+five-slot packing line of experiments without a demonstrated workload gain.
