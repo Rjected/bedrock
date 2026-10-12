@@ -3435,3 +3435,31 @@ both candidate runs had more exits and longer wall intervals. The change
 remains isolated in `/tmp/bedrock-amd-pmu-zero-1012` and is not retained.
 Marker snapshots and full logs are under ignored
 `target/boxctl-evidence/amd-pmuzero-1012/`.
+
+### Bound wider AMD breakpoint-mask opportunities
+
+An isolated diagnostic extended the earlier predicted-page shortfall probe to
+record the smallest AMD breakpoint-address mask that could merge any pair in
+each five-slot combination. All 262 VMX tests, the in-box SVM suite, and the
+exact 10,000-transfer workload passed on a fresh 4245P HWE box. Its fair
+interval was **53.190 s**, with **19,180,932 NPT faults**. Kernel-log samples
+nearest the markers cover **16.78 million** global execute faults and **1.54
+million** predicted-page proof-overflow misses; they do not align exactly with
+the marker-bounded interval.
+
+| Maximum mask span | Faulting five-slot combinations that could merge a pair |
+| --- | ---: |
+| 32 bytes | 669,892 |
+| 64 bytes | 717,459 |
+| 256 bytes | 859,734 |
+| 1 KiB | 1,268,070 |
+
+These are upper bounds on avoidable fetch faults, not expected speedups.
+Moving from 32 to 256 bytes adds only about **190 thousand** packable
+combinations, around 1% of the run's NPT faults, while wider masks can
+cause false #DB exits across many ordinary instructions. The previously
+tested 32-byte combined merge already increased preparation time without
+reducing faults, so this measurement does not justify a wider merge policy.
+Diagnostic source is isolated in `/tmp/bedrock-amd-maskwidth-1012`; full
+logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-maskwidth-1012/`.
