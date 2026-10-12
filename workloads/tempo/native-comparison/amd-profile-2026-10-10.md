@@ -2606,3 +2606,67 @@ focused `svm_bench` also passed; it measured about 19.1 million instructions/s
 with rotating ASIDs versus 13.2 million with per-entry flushing in one suite
 pass. Marker snapshots are under ignored
 `target/boxctl-evidence/amd-asidrotate-1012/`.
+
+### Locate the remaining VM-entry preparation cost
+
+An isolated planner variant tried both the contextual and plain successor
+predictions rather than discarding the plain prediction whenever contextual
+data existed. All 262 VMX tests, the in-box SVM suite, and the complete Tempo
+workload passed. Its first fair interval was **58.303 s** with **21.19 million**
+nested-page faults, effectively unchanged from the nearby ASID-rotation
+controls. It remains isolated in `/tmp/bedrock-amd-dualpred-1012`.
+
+Kernel `perf` sampling of a full control run captured mostly VM creation,
+so it did not characterize the transfer phase. Isolated cycle counters around
+the VM-entry stages then measured two complete Tempo runs on EPYC 4245P boxes.
+Subtracting the closest million-entry log snapshots to the fair markers gave
+about **32 million** entries per interval. Preparation cost per entry was
+roughly **215 cycles** refreshing the guarded translation tree, **390**
+preparing instruction exits, **1,200–1,320** planning a batch, and **170–200**
+setting execution/write guards. Timing instrumentation adds some overhead;
+these values locate costs rather than predict uninstrumented wall time.
+
+One split showed about **85%** of entries obtained a global counted plan.
+The global-plan attempt cost **1,083–1,167 cycles per entry**, while fallback
+decoding cost about **96–97 cycles per entry**. On successful plans, the
+current-page hazard lookup took about **95 cycles**, breakpoint-proof
+collection **348–352**, and widening to additional pages **539–618**. In a
+finer widening run, each successful plan examined **2.6** candidate pages
+and admitted **1.4**; translation lookup accounted for about **85 cycles**,
+other-page hazard lookup **204**, and singleton alias-proof lookup **54** per
+successful plan. The candidate-page checks are frequently useful, so dropping
+recent pages is unlikely to help; the proof hit path is a better local target.
+The diagnostics remain isolated in `/tmp/bedrock-amd-prepdiag-1012`; marker
+snapshots and filtered kernel logs are under ignored
+`target/boxctl-evidence/amd-prepdiag-1012/`.
+
+A newly provisioned EPYC **4244P** box with the same HWE kernel failed the
+existing `svm_bench` control-flow acceleration assertion on both the unchanged
+branch and the diagnostic module, each using **20,029 exits** where the test
+requires fewer than 100. Its transition suite passed. All transfer-phase
+comparisons above used EPYC **4245P** boxes, where the full suite passed. The
+4244P behavior needs separate investigation before claiming this acceleration
+works across that host type.
+
+### Specialize the cached single-page alias-proof hit
+
+The common global plan contains one hazardous current page. Its cached
+breakpoint proof can be checked directly against that page and its hazard
+offsets instead of using the generic multi-page search. Root, cache validity,
+page, hazard count, and exact offsets are still checked; multi-page plans keep
+the general matcher. All 262 VMX tests and the in-box SVM suite passed. Two
+alternating same-box EPYC 4245P comparisons completed all 10,000 transfers:
+
+| Run order | Proof match | Fair interval | VM exits | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Direct singleton | 59.405 s | 29,591,377 | 2,283 |
+| 2 | General control | 59.973 s | 29,687,108 | 2,334 |
+| 3 | Direct singleton | 57.876 s | 28,795,495 | 2,278 |
+| 4 | General control | 58.417 s | 28,926,639 | 2,316 |
+
+The candidate averaged **58.641 s** versus **59.195 s**, about **0.9%**
+faster. Preparation cost per exit fell in both pairs by **38–51 cycles**.
+The candidate also had slightly fewer exits, so the exact wall-clock benefit
+remains noisy; the normalized preparation reduction supports the local change.
+Marker snapshots are under ignored
+`target/boxctl-evidence/amd-singletonproof-1012/`.
