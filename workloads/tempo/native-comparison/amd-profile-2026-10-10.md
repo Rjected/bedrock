@@ -4234,10 +4234,9 @@ the entire REP as one instruction and missing an exact stop at iteration
 900. The existing guarded path stopped exactly there. Redefining the virtual
 clock would change deadline and interrupt placement and would need a matching
 Intel/reference definition plus interruption tests. We have not tested a
-helper planning core, kernel REP removal/code layout, or guest huge-page
-layout. The kernel changes would alter the common guest environment, and
-relinking Tempo would alter the binary under test; these experiments
-prioritize hypervisor-only work.
+helper planning core, kernel REP removal, or guest huge-page layout. A
+layout-only guest-kernel change is measured below. It changes the common
+guest environment while keeping the pinned Tempo binary under test intact.
 
 An isolated, low-rate in-kernel planner probe then passed the box SVM suite
 and completed all 10,000 Tempo transfers. The fair interval was **42.576 s**
@@ -4353,3 +4352,34 @@ Tempo speedup and remains isolated in `/tmp/bedrock-amd-no-counters-1012`.
 Fair-marker JSON is under ignored
 `target/boxctl-evidence/amd-no-counters-1012/`. The production module was
 restored on the box and passed the in-box SVM suite afterward.
+
+### Isolate non-REP kernel copy fallbacks from REP hazards
+
+The guest reports `Disabled fast string operations`, so it calls the
+non-REP `memcpy_orig` and `memset_orig` fallbacks. In the unmodified Linux
+6.18 guest image, `memcpy_orig` shares a 4 KiB code page with unused REP
+alternatives. The page-wide hazard proof still guards that page. A guest
+kernel patch aligns both non-REP fallbacks to separate 4 KiB pages and pads
+after them. Disassembly of both resulting pages found no REP or RNG
+instructions. The Bedrock module, initrd, workload archive, seed, and box
+were unchanged. The patched `guestKernel` built successfully with Nix.
+
+On `box-7950ba17` (EPYC 4245P, HWE 7.0.0-38), all five complete
+10,000-transfer runs passed. Fair-marker intervals and counters were:
+
+| Order | Guest kernel | Fair interval | VM exits | NPT faults |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Control | 41.979 s | 20,706,176 | 17,184,650 |
+| 2 | Aligned fallbacks | 39.236 s | 19,121,342 | 15,740,346 |
+| 3 | Control | 40.513 s | 20,038,648 | 16,659,141 |
+| 4 | Aligned fallbacks | 40.754 s | 19,987,040 | 16,429,843 |
+| 5 | Aligned fallbacks | 39.021 s | 19,088,361 | 15,707,726 |
+
+The layout cut NPT faults in each adjacent comparison, but runtime still
+varied: the second candidate was 0.24 seconds slower than the preceding
+control. Candidate median was 39.236 seconds versus 41.246 seconds for the
+two controls' midpoint; that small sample is not a confidence interval.
+This patch affects the shared guest kernel used by both backends and changes
+code addresses, so old replay traces for the previous image cannot be used
+as a comparison. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-guest-layout-1012/`.

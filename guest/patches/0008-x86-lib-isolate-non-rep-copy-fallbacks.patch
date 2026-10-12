@@ -1,0 +1,31 @@
+--- a/arch/x86/lib/memcpy_64.S
++++ b/arch/x86/lib/memcpy_64.S
+@@ -44,6 +44,7 @@
+ SYM_PIC_ALIAS(memcpy)
+ EXPORT_SYMBOL(memcpy)
+ 
++	.p2align 12
+ SYM_FUNC_START_LOCAL(memcpy_orig)
+ 	movq %rdi, %rax
+ 
+@@ -170,4 +171,5 @@
+ .Lend:
+ 	RET
+ SYM_FUNC_END(memcpy_orig)
++	.p2align 12
+ 
+--- a/arch/x86/lib/memset_64.S
++++ b/arch/x86/lib/memset_64.S
+@@ -45,6 +45,7 @@
+ SYM_PIC_ALIAS(memset)
+ EXPORT_SYMBOL(memset)
+ 
++	.p2align 12
+ SYM_FUNC_START_LOCAL(memset_orig)
+ 	movq %rdi,%r10
+ 
+@@ -117,3 +118,4 @@
+ 	jmp .Lafter_bad_alignment
+ .Lfinal:
+ SYM_FUNC_END(memset_orig)
++	.p2align 12

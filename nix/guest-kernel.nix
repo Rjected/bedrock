@@ -34,6 +34,9 @@ let
       # that shifts the instruction count (oss-garage/bedrock#59).
       ../guest/patches/0006-x86-mm-flush-after-pte-write.patch
       ../guest/patches/0007-x86-delay-bedrock-loop-param.patch
+      # Keep the non-REP memcpy/memset fallbacks off pages containing their
+      # optional REP alternatives, so AMD can run those fallbacks as clean code.
+      ../guest/patches/0008-x86-lib-isolate-non-rep-copy-fallbacks.patch
     ];
   };
 
