@@ -3834,3 +3834,19 @@ executable patched shadow page would also expose patched bytes to guest data
 reads. This rules out that shortcut without additional read virtualization.
 See the [AMD64 APM volume 2, nested-paging section](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2)
 and `crates/bedrock-ept/src/entry.rs`.
+
+### Check counted-entry VMCB PMU writes
+
+An isolated candidate stopped clearing virtual PMU controls and counters 1–5
+on every counted entry. Bedrock arms only counter 0, starts from a zeroed
+VMCB, and intercepts guest PMU MSRs. The 23 `bedrock-svm` and 266
+`bedrock-vmx` library tests, full in-box SVM suite, and 10,000/10,000 Tempo
+transfers passed. On the same EPYC box, the candidate interval took
+**47.282 s**, with 22,144,408 exits, 17,828,536 NPT faults, and **60.86
+billion** VM-entry preparation cycles. The adjacent unchanged control took
+**47.674 s**, with 22,477,753 exits, 18,099,573 NPT faults, and **60.80
+billion** preparation cycles. The wall-time difference tracks different
+exit counts; there is no measured preparation saving. The candidate stays
+isolated in `/tmp/bedrock-amd-pmu-lean-1012`; logs and fair-marker snapshots
+are under ignored `target/boxctl-evidence/amd-globalcompact-1012/`. The
+unchanged module is restored in the box and passed its SVM suite.
