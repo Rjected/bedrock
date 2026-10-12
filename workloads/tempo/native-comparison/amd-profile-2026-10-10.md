@@ -3946,3 +3946,15 @@ sampled cache hits averaged **103 cycles**; 194 sampled misses averaged
 walks**. The expensive walks are rare, but their estimated aggregate cost is
 around **6.7 billion cycles**; speeding them up could save a couple of host
 seconds. These are sampled estimates, not a controlled speedup measurement.
+
+An isolated candidate used the existing guarded-table hash index in the
+upper levels of those alias walks. All 266 VMX library tests, including an
+indexed collision/fallback check, and the in-box SVM suite passed. A full
+same-box candidate run took **41.643 s**; the adjacent unchanged control took
+**42.328 s**. The candidate had **16.417 million** NPT faults versus the
+control's **16.770 million**, so the elapsed difference tracks guest-path
+variation. Measured VM-entry preparation was **51.69 billion cycles** for
+the candidate and **51.77 billion** for the control, showing no meaningful
+reduction in the intended cost. The change remains isolated in
+`/tmp/bedrock-amd-alias-upperindex-1012`, with logs under ignored
+`target/boxctl-evidence/amd-upperindex-1012/`.
