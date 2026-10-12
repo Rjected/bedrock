@@ -3596,3 +3596,39 @@ were discarded. The diagnostic source remains isolated in
 `/tmp/bedrock-amd-dual-predict-1012`, and
 `/tmp/bedrock-amd-globalreuse-1012`; logs and counters are under ignored
 `target/boxctl-evidence/amd-npt-sample-1012/`.
+
+### Recheck alias-proof hits and page-transition hysteresis
+
+A fresh EPYC 4245P HWE box ran the exact 10,000-transfer workload on the
+current fast branch. Three uninstrumented controls took **50.297 s**,
+**50.148 s**, and **49.957 s** between fair markers. This box was slower
+than the previous box's 44-second runs, so all comparisons below use its
+own controls. Each completed 10,000 successful and zero failed transfers;
+all kernel-module work remained inside `boxctl` boxes.
+
+Two low-rate collector diagnostics also completed at **50.264 s** and
+**50.224 s**. The transfer-phase counter snapshots span about 20 million
+alias-proof collection calls: **99.7%** hit a valid proof, only **0.3%**
+needed an alias walk, and none saw a dirty or unguarded tree. Of the hits,
+about **80%** used the keyed hint, **17.6%** the last-used slot, and **1.9%**
+searched the cache set. Earlier findings that alias walks and proof churn
+dominated this workload no longer describe the current branch. A validated
+single-page hint bypassed the offset hash on some hits, but its full run took
+**50.147 s**; the immediately following unchanged control took **50.148 s**.
+The change was discarded.
+
+An isolated two-destination transition predictor reduced cumulative NPT
+faults from roughly 66.2 million to **65.8 million**, but took **50.182 s**
+and increased normalized VM-entry preparation from about 2,461 to 2,533
+cycles per exit. A smaller saturating-confidence predictor ran twice at
+**49.013 s** and **50.552 s**; the apparent first-run gain did not repeat.
+It reduced faults to 65.3–65.8 million but raised preparation to about
+2,486–2,492 cycles per exit. Restricting confidence tracking to the
+context-specific predictor took **50.140 s** with 65.8 million faults,
+again matching the controls. These variants passed 263 VMX library tests
+and the in-box SVM suite, but none established an end-to-end speedup, so
+they remain unmerged. Their source is isolated in
+`/tmp/bedrock-amd-aliasprofile-1012`, `/tmp/bedrock-amd-aliasfast-1012`,
+`/tmp/bedrock-amd-majority-1012`, `/tmp/bedrock-amd-sticky-predict-1012`,
+and `/tmp/bedrock-amd-sticky-second-1012`; full logs and stats are under
+ignored `target/boxctl-evidence/amd-aliasprofile-1012/`.
