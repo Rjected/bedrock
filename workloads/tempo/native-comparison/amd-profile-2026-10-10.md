@@ -3032,3 +3032,23 @@ not reduce faults. It remains unmerged in `/tmp/bedrock-amd-combine5-1012`;
 marker snapshots are under ignored
 `target/boxctl-evidence/amd-combine5-1012/`. This closes the narrow
 five-slot packing line of experiments without a demonstrated workload gain.
+
+### Cache exact guarded global page plans
+
+An isolated candidate cached the selected pages and breakpoint masks for an
+exact current-page, predicted-successor, and eight-page recent context. A hit
+required matching code, translation-tree, alias-invalidation, and NPT mapping
+generations, plus persistent write guards on every hazardous admitted page.
+The lookup also rejected a current RIP at a recorded hazardous offset. A
+focused epoch-invalidation test, all 263 VMX tests, the in-box SVM suite, and
+the complete Tempo workload passed on an EPYC 4245P box.
+
+During the transfer interval, closest kernel-log snapshots show about
+**25.17 million** cache lookups, **4.48 million hits (17.8%)**, and **13.62
+million insertions**. The fair interval was **57.302 s** with **20,657,772
+nested-page faults** and **67.26 billion** VM-entry preparation cycles. The
+earlier unchanged same-box control took **56.028 s** with **20,610,934
+faults** and **63.32 billion** preparation cycles. The validation and
+insertion costs exceeded the work saved by hits; the candidate remains
+unmerged in `/tmp/bedrock-amd-globalcache-1012`. Logs and snapshots are
+under ignored `target/boxctl-evidence/amd-globalcache-1012/`.
