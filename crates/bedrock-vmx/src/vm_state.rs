@@ -19,6 +19,7 @@ type ExitStatsBox = HeapBox<AllExitStats>;
 pub(crate) const SVM_CODE_PAGE_CAPACITY: usize = 64;
 pub(crate) const SVM_HAZARD_MEMO_CAPACITY: usize = 256;
 pub(crate) const SVM_HAZARD_LOOKUP_CAPACITY: usize = 1024;
+pub(crate) const SVM_GUARDED_HAZARD_HINT_CAPACITY: usize = 64;
 pub(crate) const SVM_RECENT_PAGE_CAPACITY: usize = 8;
 pub(crate) const SVM_SUCCESSOR_CAPACITY: usize = 2048;
 pub(crate) const SVM_SECOND_SUCCESSOR_CAPACITY: usize = 8192;
@@ -73,6 +74,9 @@ pub(crate) struct SvmGuardScratch {
     // One-based memo index. The pointed-to page is checked before every hit,
     // so hash collisions and evictions only lose acceleration opportunities.
     pub hazard_lookup: [u16; SVM_HAZARD_LOOKUP_CAPACITY],
+    /// Direct hint for recurrent code whose bytes are protected by NPT.
+    /// The memo's page, revision, guard, and mapping are rechecked on use.
+    pub guarded_hazard_hints: [SvmGuardedHazardHint; SVM_GUARDED_HAZARD_HINT_CAPACITY],
     pub translations: [(u64, u64); SVM_CODE_PAGE_CAPACITY],
     pub translation_count: usize,
     pub translation_cursor: usize,
@@ -270,6 +274,14 @@ pub(crate) struct SvmCodeProof {
     pub edge: u16,
     pub offsets: [u16; 16],
     pub count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SvmGuardedHazardHint {
+    pub page: u64,
+    pub revision: u64,
+    pub memo_index: u16,
+    pub valid: bool,
 }
 
 /// Exact code bytes allow reusing a scan after a translation proof expires.

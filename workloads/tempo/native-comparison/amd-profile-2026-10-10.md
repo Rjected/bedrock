@@ -3742,3 +3742,40 @@ VM-entry preparation path. The next profile needs low-rate cycle probes
 inside that path. The software-clock diagnostic and report share the ignored
 evidence directory above; the hardware-cycle report is under
 `target/boxctl-evidence/amd-regionproof-1012/`.
+
+### Reuse guarded hazard memos directly on AMD global entries
+
+Low-rate in-kernel cycle probes on a complete 10,000-transfer run found that
+plan selection consumed **63.1%** of sampled VM-entry preparation cycles,
+about **1,550 cycles per exit**. Instruction-exit preparation took 22.0% and
+NPT protection 9.2%. A finer probe attributed **87.4%** of plan-selection
+cycles to the global planner and 5.0% to scalar fallback. Within the global
+planner, hazardous-page widening cost about 648 cycles per call, breakpoint
+collection 485, and current-page hazard lookup 104. The widening scan
+admitted about **33.2 million** successor pages across 24 million timed
+planner calls, so dropping it would likely raise NPT faults. Its largest
+measured subtask was another page's hazard lookup, about 223 cycles per call.
+
+A hit classifier showed **99.95%** of timed hazard lookups reached the larger
+memo path, since global entries clear the short code cache. A new direct
+64-slot hint now points to a recurrent memo only after that memo is
+write-guarded. Every hit rechecks the memo's page, revision, valid and guarded
+bits, and NPT mapping generation. It maintains the memo's usage clock and
+falls back to the existing byte-checking path on any mismatch. A regression
+test changes code through a host write and replaces its NPT mapping; both
+changes invalidate the fast result. All 265 VMX library tests and the full
+in-box SVM suite pass.
+
+On the same EPYC 4245P HWE box, two uninstrumented runs of the pinned
+10,000-transfer workload took **46.170 s** and **47.134 s** with the hint;
+nearby unchanged runs took **47.132 s** and **48.404 s**. Every run had
+10,000 successful transfers and zero failures. The second hint run used
+about **2,646 VM-entry preparation cycles per exit**, versus **2,774** for
+the adjacent control. Different exit totals still account for some wall-time
+variation, so this establishes a modest same-box gain, not an Intel parity
+claim. A simpler variant using the existing 1,024-entry memo hint took
+47.223 s and did not show a stable advantage; it remains isolated in
+`/tmp/bedrock-amd-hazard-direct-1012`. The retained variant was tested in
+`/tmp/bedrock-amd-hot-hazard-1012`. Logs and fair-marker snapshots are under
+ignored `target/boxctl-evidence/amd-hazard-fast-1012/`; diagnostic sources
+are isolated in `/tmp/bedrock-amd-entryfine-1012`.

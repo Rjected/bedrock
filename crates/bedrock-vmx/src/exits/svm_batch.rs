@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static REFRESH_PENDING: AtomicU64 = AtomicU64::new(0);
@@ -1778,11 +1778,26 @@ fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHaz
         ) == Ok(true))
     });
     if unchanged {
-        let memo = &mut ctx.state_mut().svm_guard.hazard_memos[memo.unwrap()];
+        let index = memo.unwrap();
+        let memo = &mut ctx.state_mut().svm_guard.hazard_memos[index];
         memo.hits = memo.hits.saturating_add(1);
         if memo.guarded {
             memo.last_guard_use = clock;
         }
+        let guarded = memo.guarded;
+        let revision = memo.revision;
+        if guarded {
+            let slot = ((physical >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+                & (SVM_GUARDED_HAZARD_HINT_CAPACITY - 1);
+            ctx.state_mut().svm_guard.guarded_hazard_hints[slot] =
+                super::super::vm_state::SvmGuardedHazardHint {
+                    page: physical,
+                    revision,
+                    memo_index: index as u16,
+                    valid: true,
+                };
+        }
+        let memo = &ctx.state().svm_guard.hazard_memos[index];
         return (!memo.rejected).then_some(PageHazards {
             boundary: memo.proof.boundary,
             boundary_guarded: memo.proof.boundary_guarded,
@@ -1846,6 +1861,33 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
             let guard = &ctx.state().svm_guard;
             guard.gate_ready && !guard.gate_dirty && guard.gate_root == root
         });
+        if gate_guarded {
+            let slot = ((physical >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+                & (SVM_GUARDED_HAZARD_HINT_CAPACITY - 1);
+            let hint = ctx.state().svm_guard.guarded_hazard_hints[slot];
+            if hint.valid && hint.page == physical {
+                let index = usize::from(hint.memo_index);
+                let mapping_generation = ctx.state().ept.mapping_generation();
+                let memo = &ctx.state().svm_guard.hazard_memos[index];
+                if memo.valid && memo.guarded && !memo.rejected
+                    && memo.proof.page == physical && memo.revision == hint.revision
+                    && memo.guarded_mapping_generation == mapping_generation
+                {
+                    let hazards = PageHazards {
+                        boundary: memo.proof.boundary,
+                        boundary_guarded: memo.proof.boundary_guarded,
+                        edge: memo.proof.edge,
+                        offsets: memo.proof.offsets,
+                        count: memo.proof.count,
+                    };
+                    let guard = &mut ctx.state_mut().svm_guard;
+                    guard.hazard_guard_clock = guard.hazard_guard_clock.wrapping_add(1);
+                    guard.hazard_memos[index].hits = guard.hazard_memos[index].hits.saturating_add(1);
+                    guard.hazard_memos[index].last_guard_use = guard.hazard_guard_clock;
+                    return Some(hazards);
+                }
+            }
+        }
         let pending_leaf_refresh = root.is_some_and(|root| {
             can_refresh_leaf_only(&ctx.state().svm_guard, root, ctx.state().ept.mapping_generation())
         });
@@ -6751,6 +6793,46 @@ mod tests {
         ctx.memory[0x1ffd..0x2000].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         ctx.state_mut().svm_guard.valid = false;
         assert!(cached_page_hazards(&mut ctx, 0x1000).is_none());
+    }
+
+    #[test]
+    fn guarded_hazard_hint_rechecks_host_writes_and_mapping_changes() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        ctx.state_mut().ept.map_4k(
+            &mut allocator, GuestPhysAddr::new(0x1000), HostPhysAddr::new(0x101000),
+            bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+            bedrock_ept::EptMemoryType::WriteBack,
+        ).unwrap();
+        for _ in 0..17 {
+            assert!(!globally_safe_code(&mut ctx, 0x1000));
+        }
+        protect_recurrent_code(&mut ctx, &allocator, 0x1000);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        ctx.state_mut().svm_guard.valid = false;
+        assert_eq!(cached_page_hazards(&mut ctx, 0x1000).unwrap().count, 1);
+        let slot = ((0x1000u64 >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+            & (SVM_GUARDED_HAZARD_HINT_CAPACITY - 1);
+        assert!(ctx.state().svm_guard.guarded_hazard_hints[slot].valid);
+        assert_eq!(cached_page_hazards(&mut ctx, 0x1000).unwrap().count, 1);
+
+        ctx.memory[0x1100..0x1103].fill(0x90);
+        ctx.state_mut().svm_guard.note_gate_host_write(0x1100, 3);
+        assert_eq!(cached_page_hazards(&mut ctx, 0x1000).unwrap().count, 0);
+
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().ept.remap_4k(
+            &allocator, GuestPhysAddr::new(0x1000), HostPhysAddr::new(0x201000),
+            bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+            bedrock_ept::EptMemoryType::WriteBack,
+        ).unwrap();
+        assert_eq!(cached_page_hazards(&mut ctx, 0x1000).unwrap().count, 1);
     }
 
     #[test]
