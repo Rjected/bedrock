@@ -3559,3 +3559,40 @@ each run instead of relying on the prior run's user-space address. The
 aborted run's log and first marker are under ignored
 `target/boxctl-evidence/amd-rep-hotdiag-1012/`; isolated source is in
 `/tmp/bedrock-amd-rep-hotdiag-1012`.
+
+### Check cross-page prediction and guarded global-plan reuse
+
+On the same EPYC 4245P HWE box, the current `66cb502` path completed the
+10,000-transfer workload in **44.354–44.712 s** (two runs, zero failed
+transfers), versus a **45.418 s** same-box control before the user-mode
+masked-breakpoint retry change. Kernel-module builds, loads, and tests ran
+only inside the disposable box.
+
+An isolated NPT diagnostic sampled the transfer interval's execute faults.
+Among 360 samples, 299 were from user mode, 61 from kernel mode, and 85% of
+faulting pages had only one or two true hazard offsets. A separate exact
+counter found that just **4.4%** of timed execute faults returned to the same
+physical page as the immediately preceding fault. The remaining faults are
+mostly transitions among many code pages. The context-specific successor
+matched 80 of 360 sampled destinations, while the first-order successor
+matched 85, including 36 that the contextual prediction missed. Adding both
+predictions passed the in-box suite but regressed the uninstrumented fair
+interval to **51.636 s**; its extra per-entry selection cost outweighed the
+faults avoided. The candidate was discarded.
+
+Sampled cycle counters on the baseline attributed **63.0%** of timed
+VM-entry preparation to plan selection, **21.6%** to instruction-exit
+preparation, **9.5%** to NPT protection, **3.8%** to temporary execute
+permissions, and **2.1%** to retained translation work. This agrees with the
+earlier global-planner profile. A guarded global-plan cache then passed the
+262 VMX tests, in-box SVM suite, and full workload, but took **50.497 s** and
+raised cumulative entry-preparation cycles without reducing NPT faults. In a
+diagnostic repeat, only **22.4%** of eligible transfer-phase lookups hit while
+**50.3%** copied a full plan into the cache. Requiring a context to recur
+before storing cut copies to **5.7%** of lookups, but hits fell to **18.3%**
+and the diagnostic fair interval remained **51.588 s**. Both cache variants
+were discarded. The diagnostic source remains isolated in
+`/tmp/bedrock-amd-npt-profile-1012`, `/tmp/bedrock-amd-entrytime-1012`,
+`/tmp/bedrock-amd-dual-predict-1012`, and
+`/tmp/bedrock-amd-globalreuse-1012`; logs and counters are under ignored
+`target/boxctl-evidence/amd-npt-sample-1012/`.
