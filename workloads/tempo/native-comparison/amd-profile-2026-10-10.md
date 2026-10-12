@@ -3824,3 +3824,13 @@ can reuse. The candidate remains isolated in
 `/tmp/bedrock-amd-globalcompact-1012`; its logs and fair-marker snapshots
 share the ignored evidence directory above. The pushed module was restored
 on the box and passed the full in-box SVM suite.
+
+For the next exit-count reduction, an execute-only shadow code mapping is not
+available on this NPT path. AMD NPT uses a present bit for readable mappings
+and an independent NX bit to deny execution; it does not provide an EPT-like
+execute-only permission. Bedrock's `AmdNpt` permission encoder reflects this:
+any nonempty mapping sets present, and execute permission clears NX. Thus an
+executable patched shadow page would also expose patched bytes to guest data
+reads. This rules out that shortcut without additional read virtualization.
+See the [AMD64 APM volume 2, nested-paging section](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2)
+and `crates/bedrock-ept/src/entry.rs`.
