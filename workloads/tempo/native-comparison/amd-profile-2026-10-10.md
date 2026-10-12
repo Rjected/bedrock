@@ -3052,3 +3052,29 @@ faults** and **63.32 billion** preparation cycles. The validation and
 insertion costs exceeded the work saved by hits; the candidate remains
 unmerged in `/tmp/bedrock-amd-globalcache-1012`. Logs and snapshots are
 under ignored `target/boxctl-evidence/amd-globalcache-1012/`.
+
+### Measure execute-fault privilege and test address-half selection
+
+An isolated diagnostic counted global execute faults by guest CS privilege
+level during a full Tempo run. All 262 VMX tests, the in-box SVM suite, and
+the workload passed. Nearest kernel-log snapshots to the transfer markers
+cover about **20.97 million** execute faults: **14.95 million (71.3%)** at
+CPL3 and **6.02 million (28.7%)** at CPL0. The diagnostic adds logging and
+remains unmerged in `/tmp/bedrock-amd-cplprobe-1012`; evidence is under
+ignored `target/boxctl-evidence/amd-cplprobe-1012/`.
+
+A separate candidate admitted predicted and recent hazardous code pages
+only when their linear address had the same high bit as the current page.
+Other pages remained non-executable and faulted normally. All 262 VMX tests,
+the in-box SVM suite, and the full Tempo workload passed, but the candidate
+was slower than the unchanged same-box control:
+
+| Variant | Fair interval | Nested-page faults | Preparation cycles |
+| --- | ---: | ---: | ---: |
+| Same-half selection | 58.324 s | 21,555,208 | 66.15 billion |
+| Unchanged control | **56.028 s** | **20,610,934** | **63.32 billion** |
+
+The filter increased faults by about 944 thousand, so preserving
+cross-half predictions is valuable for this workload. The candidate remains
+unmerged in `/tmp/bedrock-amd-samehalf-1012`; snapshots are under ignored
+`target/boxctl-evidence/amd-samehalf-1012/`.
