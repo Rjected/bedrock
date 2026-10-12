@@ -3282,3 +3282,31 @@ unmerged in `/tmp/bedrock-amd-mask32-one-1012.patch`. Marker snapshots for
 all runs are under ignored `target/boxctl-evidence/amd-maskwrite-1012/`.
 The next optimization must reduce the work of deciding whether a faulting
 page can fit, while keeping the four-register and exact alias-proof checks.
+
+An isolated 32-entry cache then memoized the pure five-to-four breakpoint
+packing result for the bounded one-page policy. Hits compared all five input
+addresses and masks; collisions could only cause a recomputation. All 263 VMX
+tests, the in-box suite, and the full Tempo workload passed, but the cache
+was slower: **54.315 s**, **17,744,552** faults, and **66.06 billion**
+preparation cycles over **25,494,367** exits, versus the preceding uncached
+candidate's **52.904 s**, **17,449,050** faults, and **63.37 billion**
+preparation cycles over **25,081,985** exits. Normalized preparation rose
+from about **2,526 to 2,591 cycles/exit**. It remains unmerged in
+`/tmp/bedrock-amd-maskpack-cache-1012.patch`; marker snapshots are under
+ignored `target/boxctl-evidence/amd-maskpack-cache-1012/`.
+
+Finally, a sampled diagnostic split the bounded policy's candidate loop.
+The nearest kernel-log snapshots to its fair markers (each within about
+0.6 seconds) cover **26.21 million** global-plan calls and **1.10 million**
+sampled optional-page visits. Within the sampled visits, translation lookup
+used **33.9 million** cycles, page-hazard lookup **92.6 million**, singleton
+alias-proof lookup **41.7 million**, and breakpoint packing **58.0 million**.
+The sampled loop total was **366.6 million** cycles; the unlisted remainder
+includes screening, boundary checks, and measurement overhead. Packing is
+roughly **16%** of the sampled loop, so even a free packing operation would
+not close the workload gap. This diagnostic completed in **53.322 s** with
+**17,651,994** faults; its source remains isolated in
+`/tmp/bedrock-amd-maskpack-phase-1012.patch`, and logs and marker snapshots
+are under ignored `target/boxctl-evidence/amd-maskpack-phase-1012/`. Further
+work should attack the repeated fault/entry path or change which code pages
+need traps, rather than only caching breakpoint arithmetic.
