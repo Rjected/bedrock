@@ -2813,3 +2813,67 @@ an end-to-end gain. The change remains unmerged in
 The guest VM state initializes its XCR0 mask to `0x7`, while this EPYC box's
 host XCR0 reads `0x2e7`; the equality shortcut therefore cannot help before
 the guest changes XCR0. This is consistent with its negligible measured gain.
+
+### Probe global-plan reuse and a direct guarded-code proof
+
+An isolated diagnostic counted direct-mapped repeats of the global planner's
+current page, predicted successor, tree/code generations, mapping generation,
+and recent-page context. During the Tempo transfer phase, an exact eight-page
+context repeated on roughly **30%** of eligible calls, while the looser
+page-plus-prediction context repeated on roughly **42%**. The diagnostic
+hashing and counter logs perturb timing, so its **59.447 s** fair interval is
+not a performance baseline. Source is isolated in
+`/tmp/bedrock-amd-planprobe-1012`; logs and marker snapshots are under
+ignored `target/boxctl-evidence/amd-planprobe-1012/`.
+
+A second isolated candidate attached a direct singleton alias-breakpoint
+proof to each recurrent hazardous-code memo that already held an NPT write
+guard. Reuse requires the same CR3 root, guarded mapping, exact hazard
+revision, alias invalidation epoch, and translation-tree generation. A
+focused test covers tree invalidation and host writes; all 263 VMX tests,
+the in-box SVM suite, and three complete Tempo runs passed. A diagnostic
+version served about **77–80%** of transfer-phase breakpoint-collection
+calls directly. Same-box timing did not show a reproducible gain:
+
+| Run order | Proof path | Fair interval | VM exits | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Direct memo, diagnostic counter | 57.678 s | 28,847,349 | 2,254 |
+| 2 | Unchanged control | 55.879 s | 27,892,624 | 2,298 |
+| 3 | Direct memo, safety checks, no counter | 57.459 s | 28,946,980 | 2,257 |
+| 4 | Unchanged control | 58.421 s | 29,436,626 | 2,233 |
+
+The second control had lower normalized preparation cost than either
+candidate. The candidate remains unmerged in `/tmp/bedrock-amd-memoalias-1012`;
+snapshots are under ignored `target/boxctl-evidence/amd-memoalias-1012/`.
+
+### Test precomputed breakpoint packing across code pages
+
+An isolated candidate precomputed a 32-byte, one-merge breakpoint mask when
+constructing a guarded singleton alias proof. It could then admit a predicted
+hazardous page whose breakpoints fit alongside the current page's without
+repeating the expensive alias walk. A focused test, all 263 VMX tests, the
+in-box SVM suite, and a complete Tempo run passed. That run took **57.072 s**
+for **28,069,821 exits**, including **20,471,512 nested-page faults**, with
+about **2,315 preparation cycles/exit**. The adjacent low-exit unchanged
+control had **20,483,686 nested-page faults** and about **2,298 preparation
+cycles/exit**; the extra admission did not reduce faults meaningfully.
+
+A diagnostic run counted breakpoint-slot combinations during the transfer
+phase. Roughly 7.58 million `3+2` page pairs were candidates, but the initial
+one-merge rule admitted only about 0.83 million of them; roughly 3.99 million
+combinations needed more than five slots. We expanded the isolated candidate
+to permit the precomputed incoming proof to join an existing two-page plan.
+The new focused test and all 264 VMX tests and the in-box SVM suite passed.
+Diagnostic counts showed roughly 14 million packed admissions, up from about
+6 million, yet the full Tempo interval took **60.765 s** with **28,848,472
+exits**, **21,142,856 nested-page faults**, and about **2,337 preparation
+cycles/exit**. Debug exits stayed near 47,000. More admitted pages did not
+translate into fewer faults or a faster run. An immediately following unchanged
+control completed in **56.617 s**, with **28,314,144 exits**, **20,791,390
+nested-page faults**, and about **2,265 preparation cycles/exit**. The
+broader candidate had about 351,000 additional nested-page faults and higher
+normalized preparation cost than that control; its diagnostic counters may
+also contribute to the wall-time gap. These candidates remain unmerged
+in `/tmp/bedrock-amd-packfive-1012`; logs and snapshots are under ignored
+`target/boxctl-evidence/amd-packfive-1012/` and
+`target/boxctl-evidence/amd-packmulti-1012/`.
