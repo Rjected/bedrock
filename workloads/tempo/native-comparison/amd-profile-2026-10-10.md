@@ -3155,3 +3155,50 @@ There is no single dominant lookup or miss path: reducing candidate-page
 visits or improving selection quality is more promising than only optimizing
 one lookup. Evidence is under ignored
 `target/boxctl-evidence/amd-canddetail-1012/`; the probe remains unmerged.
+
+### Check whether execute faults concentrate on recent hot pages
+
+An isolated 1-in-64 execute-fault sampler tracked physical code pages on a
+fresh EPYC 4245P box. Its in-box SVM suite, 262 VMX tests, and full fair Tempo
+run passed. The fair interval was **54.078 s**, with **19,181,274 nested-page
+faults**. In 18 complete one-million-fault windows spanning almost all of the
+transfer interval, the hottest one, two, four, and eight pages accounted for
+**11.2%**, **17.0%**, **25.9%**, and **37.5%** of sampled execute faults. Top
+pages changed between startup and transfer, so a cumulative ranking alone
+would have been misleading. Evidence is under ignored
+`target/boxctl-evidence/amd-faultwindow-1012/`.
+
+A follow-up sampled the guest RIP at each selected execute fault and compared
+its virtual page with the planner's eight recent pages. The exact EPT-style
+guest-linear-valid flag is not set on these AMD faults, so an initial run using
+that flag was stopped and discarded. The corrected RIP-based run passed the
+same checks and took **53.012 s**, with **18,788,640 faults**. Across 18 full
+transfer windows, the hottest one, two, four, and eight pages covered
+**11.0%**, **17.1%**, **26.0%**, and **37.6%** of samples. Among those hot-page
+faults, respectively **92.2%**, **90.1%**, **88.8%**, and **86.9%** had their
+virtual RIP page already in the eight-page recent set. Split-page fetches can
+make RIP differ from the faulting fetch page, so these recency rates are
+approximate. Evidence is under ignored
+`target/boxctl-evidence/amd-faultrecent-1012/`; probe source remains isolated
+in `/tmp/bedrock-amd-faulthot-1012`.
+
+An isolated heuristic counted recent-page execute faults with periodic decay,
+then tried the highest-scoring recent page after the existing successor
+prediction and before the normal recent order. Omitted pages remained NX.
+All 262 VMX tests, the in-box suite, and two full Tempo runs passed on the
+same box, with an unchanged control between them:
+
+| Variant | Fair interval | Nested-page faults | Preparation cycles |
+| --- | ---: | ---: | ---: |
+| Hot-page priority | 54.917 s | 19,164,592 | 64.87 billion |
+| Unchanged control | 54.611 s | 19,500,541 | 61.91 billion |
+| Hot-page priority repeat | 53.637 s | 18,711,324 | 63.74 billion |
+
+The two candidate intervals average **54.277 s**, only 0.334 s below the
+single control, while their preparation costs are higher. Fault counts vary
+substantially across runs on this box, so this does not establish a reliable
+end-to-end gain. The candidate remains unmerged in
+`/tmp/bedrock-amd-hotpriority-1012`; snapshots are under ignored
+`target/boxctl-evidence/amd-hotpriority-1012/`. A stronger version would
+need to select hot pages with less work on every VM entry and demonstrate a
+repeatable reduction against alternating controls.
