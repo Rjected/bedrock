@@ -3989,3 +3989,34 @@ VM-entry preparation rose from **51.77** to **52.24 billion cycles**. There
 was no application gain. This variant remains isolated in
 `/tmp/bedrock-amd-two-predict-1012`, with logs under ignored
 `target/boxctl-evidence/amd-twopredict-1012/`.
+
+### Measure the four-breakpoint working-set limit
+
+An isolated one-in-256 diagnostic counted the code pages and hardware
+breakpoint slots in accepted global AMD entries. All 266 VMX library tests,
+the in-box SVM suite, and the exact 10,000-transfer workload passed on the
+same EPYC 4245P HWE 7.0 box as the adjacent **42.328 s** production control.
+The diagnostic fair interval was **42.670 s**, with **16,842,167** NPT faults
+and **1,463,765** synthetic trap exits. Kernel-log snapshots nearest the
+transfer markers span 20 million accepted global entries, yielding 78,125
+sampled plans:
+
+| Executable hazardous pages | 0 slots | 1 slot | 2 slots | 3 slots | 4 slots | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,897 | 327 | 217 | 1,276 | 5,329 | 9,046 |
+| 2 | 0 | 4,284 | 3,678 | 700 | 14,838 | 23,500 |
+| 3 | 0 | 0 | 0 | 482 | 35,720 | 36,202 |
+| 4 | 0 | 0 | 0 | 0 | 9,377 | 9,377 |
+
+**65,264/78,125 plans (83.5%)** used all four slots, while **69,079
+(88.4%)** already admitted at least two hazardous pages. Thus the repeated
+execute faults are not mainly caused by planning only the current page:
+most entries already cover a multi-page working set up to the architectural
+four-breakpoint limit. More cache capacity or simple recent-page reordering
+cannot make a five-slot guard fit. A larger improvement needs to reduce the
+number of simultaneously required exact hazard entries, avoid some
+hazard-page crossings with a sound region proof, or use a different exact
+stopping mechanism. These sampled plan counts do not show which specific
+transition caused each subsequent fault. Diagnostic source remains isolated
+in `/tmp/bedrock-amd-slotdiag-1012`; snapshots and kernel logs are under
+ignored `target/boxctl-evidence/amd-slotdiag-1012/`.
