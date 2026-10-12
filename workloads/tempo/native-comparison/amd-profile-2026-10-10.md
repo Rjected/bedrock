@@ -3811,3 +3811,16 @@ and **48.322 s**. The code-epoch run had 17,804,958 NPT faults and about
 source stays in isolated worktrees rather than the shared branch. Logs and
 fair-marker snapshots are under ignored
 `target/boxctl-evidence/amd-globalcompact-1012/`.
+
+An exact-context full-plan cache then reused a plan only when the current
+virtual page, all eight recent virtual pages, and the predicted successor
+matched its saved context. It also rechecked guarded code, tree generation,
+and NPT mapping generation. All 267 VMX library tests, the in-box SVM suite,
+and 10,000/10,000 transfers passed. NPT faults returned near baseline at
+**17,943,598**, but preparation rose to about **2,810 cycles per exit** and
+the fair interval took **47.622 s**, versus the same-box baseline's 2,680
+cycles per exit and 46.742 s. Context checking costs more than the plans it
+can reuse. The candidate remains isolated in
+`/tmp/bedrock-amd-globalcompact-1012`; its logs and fair-marker snapshots
+share the ignored evidence directory above. The pushed module was restored
+on the box and passed the full in-box SVM suite.
