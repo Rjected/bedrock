@@ -4035,3 +4035,37 @@ likely catches most full-slot plans; this inference needs a direct hit count
 before treating it as proven. The candidate remains isolated in
 `/tmp/bedrock-amd-fullslot-1012`, with marker snapshots under ignored
 `target/boxctl-evidence/amd-fullslot-1012/`.
+
+### Bound global-page candidate search to four recent pages
+
+The earlier fault-rank samples were concentrated at the front of the
+eight-page recent list, while candidate screening was a substantial part
+of global-plan preparation. An isolated variant kept the successor
+prediction first but considered only the four newest recent pages for an
+optional global guard. Older pages remain NX, so a missed transition faults
+and replans before executing code. All 266 VMX library tests, the in-box SVM
+suite, and the exact 10,000-transfer workload passed. The first 4245P box
+gave a **40.784 s** candidate fair interval with **16.538 million** NPT
+faults and **2,421 preparation cycles per exit**, versus its earlier
+**42.328 s** unchanged control with **16.770 million** faults and **2,519
+preparation cycles per exit**.
+
+An alternating candidate/control/candidate series on a *fresh* EPYC 4245P
+HWE 7.0 box then repeated the result. The same pinned guest kernel, initrd,
+10,000-transfer image archive, compose file, seed, and guest RAM were used
+for all three runs:
+
+| Run | Recent candidates | Fair interval | VM exits | NPT faults | Preparation cycles/exit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Candidate A | 4 | **40.619 s** | 20,239,208 | 16,574,469 | **2,402** |
+| Control B | 8 | 42.052 s | 20,471,081 | 16,734,976 | 2,501 |
+| Candidate C | 4 | **41.181 s** | 20,476,964 | 16,778,786 | **2,413** |
+
+Candidate C had nearly the control's exit count and slightly more NPT
+faults, yet still saved about **88 preparation cycles per exit** and **0.87
+s** in the fair interval. The two candidates averaged **40.900 s**, about
+**1.15 s (2.7%)** faster than the adjacent control; a single control and
+natural guest-path variation limit precision. This is a measured gain on
+the Tempo workload, not Intel parity. The four-page limit is retained in
+`prepare_global_into`; marker snapshots and logs are under ignored
+`target/boxctl-evidence/amd-recent4-1012/`.

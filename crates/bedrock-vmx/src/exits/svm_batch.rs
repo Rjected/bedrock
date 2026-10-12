@@ -2334,7 +2334,9 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let predicted = predicted_second_successor(
             &ctx.state().svm_guard, root, recent[1], current_linear,
         ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
-        for previous_linear in predicted.into_iter().chain(recent) {
+        // Older code pages rarely earn their repeated screening cost. An
+        // omitted page remains NX and traps before it can execute.
+        for previous_linear in predicted.into_iter().chain(recent.into_iter().take(4)) {
             if hazard_count >= batch.page_breakpoints.len()
                 || batch.code_page_count == hazards.len()
             {
