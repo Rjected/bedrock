@@ -4018,5 +4018,6 @@ number of simultaneously required exact hazard entries, avoid some
 hazard-page crossings with a sound region proof, or use a different exact
 stopping mechanism. These sampled plan counts do not show which specific
 transition caused each subsequent fault. Diagnostic source remains isolated
-in `/tmp/bedrock-amd-slotdiag-1012`; snapshots and kernel logs are under
-ignored `target/boxctl-evidence/amd-slotdiag-1012/`.
+in `/tmp/bedrock-amd-slotdiag-1012`; its reproducible instrumentation patch
+is `diagnostics/slot-diag.patch`. Snapshots and kernel logs are under ignored
+`target/boxctl-evidence/amd-slotdiag-1012/`.

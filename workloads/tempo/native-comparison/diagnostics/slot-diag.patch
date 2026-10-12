@@ -1,0 +1,39 @@
+diff --git a/crates/bedrock-vmx/src/traits/vm_run.rs b/crates/bedrock-vmx/src/traits/vm_run.rs
+index c572dad..d614205 100644
+--- a/crates/bedrock-vmx/src/traits/vm_run.rs
++++ b/crates/bedrock-vmx/src/traits/vm_run.rs
+@@ -10,6 +10,10 @@ static PENDING_SOFTWARE: AtomicU64 = AtomicU64::new(0);
+ static PENDING_FINISHED: AtomicU64 = AtomicU64::new(0);
+ static PENDING_REARM_AFTER_EXIT: AtomicU64 = AtomicU64::new(0);
+ static SCALAR_LEFT: AtomicU64 = AtomicU64::new(0);
++static SLOT_DIAG_TOTAL: AtomicU64 = AtomicU64::new(0);
++static SLOT_DIAG_BREAKPOINTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
++static SLOT_DIAG_CODE_PAGES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
++static SLOT_DIAG_PAIR: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64::new(0) }; 5] }; 5];
+ 
+ #[cfg(not(feature = "cargo"))]
+ use super::super::prelude::*;
+@@ -545,6 +549,23 @@ where
+         if batch.is_some() && guard.is_none() {
+             batch = None;
+         }
++        if let Some(global) = batch.as_ref().filter(|batch| batch.global_execution) {
++            let n = SLOT_DIAG_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
++            if n & 255 == 0 {
++                let slots = global.page_breakpoint_count.min(4);
++                let pages = global.code_page_count.min(4);
++                SLOT_DIAG_BREAKPOINTS[slots].fetch_add(1, Ordering::Relaxed);
++                SLOT_DIAG_CODE_PAGES[pages].fetch_add(1, Ordering::Relaxed);
++                SLOT_DIAG_PAIR[pages][slots].fetch_add(1, Ordering::Relaxed);
++            }
++            #[cfg(not(feature = "cargo"))]
++            if n % 1_000_000 == 0 {
++                let breakpoints = core::array::from_fn::<_, 5, _>(|i| SLOT_DIAG_BREAKPOINTS[i].load(Ordering::Relaxed));
++                let pages = core::array::from_fn::<_, 5, _>(|i| SLOT_DIAG_CODE_PAGES[i].load(Ordering::Relaxed));
++                let pairs = core::array::from_fn::<_, 5, _>(|i| core::array::from_fn::<_, 5, _>(|j| SLOT_DIAG_PAIR[i][j].load(Ordering::Relaxed)));
++                kernel::pr_info!("SVM_SLOT_DIAG n={} breakpoints={:?} pages={:?} pairs={:?}\n", n, breakpoints, pages, pairs);
++            }
++        }
+         // Protection can reject the batch after the retry decision was made.
+         // In that case the synthetic flag must not reach a scalar entry.
+         if batch.as_ref().is_none_or(|batch| !batch.global_execution) {
