@@ -225,6 +225,9 @@ pub(crate) struct SvmRegionProof {
     pub revision: u64,
     pub page: u64,
     pub linear: u64,
+    /// Every instruction entry reached by the decoded region. A later entry
+    /// at one of these offsets has a subset of the same guarded successors.
+    pub visited: [u8; 512],
     pub breakpoints: [u64; 4],
     pub count: usize,
     pub outgoing: [u64; 16],

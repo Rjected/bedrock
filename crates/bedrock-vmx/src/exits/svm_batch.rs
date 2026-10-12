@@ -2264,6 +2264,16 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         {
             return None;
         }
+        // A five-hazard page needs a masked DR range to fit the four slots.
+        // Decode only the reachable region first: its proof often needs one
+        // exact breakpoint, avoiding harmless #DB exits across the mask.
+        // The proof records every visited instruction start, so later entry
+        // points within the same region reuse it under the same code revision.
+        if hazard.count == 5
+            && collect_reachable_breakpoints(ctx, batch, window.linear).is_some()
+        {
+            return Some(());
+        }
         collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
         if batch.page_breakpoint_count == 0 {
             return None;
@@ -2993,7 +3003,9 @@ fn collect_reachable_breakpoints<C: VmContext>(
         proof.valid
             && proof.revision == revision
             && proof.page == physical
-            && proof.linear == linear
+            && proof.linear & !4095 == linear & !4095
+            && proof.visited[(linear as usize & 4095) >> 3]
+                & (1 << (linear as usize & 7)) != 0
             && proof.outgoing[..proof.outgoing_count]
                 .iter()
                 .all(|&address| {
@@ -3092,6 +3104,7 @@ fn collect_reachable_breakpoints<C: VmContext>(
         revision,
         page: physical,
         linear,
+        visited: seen,
         breakpoints: batch.page_breakpoints,
         count: batch.page_breakpoint_count,
         outgoing,
@@ -6382,6 +6395,29 @@ mod tests {
         for address in [0x1100, 0x1200, 0x1300, 0x9100, 0x9200, 0x9300] {
             assert!(breakpoint_matches(&remapped, address));
         }
+    }
+
+    #[test]
+    fn reachable_region_reuses_only_visited_instruction_entries() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1008] = 0xc3;
+        ctx.memory[0x1100..0x1102].copy_from_slice(&[0xf3, 0xa4]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let mut batch = prepare(&mut ctx, true, true, &window).unwrap();
+        assert!(collect_reachable_breakpoints(&mut ctx, &mut batch, 0x1000).is_some());
+        assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1008]);
+        let cursor = ctx.state().svm_guard.region_cursor;
+
+        let mut interior = batch;
+        assert!(collect_reachable_breakpoints(&mut ctx, &mut interior, 0x1004).is_some());
+        assert_eq!(ctx.state().svm_guard.region_cursor, cursor);
+        assert_eq!(&interior.page_breakpoints[..interior.page_breakpoint_count], &[0x1008]);
+
+        let mut unvisited = batch;
+        assert!(collect_reachable_breakpoints(&mut ctx, &mut unvisited, 0x1100).is_some());
+        assert_ne!(ctx.state().svm_guard.region_cursor, cursor);
+        assert_eq!(&unvisited.page_breakpoints[..unvisited.page_breakpoint_count], &[0x1100]);
     }
 
     #[test]

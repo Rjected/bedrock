@@ -3687,3 +3687,31 @@ the maximum breakpoint-mask width made two library safety tests fail; that
 unvalidated candidate was never loaded. Diagnostic source remains isolated
 in `/tmp/bedrock-amd-repdiag2-1012`, and logs are under ignored
 `target/boxctl-evidence/amd-repdiag2-1012/`.
+
+### Guard only reachable instructions on five-hazard pages
+
+A follow-up low-rate diagnostic applied the existing bounded control-flow
+decoder to 68 sampled entries on that five-hazard page. All 68 produced a
+proof needing at most four exact breakpoints: 52 needed one, 3 needed two,
+6 needed three, and 7 needed four. The diagnostic completed 10,000/10,000
+transfers, but its 53.491 s fair interval includes probe overhead.
+
+For a five-hazard page, the global SVM plan now tries that bounded proof
+before packing all hazards into a wide masked breakpoint. It falls back to
+the existing page-wide proof if the reachable region cannot be proven. A
+cached region proof records each visited instruction start; entries at those
+starts can reuse the same guarded successors under the same code revision,
+while an unvisited entry requires a fresh proof. Outgoing aliases are still
+rechecked. The 263 `bedrock-vmx` library tests and the in-box SVM suite pass.
+
+On the same `box-688c6d68` EPYC 4245P HWE host, alternating candidate,
+control, candidate runs of the pinned 10,000-transfer Tempo workload gave
+**47.316 s, 50.761 s, 47.437 s** for the fair marker interval. All three
+had 10,000 successful transfers and zero failures. Synthetic `mtf` exits
+were 1,564,267, 1,587,002, and 1,557,053 respectively. Total VM exits
+were 22,294,456, 22,469,287, and 22,444,449, so whole-workload exit
+counts also vary. This is an observed ~6.6–6.8% improvement relative to
+the adjacent control, not a claim of general AMD virtualization overhead.
+The historical Intel workload was 24.087 s on different hardware, leaving
+this AMD run about 1.97x slower. Logs and fair-marker exit snapshots are
+under ignored `target/boxctl-evidence/amd-regionproof-1012/`.
