@@ -2768,3 +2768,15 @@ control, but had **442 thousand fewer exits**; preparation was **2,289**
 versus **2,267 cycles/exit**. There is no measured per-entry gain, so that
 variant also remains unmerged in `/tmp/bedrock-amd-pmcstores-1012`.
 Snapshots are under ignored `target/boxctl-evidence/amd-pmcstores-1012/`.
+
+An isolated NPT write-guard variant cached the leaf-table location for each
+recent guest physical page, keyed by EPT mapping generation. It avoids the
+four-level software NPT walk when repeatedly guarding the same page. Its
+focused EPT test and the in-box SVM suite passed, and the full Tempo run
+completed in **57.027 s** with **28,637,174** exits, **21,051,826** nested-page
+faults, and **65.42 billion** preparation cycles (**2,284 cycles/exit**).
+The earlier same-box control took **58.134 s** with **29,200,650** exits and
+**2,267 preparation cycles/exit**. The elapsed-time difference tracks the
+lower exit count; normalized preparation did not improve. The cache is
+unmerged in `/tmp/bedrock-amd-nptleaf-1012`; snapshots are under ignored
+`target/boxctl-evidence/amd-nptleaf-1012/`.
