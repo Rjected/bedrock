@@ -3980,3 +3980,12 @@ the control's **16.770 million**; giving the predictor first choice is useful
 on this workload. The recency-first policy remains isolated in
 `/tmp/bedrock-amd-recent-first-1012`, with logs under ignored
 `target/boxctl-evidence/amd-recentfirst-1012/`.
+
+An additional probe tried the predicted successor's own predicted next page
+before recent pages. It passed all 266 VMX library tests and the in-box SVM
+suite, then completed 10,000 transfers in **42.400 s**. NPT faults were
+**16.731 million**, nearly the unchanged control's **16.770 million**;
+VM-entry preparation rose from **51.77** to **52.24 billion cycles**. There
+was no application gain. This variant remains isolated in
+`/tmp/bedrock-amd-two-predict-1012`, with logs under ignored
+`target/boxctl-evidence/amd-twopredict-1012/`.
