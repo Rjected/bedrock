@@ -676,7 +676,11 @@ where
                     .instruction_counter
                     .record_instructions(count);
             } else {
-                ctx.state_mut().instruction_counter.record_exit(reason);
+                // A software-emulated SYSRET with R11.TF retires one
+                // instruction before reporting its architectural #DB.
+                ctx.state_mut().instruction_counter.record_exit(
+                    if software_exit && reason == 0 { 37 } else { reason },
+                );
             }
         }
         let pre_irq_tsc = rdtsc();

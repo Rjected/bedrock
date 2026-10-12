@@ -1694,11 +1694,6 @@ fn forbidden_page_bytes(bytes: &[u8]) -> bool {
         {
             return true;
         }
-        // SYSRET can restore TF from R11 without an SVM intercept. Preserve
-        // architectural debug-trap accounting by using the scalar backend.
-        if bytes.get(start..start + 2) == Some(&[0x0f, 0x07]) {
-            return true;
-        }
         if !matches!(bytes[start], 0xf2 | 0xf3) {
             continue;
         }
@@ -1921,7 +1916,6 @@ fn hazardous_entry(bytes: &[u8]) -> bool {
             continue;
         }
         return (repeat && matches!(byte, 0xa4..=0xa7 | 0xaa..=0xaf))
-            || bytes[index..].starts_with(&[0x0f, 0x07])
             || (bytes[index..].starts_with(&[0x0f, 0xc7])
                 && bytes.get(index + 2).is_some_and(|&b| b >= 0xf0));
     }
@@ -1968,9 +1962,8 @@ fn page_hazards<C: VmContext>(
             let position = offset as i64 + index as i64 - 16;
             let byte = bytes[index];
             let marker = (byte == 0x0f
-                && (bytes[index..].starts_with(&[0x0f, 0x07])
-                    || (bytes[index..].starts_with(&[0x0f, 0xc7])
-                        && bytes.get(index + 2).is_some_and(|&b| b >= 0xf0))))
+                && bytes[index..].starts_with(&[0x0f, 0xc7])
+                && bytes.get(index + 2).is_some_and(|&b| b >= 0xf0))
                 || (matches!(byte, 0xf2 | 0xf3) && hazardous_entry(&bytes[index..]));
             if position < 0 || position >= 4096 || !marker {
                 continue;
@@ -3145,8 +3138,7 @@ fn hazard_boundary_safe(left: &PageHazards, right: &PageHazards) -> bool {
     // REP prefix chains straddling the boundary need to be checked here.
     let first = right.boundary[0];
     let last = left.boundary[31];
-    if (last == 0x0f && first == 0x07)
-        || (left.boundary[30] == 0x0f && last == 0xc7 && first >= 0xf0)
+    if (left.boundary[30] == 0x0f && last == 0xc7 && first >= 0xf0)
         || (last == 0x0f && first == 0xc7 && right.boundary[1] >= 0xf0)
     {
         return false;
@@ -5356,7 +5348,6 @@ mod tests {
             &[0x0f, 0xc7, 0xf0][..],
             &[0xf3, 0x48, 0xab],
             &[0xf2, 0xa6],
-            &[0x0f, 0x07],
         ] {
             for offset in [0, 254, 255, 256, 4094, 4095] {
                 ctx.memory[0x1000..0x2000].fill(0x90);
@@ -6905,7 +6896,6 @@ mod tests {
             for (bytes, expected) in [
                 (&[0x66, 0x48, 0x0f, 0xc7, 0xf0][..], &[0, 1, 2][..]),
                 (&[0xf3, 0x66, 0x48, 0xa4], &[0]),
-                (&[0x48, 0x0f, 0x07], &[0, 1]),
             ] {
                 ctx.memory[0x1000..0x2000].fill(0x90);
                 ctx.memory[0x1000 + offset..0x1000 + offset + bytes.len()].copy_from_slice(bytes);

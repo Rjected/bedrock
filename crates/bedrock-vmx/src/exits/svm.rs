@@ -475,7 +475,17 @@ pub(crate) fn prepare_instruction_exit<
     ctx.state()
         .vmcs
         .write_natural(VmcsFieldNatural::GuestRflags, flags)?;
-    ctx.state().vmcs.write32(VmcsField32::VmExitReason, 37)?;
+    if operation == 0x07 && flags & (1 << 8) != 0 {
+        // AMD delivers #DB after SYSRET and before the return target runs
+        // when R11 sets TF. Software emulation must report the same boundary.
+        ctx.state().vmcs.write32(VmcsField32::VmExitReason, 0)?;
+        ctx.state().vmcs.write32(
+            VmcsField32::VmExitInterruptionInfo,
+            0x8000_0301, // valid hardware #DB
+        )?;
+    } else {
+        ctx.state().vmcs.write32(VmcsField32::VmExitReason, 37)?;
+    }
     ctx.state()
         .vmcs
         .write_natural(VmcsFieldNatural::ExitQualification, 0)?;

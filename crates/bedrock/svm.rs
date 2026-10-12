@@ -298,9 +298,15 @@ pub(crate) unsafe fn run(
         unsafe { super::vmx_asm::flush_svm_guest_fpu(ctx) };
     }
     if let Some(batch) = batch.filter(|b| b.global_execution) {
+        let guest_debug_trap = code == 0x41
+            && original_tf == 0
+            && v.read(o::RFLAGS, 8) & (1 << 8) != 0
+            && v.read(o::DR6, 8) & (1 << 14) != 0;
         v.write(o::DR7, 8, original_dr7);
-        v.write(o::DR6, 8, original_dr6);
-        v.write(o::RFLAGS, 8, (v.read(o::RFLAGS, 8) & !(1 << 8)) | original_tf);
+        if !guest_debug_trap {
+            v.write(o::DR6, 8, original_dr6);
+            v.write(o::RFLAGS, 8, (v.read(o::RFLAGS, 8) & !(1 << 8)) | original_tf);
+        }
         let count = retired.ok_or_else(|| {
             kernel::pr_err!("SVM global retired unavailable: entry={:#x} rip={:#x} code={:#x} raw={:#x} pmc={:#x} status={:#x}\n", entry_rip, v.read(o::RIP, 8), code, v.read(o::INSTR_RETIRED_CTR, 8), v.read(o::PERF_CTR0, 8), v.read(o::PERF_GLOBAL_STATUS, 8));
             VmEntryError::VmEntryFailed
@@ -317,7 +323,7 @@ pub(crate) unsafe fn run(
         // instruction even when SVM reports the debug exit at its address.
         // Guest TF and DR7 were excluded before entering this gate, so the
         // protected hazard address itself is sufficient to request replay.
-        let hazard_breakpoint = code == 0x41
+        let hazard_breakpoint = code == 0x41 && !guest_debug_trap
             && page_breakpoint_hit(batch, v.read(o::RIP, 8));
         let replay = hazard_breakpoint || (0x20..=0x3f).contains(&code)
             || matches!(code, 0x66 | 0x6a | 0x74);

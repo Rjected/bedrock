@@ -3493,3 +3493,36 @@ replacement for REP entry traps. The unsafe module was not retained. Probe
 source is isolated in `/tmp/bedrock-amd-ibs-guest-probe-1012`, and native
 SIGIO/perf and guest VMCB logs are under ignored
 `target/boxctl-evidence/amd-ibs-rep-1012/`.
+
+### Run SYSRET pages in global AMD counter batches
+
+The page hazard scanner previously treated every `SYSRET` opcode as unsafe
+for global execution. That was conservative because `SYSRET` can restore TF
+from R11. On AMD, a `SYSRET` that sets TF produces #DB **before** the first
+return-target instruction, as specified in the
+[AMD64 APM volume 2](https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2).
+The global gate now distinguishes that guest #DB from its own breakpoint
+boundary, preserves the guest TF and DR6 state, and lets these code pages use
+retired-instruction counter batches. A dedicated hardware transition test
+requires #DB at the target RIP with the target NOP still unexecuted.
+
+The scalar fallback software-emulates SYSRET. It previously delayed this #DB
+until after the target NOP. The emulator now reports #DB at the architectural
+boundary and accounts for the emulated SYSRET as one retired instruction. The
+transition test also passed with global batching temporarily disabled inside
+the test box. All 262 VMX unit tests and the full in-box SVM suite passed with
+the final module.
+
+Same-box EPYC 4245P HWE A/B/A runs of the exact 10,000-transfer workload all
+completed with 10,000 successful and zero failed transfers:
+
+| Run order | Variant | Fair transfer interval | VM exits | NPT faults |
+| --- | --- | ---: | ---: | ---: |
+| 1 | SYSRET global candidate | 46.774 s | 22,919,577 | 16,865,323 |
+| 2 | Unchanged branch | 53.388 s | 26,489,127 | 19,646,023 |
+| 3 | Final SYSRET change | 46.014 s | 22,658,539 | 16,648,651 |
+
+The final run is **7.374 s (13.8%) faster** than the same-box control, while
+still well behind the historical Intel Bedrock **24.087 s** comparison. Full
+logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-sysret-1012/`.

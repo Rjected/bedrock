@@ -3,6 +3,9 @@
 use bedrock_vm::{Cr3, Efer, Gdtr, Idtr, RdrandConfig, Regs, SegmentRegister, Vm};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("SVM_CASE").as_deref() == Ok("sysret-tf") {
+        return test_sysret_restores_guest_tf();
+    }
     if std::env::var("SVM_CASE").as_deref() == Ok("rep-pmu-probe") {
         return test_rep_pmu_deadline();
     }
@@ -31,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_mov_ss_deadline()?;
     test_syscall(false)?;
     test_syscall(true)?;
+    test_sysret_restores_guest_tf()?;
     test_interrupt()?;
     test_iret()?;
     test_page_fault()?;
@@ -43,6 +47,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_masked_breakpoints()?;
     test_fpu_reservation()?;
     Ok(())
+}
+
+fn test_sysret_restores_guest_tf() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    let mut code = Vec::new();
+    code.push(0xb9); code.extend(0xc0000081u32.to_le_bytes()); // STAR MSR
+    code.push(0xb8); code.extend(0u32.to_le_bytes());
+    code.push(0xba); code.extend(0x00200010u32.to_le_bytes());
+    code.extend([0x0f, 0x30]); // WRMSR
+    code.push(0xb9); code.extend(0x7000u32.to_le_bytes()); // return RIP
+    code.extend([0x41, 0xbb]); code.extend(0x302u32.to_le_bytes()); // R11: TF, IF
+    code.extend([0x48, 0x0f, 0x07]); // SYSRETQ
+    memory[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    memory[0x7000..0x7009].copy_from_slice(&[
+        0x90, // Guest #DB must arrive before this instruction.
+        0x48, 0xff, 0xc3, // INC RBX.
+        0x31, 0xc0, 0x0f, 0x01, 0xd9, // shutdown.
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.extended_control.efer = Efer::new(regs.extended_control.efer.bits() | 1);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    vm.set_regs(&regs)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        let r = vm.get_regs()?;
+        println!("SVM_SYSRET_TF_PROBE reason={} vt={} rip={:#x} rbx={} flags={:#x} exits={}",
+            exit.exit_reason, exit.emulated_tsc, r.rip, r.gprs.rbx, r.rflags,
+            vm.get_exit_stats()?.total_exit_count());
+        assert_eq!(exit.exit_reason, 0, "guest #DB did not reach userspace");
+        assert_eq!(r.rip, 0x7000, "guest #DB followed the wrong instruction");
+        assert_eq!(r.gprs.rbx, 0);
+        assert_ne!(r.rflags & (1 << 8), 0);
+        let mut resumed = r;
+        resumed.rflags &= !(1 << 8);
+        vm.set_regs(&resumed)?;
+        break;
+    }
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 258);
+        assert_eq!(vm.get_regs()?.gprs.rbx, 1);
+        println!("SVM_SYSRET_TF_PASS");
+        return Ok(());
+    }
 }
 
 fn test_fpu_reservation() -> Result<(), Box<dyn std::error::Error>> {
