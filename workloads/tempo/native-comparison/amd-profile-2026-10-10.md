@@ -4211,10 +4211,13 @@ proof has usually needed fewer exact slots on that page. Combining three
 hazards into one 1 KiB range might release another slot for a second page,
 but would enlarge the range of harmless #DB exits; earlier 32-byte packing
 and slot-based admission increased planning cost enough to erase their fault
-savings. The profile's 28 of 69 sampled synthetic exits on the hot page is
-40.6%, not the suggested 66.8%, and those synthetic exits include masked
-breakpoint hits rather than only hardware trap-flag steps. This idea remains
-an untested tradeoff, not an obvious missing correctness fix.
+savings. An earlier diagnostic found 1,230 of 1,840 sampled trap-flag exits
+(66.8%) on this page. A later byte-identified diagnostic, after further
+planner changes, found 28 of 69 sampled synthetic exits (40.6%) there.
+Those samples have different denominators and code versions; the later
+synthetic exits also include masked breakpoint hits rather than only
+hardware trap-flag steps. The proposed mask remains an untested tradeoff,
+not an obvious missing correctness fix.
 
 The recommended 200,000-instruction forced-preemption test is useful, but its
 proposed mechanism is wrong for the current DST implementation. Forced
