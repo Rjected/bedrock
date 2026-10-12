@@ -3912,3 +3912,37 @@ rank alone therefore overstates candidates for admitting the faulted page
 into the current global guard. Even among the matching cases, the planner's
 boundary and translation checks still need to be classified before making
 a change. This was another one-in-64 diagnostic, not an optimized build.
+
+### Count alias-proof work in the complete transfer phase
+
+On a fresh EPYC 4245P box, a diagnostic counter build completed all 10,000
+transfers in **42.200 s**. The nearest million-call snapshots around the fair
+markers span 17 million `collect_page_breakpoints` calls: **16,950,670
+cache hits (99.71%)** and **49,330 full alias walks (0.29%)**. All walks in
+that interval succeeded, with no breakpoint, workspace, or read failures.
+The cache is therefore doing its job; the repeated lookup and global-plan
+work, along with roughly 17 million NPT execute faults, are the remaining
+plausible costs. A follow-up samples host TSC cycles inside these entry-path
+functions to quantify their share before changing them. The diagnostic
+source is isolated in `/tmp/bedrock-amd-collectstats-1012`; copied logs are
+under ignored `target/boxctl-evidence/amd-collectstats-1012/`.
+
+Two production-module `perf` attempts on the previous box did not yield a
+usable function profile. Hardware `cycles:k` produced only four samples
+while the guest PMU was active. Software `cpu-clock` produced about 2,000
+samples, but almost all landed at the module's interrupt-enable boundary,
+where the software timer becomes deliverable. Both runs completed the
+10,000-transfer workload in **41.376 s** and **42.483 s** respectively;
+neither sampled distribution is evidence of the hot function.
+
+A one-in-256 host-TSC timer on the same replacement box completed the full
+workload in **42.055 s**. Nearest fair-marker snapshots show **20.98 million**
+global-plan preparation calls, averaging about **1,279 host cycles** in
+81,948 samples. That is an estimated **26.8 billion cycles** in the preparation
+function, including alias-proof collection, versus **51.1 billion** measured
+VM-entry preparation cycles for the interval. Within collection, 66,213
+sampled cache hits averaged **103 cycles**; 194 sampled misses averaged
+**127,082 cycles**. The snapshots include **16.95 million hits** and **52,398
+walks**. The expensive walks are rare, but their estimated aggregate cost is
+around **6.7 billion cycles**; speeding them up could save a couple of host
+seconds. These are sampled estimates, not a controlled speedup measurement.
