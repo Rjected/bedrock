@@ -4069,3 +4069,24 @@ natural guest-path variation limit precision. This is a measured gain on
 the Tempo workload, not Intel parity. The four-page limit is retained in
 `prepare_global_into`; marker snapshots and logs are under ignored
 `target/boxctl-evidence/amd-recent4-1012/`.
+
+A two-recent-page variant failed two existing planner coverage tests: it
+could no longer guard the three- and four-hazardous-page cases those tests
+require. It was not loaded. A five-recent-page variant passed all 266 library
+tests, the in-box suite, and two full Tempo runs on the same second box.
+Alternating the retained four-page module and five-page candidate gave:
+
+| Order | Recent candidates | Fair interval | VM exits | NPT faults | Preparation cycles/exit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| C | 4 | 41.181 s | 20,476,964 | 16,778,786 | 2,413 |
+| D | 5 | 40.458 s | 19,821,062 | 16,214,828 | 2,490 |
+| E | 4 | 41.538 s | 20,534,909 | 16,797,063 | 2,426 |
+| F | 5 | 41.439 s | 20,383,869 | 16,663,587 | 2,463 |
+
+Five pages sometimes admitted enough code to reduce exits, but its two
+runs spent **37–77 more preparation cycles per exit** than adjacent
+four-page runs. The five-page elapsed results straddle the earlier four-page
+results, so this small sample does not establish a better end-to-end policy.
+The proven four-page improvement remains retained. Five-page source is
+isolated in `/tmp/bedrock-amd-recent5-1012`; snapshots and logs are under
+ignored `target/boxctl-evidence/amd-recent5-1012/`.
