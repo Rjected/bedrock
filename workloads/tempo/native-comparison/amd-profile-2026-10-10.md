@@ -3114,3 +3114,17 @@ snapshots and phase logs are under ignored
 `target/boxctl-evidence/amd-phaseprobe-1012/`. The next diagnostic should
 split the planner into global-plan proof, scalar fallback, and window decode
 costs before changing admission policy again.
+
+The follow-up isolated split probe passed all 262 VMX tests, the in-box SVM
+suite, and the full Tempo workload. Its fair transfer interval was **58.267
+s**, with **21,149,579 nested-page faults** and **67.03 billion** VM-entry
+preparation cycles. Kernel-log snapshots 56.85 seconds apart near the fair
+markers show **28.31 million** global-plan attempts, of which **27.05
+million (95.5%)** succeeded. The attempted global plans cost **34.61
+billion** TSC cycles; full-window decode after failures cost only **0.036
+billion**, and fallback batch planning cost **2.97 billion**. These buckets
+account for nearly all of the earlier measured planning cost. Optimizing
+successful `prepare_global_into` calls is the immediate target; removing
+scalar fallback or speeding decode cannot account for a large workload gain.
+The probe remains unmerged in `/tmp/bedrock-amd-plansplit-1012`; snapshots
+and kernel logs are under ignored `target/boxctl-evidence/amd-plansplit-1012/`.
