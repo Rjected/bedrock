@@ -2810,3 +2810,6 @@ runner reduction was offset by preparation variation and did not establish
 an end-to-end gain. The change remains unmerged in
 `/tmp/bedrock-amd-xcr0equal-1012`; snapshots are under ignored
 `target/boxctl-evidence/amd-xcr0equal-1012/`.
+The guest VM state initializes its XCR0 mask to `0x7`, while this EPYC box's
+host XCR0 reads `0x2e7`; the equality shortcut therefore cannot help before
+the guest changes XCR0. This is consistent with its negligible measured gain.
