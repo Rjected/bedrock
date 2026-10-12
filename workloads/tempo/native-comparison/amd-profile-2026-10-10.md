@@ -2577,3 +2577,32 @@ does not support a general strategy of making hazardous pages free to execute
 by replacing the whole-page scan with this proof. The diagnostic remains
 isolated in `/tmp/bedrock-amd-reachdiag-1011`; logs and markers are under
 ignored `target/boxctl-evidence/amd-reachdiag-1012/`.
+
+### Rotate AMD ASIDs instead of flushing the TLB on every VM entry
+
+The VMCB previously kept `TLB_CONTROL=3`, requesting an ASID flush on every
+entry. The HWE 7.0.0-38 EPYC 4245P box now assigns a fresh per-CPU guest ASID
+for each entry and requests a full flush only when the ASID range wraps. This
+preserves isolation from stale nested-page permissions without flushing on
+every guarded instruction fetch. An invalid VMRUN resets the allocator so a
+possibly unperformed wrap flush is retried. The full in-box SVM suite passed
+with the candidate, including exact deadlines, replay, and masked breakpoints.
+
+Two alternating same-box Tempo comparisons completed all 10,000 transfers:
+
+| Run order | TLB policy | Fair interval | VM exits | VM runner and guest cycles/exit |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Rotating ASID | 55.815 s | 27,846,220 | 4,830 |
+| 2 | Per-entry flush | 58.645 s | 28,987,356 | 4,875 |
+| 3 | Rotating ASID | 57.981 s | 28,854,285 | 4,825 |
+| 4 | Per-entry flush | 57.850 s | 28,619,841 | 4,881 |
+
+The candidate averaged **56.898 s** versus **58.247 s** for the control,
+about **2.3%** faster, but the second pair is essentially tied in elapsed
+time. The measured VM-runner cycles per exit fell by roughly **1%** in both
+pairs. The larger first-pair elapsed-time gain mostly coincided with fewer
+guarded fetches, so the expected Tempo benefit is modest and variable. The
+focused `svm_bench` also passed; it measured about 19.1 million instructions/s
+with rotating ASIDs versus 13.2 million with per-entry flushing in one suite
+pass. Marker snapshots are under ignored
+`target/boxctl-evidence/amd-asidrotate-1012/`.
