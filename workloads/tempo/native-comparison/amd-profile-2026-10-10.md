@@ -3970,3 +3970,13 @@ preparation cycles moved from **50.73 billion** to **54.21 billion** across
 those two runs, versus **51.77 billion** for the control. A larger cache
 did not yield a repeatable application gain, so this 1.6 MiB-per-VM
 expansion remains isolated in `/tmp/bedrock-amd-alias-capacity-1012`.
+
+A recency-first page-selection probe moved the predicted successor behind
+the eight recent virtual pages when filling a four-breakpoint global plan.
+It passed all 266 VMX library tests and the in-box SVM suite, then completed
+all 10,000 transfers in **42.643 s**. The same-box unchanged control took
+**42.328 s**. The candidate caused **17.485 million** NPT faults, up from
+the control's **16.770 million**; giving the predictor first choice is useful
+on this workload. The recency-first policy remains isolated in
+`/tmp/bedrock-amd-recent-first-1012`, with logs under ignored
+`target/boxctl-evidence/amd-recentfirst-1012/`.
