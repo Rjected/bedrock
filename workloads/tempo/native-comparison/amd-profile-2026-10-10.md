@@ -4326,3 +4326,27 @@ under ignored `target/boxctl-evidence/amd-plan-outcomes-1012/`.
 
 The unchanged production module was restored on the box afterward and the
 full in-box SVM suite passed.
+
+### Remove unused SVM profiling atomics in an isolated build
+
+The production `svm_batch.rs` still contained 39 write-only profiling
+atomics, including two relaxed increments on most current-page breakpoint
+proof calls. An isolated build removed those atomics and the now-empty
+diagnostic branches without changing planning decisions. All 267 VMX tests,
+the in-box SVM suite, and two complete 10,000-transfer Tempo runs passed.
+On the same EPYC 4245P HWE box:
+
+| Order | Variant | Fair interval | VM exits | NPT faults | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | No profiling atomics | 40.404 s | 20,084,192 | 16,684,849 | 2,380 |
+| 2 | Unchanged control | 40.640 s | 20,134,989 | 16,725,817 | 2,367 |
+| 3 | No profiling atomics | 40.456 s | 20,140,356 | 16,729,961 | 2,365 |
+
+The nearly identical exit counts in the final pair make its 0.184-second
+candidate lead a useful bound, but the measured preparation difference was
+only about two cycles per exit. The first candidate had *higher* normalized
+preparation cost than the control. The edit does not demonstrate a meaningful
+Tempo speedup and remains isolated in `/tmp/bedrock-amd-no-counters-1012`.
+Fair-marker JSON is under ignored
+`target/boxctl-evidence/amd-no-counters-1012/`. The production module was
+restored on the box and passed the in-box SVM suite afterward.
