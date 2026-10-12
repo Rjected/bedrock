@@ -3526,3 +3526,25 @@ The final run is **7.374 s (13.8%) faster** than the same-box control, while
 still well behind the historical Intel Bedrock **24.087 s** comparison. Full
 logs and marker snapshots are under ignored
 `target/boxctl-evidence/amd-sysret-1012/`.
+
+### Locate the remaining AMD trap exits after SYSRET acceleration
+
+A temporary diagnostic sampled every 2,048th trap-flag exit, including its
+next RIP, four code bytes, CR3, and scalar-replay qualification. The in-box
+SVM suite and complete 10,000-transfer workload passed. Its fair interval
+was **63.387 s**, versus **46.014 s** without sampling; guest-memory reads
+and kernel logging make this run unsuitable as a speed comparison. The fair
+interval recorded **3,769,318** trap-flag exits and **16,658,135** NPT faults.
+
+All **1,840** expected transfer-phase trap samples were retained. **1,230
+(66.8%)** had a RIP in one userspace 4 KiB page (`0x556f5ecd2000`, CR3
+`0x102a15000` in this seeded run). The sampled RIPs span offsets `0x3e7` to
+`0x6f8` rather than one instruction; the same page has sampled `REP MOVSQ`
+entries at offsets `0x3e7` and `0x5f4`. Of its samples, **633** carried the
+synthetic scalar-replay qualification and **595** had ordinary qualification.
+This points to repeated scalar traversal of a REP-containing hot code page as
+the next high-value target. The REP entries still require exact accounting;
+simply removing their guards was already shown to undercount. The diagnostic
+module was removed and the tested module restored. Source is isolated in
+`/tmp/bedrock-amd-mtf-after-sysret-1012`; logs and marker snapshots are under
+ignored `target/boxctl-evidence/amd-mtf-after-sysret-1012/`.
