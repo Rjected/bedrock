@@ -79,11 +79,16 @@ pub fn handle_cpuid<C: VmContext>(ctx: &mut C) -> ExitHandlerResult {
         }
         0x7 => {
             if subleaf == 0 {
-                // EBX: pass through fsgsbase(0), bmi1(3), avx2(5), bmi2(8),
-                // erms(9); clear unsupported features.
+                // EBX: pass through fsgsbase(0), bmi1(3), avx2(5), bmi2(8);
+                // clear unsupported features and AMD's optional ERMS path.
                 ebx &= !(1 << 2); // SGX - not supported
                 ebx &= !(1 << 4); // HLE (TSX) - not supported
                 ebx &= !(1 << 7); // SMEP - requires CR4.SMEP handling
+                if C::V::uses_nested_paging() {
+                    // Steer optional AMD guest copies away from REP. Embedded
+                    // REP sites still need exact instruction-entry guards.
+                    ebx &= !(1 << 9); // ERMS
+                }
                                   // Bit 10 (INVPCID) passed through - enabled via ENABLE_INVPCID control
                 ebx &= !(1 << 11); // RTM (TSX) - not supported
                 ebx &= !(1 << 16); // AVX512F - not supported (requires extended XSAVE)

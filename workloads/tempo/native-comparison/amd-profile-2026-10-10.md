@@ -4123,3 +4123,38 @@ Its average **40.414 s** interval was about **1.04 s (2.5%)** below the
 adjacent control. Exit counts also varied, so the normalized preparation
 cost is the clearest evidence of this cache's direct effect. This remains
 far from the historical Intel 24.087 s workload timing.
+
+### Hide AMD guest ERMS to reduce optional REP entries
+
+The shared CPUID handler passed host ERMS (leaf 7, subleaf 0, EBX bit 9) to
+both guests. It already clears leaf 7 EDX, including FSRM. On AMD the guest
+now sees ERMS clear, so Linux and CPUID-dispatched user libraries can choose
+copy routines with fewer REP entries. Intel guest CPUID remains unchanged.
+
+The exact hot user page with `REP MOVSQ` at offsets `0x3e7` and `0x5f4`
+belongs to `/usr/local/bin/tempo` in the pinned `tempo-localnet` image: its
+ELF file has the corresponding bytes at offsets `0x7a9a3e7` and
+`0x7a9a5f4`. These are embedded in the application executable, rather than
+the Alpine/musl check image. Hiding ERMS cannot remove their bytes from the
+page. The guest kernel's `memcpy` likewise has an ERMS `rep movsb` path and a
+non-REP fallback on the same code page; its unused REP bytes still need a sound
+guard unless the reachable-region proof excludes them.
+
+An alternating ERMS-hidden/control/hidden/control series used the same
+EPYC 4245P HWE 7.0 box, pinned guest and images, seed, 10,000 transfers,
+CPU affinity, and fair markers. All four runs passed:
+
+| Order | Guest ERMS | Fair interval | VM exits | NPT faults | Synthetic trap exits | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| A | Hidden | 41.050 s | 20,598,121 | 17,117,876 | 1,194,335 | 2,313 |
+| B | Exposed | 41.464 s | 20,741,500 | 16,973,824 | 1,487,062 | 2,350 |
+| C | Hidden | 39.491 s | 19,649,458 | 16,327,837 | 1,173,673 | 2,365 |
+| D | Exposed | 40.534 s | 20,323,836 | 16,655,451 | 1,457,163 | 2,337 |
+
+Hiding ERMS reduced synthetic trap exits by about 20% in both comparisons.
+The two hidden runs averaged **40.270 s** versus **40.999 s** for exposed,
+about **0.73 s (1.8%)** faster. NPT fault and total-exit counts varied, so
+this is a modest workload-specific result rather than a precise CPUID speedup
+or a route to the Intel 24.087 s interval. The mask is retained on AMD;
+marker snapshots are under ignored `target/boxctl-evidence/amd-erms-1012/`.
+The 267 local VMX tests and the in-box SVM suite passed with the mask.
