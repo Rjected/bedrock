@@ -3662,3 +3662,28 @@ restored and passed the in-box suite. Sources remain isolated in
 `/tmp/bedrock-amd-nptleafcache-1012` and
 `/tmp/bedrock-amd-nptleafcache-hot-1012`; logs and marker snapshots are under
 ignored `target/boxctl-evidence/amd-nptleaf-1012/`.
+
+### Identify the hot REP page's breakpoint cost
+
+A low-rate, byte-identified REP diagnostic completed the full workload with
+10,000 successful and zero failed transfers. Logging raised the fair interval
+to **53.668 s**, so this is profiling evidence rather than a speed result.
+The fair-marker timestamps delimit 69 sampled synthetic `MonitorTrapFlag`
+exits; **28** selected the same user code page. That page contained both
+`REP MOVSQ` sites at offsets `0x3e7` and `0x5f4`. Its guarded hazard proof
+reported **five** unsafe offsets: `0x3e7`, `0x4c5`, `0x5f4`, `0x7ae`, and
+`0x81b`. The gate was ready and clean at sampled REP entries, with a generous
+instruction budget. Thus the repeated scalar behavior does not come from a
+dirty translation gate or an unavailable AMD retired-instruction counter.
+
+Many sampled exits on that page had qualification `0x5000...`, the synthetic
+page-execution boundary plus breakpoint-replay bits. They are **not** all
+hardware trap-flag steps: the global plan packs five hazards into four AMD
+breakpoints by masking a range, and ordinary instructions in that range can
+exit as harmless breakpoint hits. The earlier trap-exit sample described the
+symptom but conflated these synthetic exits with actual single-stepping.
+This is a concrete target for reducing exit volume, although simply lowering
+the maximum breakpoint-mask width made two library safety tests fail; that
+unvalidated candidate was never loaded. Diagnostic source remains isolated
+in `/tmp/bedrock-amd-repdiag2-1012`, and logs are under ignored
+`target/boxctl-evidence/amd-repdiag2-1012/`.
