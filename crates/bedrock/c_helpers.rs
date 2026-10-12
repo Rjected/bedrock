@@ -52,6 +52,8 @@ extern "C" {
     pub(crate) fn bedrock_svm_enable() -> i32;
     pub(crate) fn bedrock_svm_disable();
     pub(crate) fn bedrock_svm_host_vmcb() -> u64;
+    pub(crate) fn bedrock_svm_next_asid() -> u64;
+    pub(crate) fn bedrock_svm_reset_asids();
     pub(crate) fn bedrock_svm_alloc_bitmap(order: u32) -> *mut core::ffi::c_void;
     pub(crate) fn bedrock_svm_free_bitmap(ptr: *mut core::ffi::c_void, order: u32);
     pub(crate) fn bedrock_svm_bitmap_phys(ptr: *mut core::ffi::c_void) -> u64;

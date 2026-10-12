@@ -251,11 +251,19 @@ pub(crate) unsafe fn run(
             counter.allow_native_pushf(v);
         }
     }
+    let asid = unsafe { c_helpers::bedrock_svm_next_asid() };
+    v.write(o::ASID, 4, asid as u32 as u64);
+    v.write(o::TLB_CONTROL, 1, asid >> 32);
     unsafe {
         // Pass the virtual pointer as well as the physical address: VMRUN
         // modifies this allocation, which the compiler must see at the FFI
         // boundary. Assembly also reads the virtual VMCB's breakpoint state.
         svm_run_guest(ctx, pa, host_pa, breakpoints.as_ptr(), v);
+    }
+    // An invalid VMRUN may leave the requested wrap flush unperformed.
+    // Repeat a full flush before reusing any ASID on this CPU.
+    if (v.read(o::EXIT_CODE, 8) as i64) < 0 {
+        unsafe { c_helpers::bedrock_svm_reset_asids() };
     }
     if let Some(virt_ext) = uncounted_virt_ext {
         v.write(o::VIRT_EXT, 8, virt_ext);

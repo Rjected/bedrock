@@ -64,6 +64,8 @@ struct bedrock_svm_cpu {
     unsigned long hsave;
     unsigned long host_vmcb;
     u64 saved_efer;
+    u32 next_asid;
+    u32 asid_count;
 };
 static DEFINE_PER_CPU(struct bedrock_svm_cpu, bedrock_pcpu_svm);
 static DEFINE_PER_CPU(struct perf_event *, bedrock_svm_counter);
@@ -152,6 +154,7 @@ int bedrock_svm_pmu_read(u64 *value)
 int bedrock_svm_enable(void)
 {
     struct bedrock_svm_cpu *s = this_cpu_ptr(&bedrock_pcpu_svm);
+    u32 eax, ebx, ecx, edx;
     u64 vm_cr;
     if (rdmsrq_safe(0xc0010114, &vm_cr) || (vm_cr & (1ULL << 4)))
         return -EOPNOTSUPP;
@@ -168,6 +171,9 @@ int bedrock_svm_enable(void)
     }
     wrmsrl(MSR_EFER, s->saved_efer | EFER_SVME);
     wrmsrl(0xc0010117, virt_to_phys((void *)s->hsave));
+    cpuid(0x8000000a, &eax, &ebx, &ecx, &edx);
+    s->asid_count = max(ebx, 2u);
+    s->next_asid = 0;
     return 0;
 }
 
@@ -185,6 +191,22 @@ void bedrock_svm_disable(void)
 u64 bedrock_svm_host_vmcb(void)
 {
     return virt_to_phys((void *)this_cpu_ptr(&bedrock_pcpu_svm)->host_vmcb);
+}
+
+/* A fresh per-CPU ASID isolates each entry from NPT permissions left in the
+ * TLB by earlier entries. ASID zero belongs to the host. Flush all ASIDs on
+ * the first entry and before reusing ASID 1 after a full cycle. */
+u64 bedrock_svm_next_asid(void)
+{
+    struct bedrock_svm_cpu *s = this_cpu_ptr(&bedrock_pcpu_svm);
+    bool flush = !s->next_asid || s->next_asid >= s->asid_count - 1;
+    s->next_asid = flush ? 1 : s->next_asid + 1;
+    return ((u64)flush << 32) | s->next_asid;
+}
+
+void bedrock_svm_reset_asids(void)
+{
+    this_cpu_ptr(&bedrock_pcpu_svm)->next_asid = 0;
 }
 
 /* SVM requires contiguous 8KB MSRPM and 12KB IOPM buffers. */
