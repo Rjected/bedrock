@@ -3202,3 +3202,46 @@ end-to-end gain. The candidate remains unmerged in
 `target/boxctl-evidence/amd-hotpriority-1012/`. A stronger version would
 need to select hot pages with less work on every VM entry and demonstrate a
 repeatable reduction against alternating controls.
+
+A cached-choice variant avoided rescanning all eight recent pages on every
+entry. It passed the in-box SVM suite and full Tempo workload but took
+**54.939 s**, with **19,135,192 nested-page faults** and **64.37 billion**
+preparation cycles. The adjacent unchanged control took **53.313 s**, with
+**18,901,008 faults** and **59.93 billion** preparation cycles. This variant
+regressed and remains isolated in `/tmp/bedrock-amd-hotcached-1012`; evidence
+is under ignored `target/boxctl-evidence/amd-hotcached-1012/`.
+
+A separate singleton alias-proof shortcut bypassed the general breakpoint
+collector for the current hazardous page when its exact cached singleton proof
+was valid. All 262 VMX tests, the in-box suite, and full Tempo workload passed.
+Its fair interval was **54.426 s**, with **19,243,915 faults** and **61.34
+billion** preparation cycles over **26,905,894 exits** (about **2,279 cycles
+per exit**). The adjacent unchanged control took **55.104 s**, with
+**19,463,112 faults** and **62.29 billion** preparation cycles over
+**27,205,078 exits** (about **2,290 cycles per exit**). An earlier unchanged
+control on the same box was **2,265 preparation cycles per exit**. The shortcut
+has at most a small signal against variable fault counts and no reproducible
+workload gain; it remains unmerged in `/tmp/bedrock-amd-singleproof-fast-1012`.
+Evidence is under ignored `target/boxctl-evidence/amd-singleproof-fast-1012/`.
+
+### Test SVM ASID reuse when nested translations are unchanged
+
+The kernel backend normally assigns a fresh ASID on every VM entry. An
+isolated candidate tracked every software NPT mapping or permission mutation
+and reused the previous ASID only while the VMCB identity and NPT mutation
+generation matched, resetting reuse at each `VM_RUN` boundary. A focused EPT
+generation test, all 262 VMX tests, the in-box SVM suite, and three complete
+Tempo runs passed. On one EPYC 4245P box, the corrected candidate took
+**53.288 s** and **53.547 s** for the fair transfer interval, with
+**18,955,012** and **19,006,203** nested-page faults. The unchanged run
+between them took **54.975 s** with **19,406,864** faults. The candidate's
+lower wall times mostly follow its lower fault totals: VM runner and guest
+cycles per exit were about **4,839** and **4,856**, versus **4,873** for the
+control. That sub-1% normalized difference is too small to establish a
+substantial Tempo gain. An initial candidate run before the VMCB identity was
+added took **54.404 s** with **19,187,931** faults. The short `svm_bench`
+improved in repeated candidate runs, but an adjacent control varied enough
+to make its gain uncertain. The candidate remains unmerged in
+`/tmp/bedrock-amd-asid-reuse-1012.patch`; marker snapshots are under ignored
+`target/boxctl-evidence/amd-asid-reuse-1012/`. This path cannot close the
+roughly twofold Tempo gap while page faults dominate VM exits.
