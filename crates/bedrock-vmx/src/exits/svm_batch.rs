@@ -816,6 +816,7 @@ fn restore_global_table_guards<C: VmContext, A: CowAllocator<C::CowPage>>(
     }
     let guard = &mut ctx.state_mut().svm_guard;
     guard.retained_guard_count = 0;
+    guard.leaf_filter_cache_pages.fill(0);
     guard.gate_count = 0;
     guard.gate_table_index_valid = false;
     guard.gate_ready = false;
@@ -1339,6 +1340,7 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
         return false;
     };
     let saved = ctx.state().svm_guard.retained_guards[index];
+    ctx.state_mut().svm_guard.invalidate_leaf_filter(page);
     saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
     ctx.state_mut().svm_guard.retained_guards[index].valid = false;
     let count = ctx.state().svm_guard.gate_count;
@@ -2924,6 +2926,21 @@ fn collect_page_breakpoints<C: VmContext>(
             None
         };
         if let Some(index) = leaf_slot {
+            if !ctx.state().svm_guard.gate_leaf_filter_valid[index] {
+                let slot = super::super::vm_state::SvmGuardScratch::leaf_filter_cache_slot(walk.table);
+                let guard = &ctx.state().svm_guard;
+                if guard.leaf_filter_cache_pages[slot] == walk.table.wrapping_add(1)
+                    && guard.leaf_filter_cache_generations[slot]
+                        == ctx.state().ept.mapping_generation()
+                {
+                    let filter = guard.leaf_filter_cache_values[slot];
+                    let guard = &mut ctx.state_mut().svm_guard;
+                    guard.gate_leaf_filters[index] = filter;
+                    guard.gate_leaf_filter_valid[index] = true;
+                }
+            }
+        }
+        if let Some(index) = leaf_slot {
             let guard = &ctx.state().svm_guard;
             if guard.gate_leaf_filter_valid[index]
                 && if precompute_probes {
@@ -2972,9 +2989,14 @@ fn collect_page_breakpoints<C: VmContext>(
             }
         }
         if let Some(index) = leaf_slot {
+            let slot = super::super::vm_state::SvmGuardScratch::leaf_filter_cache_slot(walk.table);
+            let generation = ctx.state().ept.mapping_generation();
             let guard = &mut ctx.state_mut().svm_guard;
             guard.gate_leaf_filters[index] = leaf_filter;
             guard.gate_leaf_filter_valid[index] = true;
+            guard.leaf_filter_cache_pages[slot] = walk.table.wrapping_add(1);
+            guard.leaf_filter_cache_generations[slot] = generation;
+            guard.leaf_filter_cache_values[slot] = leaf_filter;
         }
         cursor += 1;
     }
@@ -6017,10 +6039,13 @@ mod tests {
             .find(|&index| ctx.state().svm_guard.gate_levels[index] == 1)
             .unwrap();
         let page = ctx.state().svm_guard.gate_tables[leaf];
+        let filter_slot = super::super::super::vm_state::SvmGuardScratch::leaf_filter_cache_slot(page);
+        ctx.state_mut().svm_guard.leaf_filter_cache_pages[filter_slot] = page + 1;
         ctx.state_mut().svm_guard.alias_proofs[0].valid = true;
         ctx.state_mut().svm_guard.alias_proofs[0].page_count = 1;
         ctx.state_mut().svm_guard.alias_proofs[0].pages[0] = 0xdead000;
         assert!(release_global_table_write(&mut ctx, &allocator, page));
+        assert_eq!(ctx.state().svm_guard.leaf_filter_cache_pages[filter_slot], 0);
         assert!(!ctx.state().svm_guard.gate_guards[leaf].valid);
         assert!(ctx.state().svm_guard.alias_proofs[0].valid);
         refresh_global_tree(&mut ctx, &allocator, true);

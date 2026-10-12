@@ -4090,3 +4090,36 @@ results, so this small sample does not establish a better end-to-end policy.
 The proven four-page improvement remains retained. Five-page source is
 isolated in `/tmp/bedrock-amd-recent5-1012`; snapshots and logs are under
 ignored `target/boxctl-evidence/amd-recent5-1012/`.
+
+### Retain guarded leaf alias filters across CR3 switches
+
+With the four-recent-page policy, a diagnostic measured about **54 thousand**
+full alias-proof walks during the transfer. A direct-mapped ghost record
+found only about **160 cache evictions** and **1.5 thousand** later walks for
+recently evicted keys, so replacing the four-way proof-cache policy has
+little headroom. A separate diagnostic counted roughly **1.6 million**
+transfer-phase scans of leaf tables already seen before, after their active
+Bloom filter had been cleared. The diagnostics completed all 10,000
+transfers; their counters and marker snapshots are under ignored
+`target/boxctl-evidence/amd-aliasmiss-1012/`.
+
+The AMD alias walker now retains each guarded leaf table's executable-page
+Bloom filter by physical table page and NPT mapping generation. It reuses
+the filter only while that leaf's active NPT write guard is valid. Guest
+table-write release and host writes revoke the matching filter; dropping all
+table guards revokes the cache. A mapping-generation change also prevents
+reuse. All 267 VMX library tests, including host-write and guest-write
+filter invalidation checks, the in-box SVM suite, and two full 10,000-transfer
+runs passed on the same EPYC 4245P HWE 7.0 box:
+
+| Run order | Leaf-filter cache | Fair interval | VM exits | NPT faults | Preparation cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Candidate | Retained | **40.118 s** | 20,000,556 | 16,410,573 | **2,358** |
+| Control | Active tree only | 41.454 s | 20,638,279 | 16,904,527 | 2,399 |
+| Candidate repeat | Retained | **40.710 s** | 20,382,873 | 16,694,473 | **2,347** |
+
+The candidate saved **41–52 preparation cycles per exit** in both runs.
+Its average **40.414 s** interval was about **1.04 s (2.5%)** below the
+adjacent control. Exit counts also varied, so the normalized preparation
+cost is the clearest evidence of this cache's direct effect. This remains
+far from the historical Intel 24.087 s workload timing.

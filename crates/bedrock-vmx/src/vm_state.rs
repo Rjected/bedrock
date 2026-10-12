@@ -30,6 +30,7 @@ pub(crate) const SVM_ALIAS_PROOF_LOOKUP_CAPACITY: usize = 1024;
 pub(crate) const SVM_ALIAS_PROOF_WAYS: usize = 4;
 pub(crate) const SVM_ALIAS_PROOF_PAGE_CAPACITY: usize = 4;
 pub(crate) const SVM_LEAF_PAGE_INDEX_CAPACITY: usize = 1024;
+pub(crate) const SVM_LEAF_FILTER_CACHE_CAPACITY: usize = 2048;
 pub(crate) const SVM_LEAF_SNAPSHOT_CAPACITY: usize = 4;
 // Tempo's send-phase address space can exceed 512 reachable page-table pages.
 pub(crate) const SVM_TABLE_CAPACITY: usize = 1024;
@@ -127,6 +128,10 @@ pub(crate) struct SvmGuardScratch {
     /// A cleared bit proves a page cannot have an alias through that table.
     pub gate_leaf_filters: [[u64; 4]; SVM_TABLE_CAPACITY],
     pub gate_leaf_filter_valid: [bool; SVM_TABLE_CAPACITY],
+    /// Filters survive guarded CR3 switches; writes and mapping changes revoke them.
+    pub leaf_filter_cache_pages: [u64; SVM_LEAF_FILTER_CACHE_CAPACITY],
+    pub leaf_filter_cache_generations: [u64; SVM_LEAF_FILTER_CACHE_CAPACITY],
+    pub leaf_filter_cache_values: [[u64; 4]; SVM_LEAF_FILTER_CACHE_CAPACITY],
     pub gate_count: usize,
     pub gate_root: u64,
     /// Leaf-only refresh is valid only while all guarded NPT mappings persist.
@@ -139,12 +144,25 @@ pub(crate) struct SvmGuardScratch {
 }
 
 impl SvmGuardScratch {
+    pub fn leaf_filter_cache_slot(page: u64) -> usize {
+        ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+            & (SVM_LEAF_FILTER_CACHE_CAPACITY - 1)
+    }
+
+    pub fn invalidate_leaf_filter(&mut self, page: u64) {
+        let slot = Self::leaf_filter_cache_slot(page);
+        if self.leaf_filter_cache_pages[slot] == page.wrapping_add(1) {
+            self.leaf_filter_cache_pages[slot] = 0;
+        }
+    }
+
     pub fn note_gate_host_write(&mut self, guest: u64, len: usize) {
         if len == 0 {
             return;
         }
         let Some(last) = guest.checked_add(len as u64 - 1) else {
             self.gate_host_write_all = true;
+            self.leaf_filter_cache_pages.fill(0);
             let mut changed = false;
             for memo in &mut self.hazard_memos {
                 if memo.guarded {
@@ -160,6 +178,7 @@ impl SvmGuardScratch {
         };
         let mut page = guest & !4095;
         while page <= last {
+            self.invalidate_leaf_filter(page);
             let mut changed = false;
             for memo in &mut self.hazard_memos {
                 if memo.guarded && memo.proof.page == page {
@@ -174,6 +193,7 @@ impl SvmGuardScratch {
             if !self.gate_host_writes[..self.gate_host_write_count].contains(&page) {
                 if self.gate_host_write_count == self.gate_host_writes.len() {
                     self.gate_host_write_all = true;
+                    self.leaf_filter_cache_pages.fill(0);
                     let mut changed = false;
                     for memo in &mut self.hazard_memos {
                         if memo.guarded {
@@ -195,6 +215,30 @@ impl SvmGuardScratch {
             };
             page = next;
         }
+    }
+}
+
+#[cfg(test)]
+mod leaf_filter_cache_tests {
+    use super::*;
+
+    #[test]
+    fn host_writes_revoke_only_affected_leaf_filter_or_all_on_overflow() {
+        let mut guard = box_svm_guard();
+        let first = 0x6000;
+        let second = 0x7000;
+        let first_slot = SvmGuardScratch::leaf_filter_cache_slot(first);
+        let second_slot = SvmGuardScratch::leaf_filter_cache_slot(second);
+        assert_ne!(first_slot, second_slot);
+        guard.leaf_filter_cache_pages[first_slot] = first + 1;
+        guard.leaf_filter_cache_pages[second_slot] = second + 1;
+
+        guard.note_gate_host_write(first + 8, 8);
+        assert_eq!(guard.leaf_filter_cache_pages[first_slot], 0);
+        assert_eq!(guard.leaf_filter_cache_pages[second_slot], second + 1);
+
+        guard.note_gate_host_write(u64::MAX, 2);
+        assert_eq!(guard.leaf_filter_cache_pages[second_slot], 0);
     }
 }
 
