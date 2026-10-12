@@ -2877,3 +2877,136 @@ also contribute to the wall-time gap. These candidates remain unmerged
 in `/tmp/bedrock-amd-packfive-1012`; logs and snapshots are under ignored
 `target/boxctl-evidence/amd-packfive-1012/` and
 `target/boxctl-evidence/amd-packmulti-1012/`.
+
+### Measure actual page-transition prediction accuracy
+
+An isolated probe measured the planner's last-successor, two-page-context,
+effective (two-page-context with last-successor fallback), and eight-page
+recency predictors on every observed virtual code-page transition. It passed
+all 262 VMX tests, the in-box SVM suite, and the full 10,000-transfer Tempo
+run on an EPYC 4245P box. In the transfer phase, subtracting the nearest
+million-transition kernel-log snapshots at the fair markers gives roughly
+**23.07 million transitions**. The two-page-context predictor hit **5.70
+million (24.7%)**; the last-successor predictor hit **6.30 million (27.3%)**;
+the planner's effective prediction hit **5.75 million (24.9%)**. The
+eight-page recent set contained the actual destination **14.40 million times
+(62.4%)**. Snapshot timing is within about one second of each fair marker,
+so these are approximate phase counts. The run completed in **57.591 s**
+with **20,782,861 nested-page faults**. These measurements suggest that
+prioritizing a weak prediction over recent pages may consume breakpoint slots
+that could prevent more execute faults. The probe remains isolated in
+`/tmp/bedrock-amd-predprobe-1012`; snapshots and kernel logs are under
+ignored `target/boxctl-evidence/amd-predprobe-1012/`.
+
+An isolated selection test then tried the eight recent pages before the
+predicted successor when widening a hazardous current-page batch. All 262
+VMX tests and the in-box SVM suite passed; the single ordering-sensitive
+unit assertion was updated to reflect the new page order. The complete Tempo
+run was worse: **61.639 s**, **31,615,253 exits**, and **23,851,526
+nested-page faults**, versus the preceding same-box predictor probe's
+**57.591 s**, **28,325,838 exits**, and **20,782,861 faults**. The probe
+has counter overhead, so this comparison is conservative: recent-first
+caused roughly **3.07 million** more faults. It remains unmerged in
+`/tmp/bedrock-amd-recentfirst-1012`; marker snapshots are under ignored
+`target/boxctl-evidence/amd-recentfirst-1012/`. The predicted destination
+may have particularly high value when it is absent from the recent set;
+aggregate prediction accuracy alone does not capture that value.
+
+An expanded version of the isolated predictor probe recorded recent-set
+positions and prediction hits outside that set. It again passed all 262 VMX
+tests, the in-box SVM suite, and the full Tempo workload. The transfer-phase
+snapshots (nearest million-transition logs to the fair markers) covered about
+**26.21 million transitions**: the effective predictor hit **6.58 million
+(25.1%)**, the last-successor predictor hit **7.26 million (27.7%)**, and
+the recent set contained the destination **16.60 million (63.3%)** times.
+The effective predictor found a destination absent from that set **1.92
+million times (7.3% of all transitions)**. Destinations at recent ranks one
+through seven appeared about 4.28, 2.83, 2.61, 2.78, 2.15, 1.40, and 0.56
+million times respectively. The run took **60.346 s**, with **21,849,694
+nested-page faults**; extra counters perturb timing. Logs and snapshots are
+under ignored `target/boxctl-evidence/amd-predrank-1012/`.
+
+Giving the last-successor predictor priority over the two-page-context
+predictor in the hazardous-page planner passed all 262 VMX tests and the
+in-box SVM suite. Its full run took **60.254 s** with **22,527,378
+nested-page faults** and **30,211,679 exits**. An adjacent unchanged control
+on the same box took **58.272 s** with **21,311,004 faults** and **28,980,417
+exits**. Higher aggregate last-successor hit rate did not improve page
+selection under the four breakpoint slots. This candidate remains unmerged
+in `/tmp/bedrock-amd-firstsucc-1012`; marker snapshots are under ignored
+`target/boxctl-evidence/amd-firstsucc-1012/`.
+
+An isolated, fault-weighted diagnostic stored the predicted physical page
+and its admission reason in unused batch slots, then classified execute
+faults after the guest run. It passed all 262 VMX tests, the in-box SVM
+suite, and the full Tempo workload. Between kernel-log snapshots nearest the
+fair markers, about **20.97 million** global-batch execute faults occurred;
+**3.27 million (15.6%)** targeted the planner's predicted page. Of those
+predicted-page faults, about **2.14 million (65.3%)** were rejected by the
+combined hazard-count/boundary precheck and **1.12 million (34.2%)** by the
+earlier hazard-count/page-count cutoff. Missing translations or hazard data
+accounted for about 10 thousand, and missing cached alias proofs for about
+8 thousand. No fault targeted a predicted page marked as admitted. The
+diagnostic run took **59.241 s**, with **21,465,942 marker-bounded nested-page
+faults**; its per-entry checks perturb timing. Source remains isolated in
+`/tmp/bedrock-amd-missreason-1012`; logs and snapshots are under ignored
+`target/boxctl-evidence/amd-missreason-1012/`. The combined buckets need
+splitting before changing admission rules.
+
+The refined diagnostic split those buckets on a second complete run. The
+nearest marker-bounded kernel snapshots covered about **20.97 million**
+global execute faults and **3.22 million** predicted-page misses. About
+**1.12 million** of those misses hit the early raw hazard-count cutoff, and
+**2.08 million** hit the raw combined hazard-count precheck. No misses in
+this sample were attributed to the four-page batch limit, unguarded page
+boundaries, an unsafe cross-page boundary, or a predicted page marked
+admitted. Missing alias proofs accounted for about **7.6 thousand**. The
+second full run completed in **59.175 s**. The diagnostic indicates that
+raw hazard counts, rather than actual cached breakpoint slots, are excluding
+predicted pages; any admission change must still preserve the exact alias
+proof and four-register limit. Its logs and snapshots share the ignored
+`target/boxctl-evidence/amd-missreason-1012/` directory.
+
+An isolated candidate then removed both raw hazard-count gates and let the
+existing cached singleton alias proofs' actual breakpoint lists decide whether
+another page fits in four slots. It did not add runtime mask merging. All
+262 VMX tests, the in-box SVM suite, and the full Tempo workload passed.
+The run took **58.792 s**, with **21,350,691 nested-page faults** and
+**29,021,511 exits**, effectively the same fault count as the nearby
+unchanged control's **21,311,004 faults**. It also spent **67.67 billion**
+VM-entry preparation cycles, above that control's **66.42 billion**. This
+candidate remains unmerged in `/tmp/bedrock-amd-proofslots-1012`;
+snapshots are under ignored `target/boxctl-evidence/amd-proofslots-1012/`.
+The result suggests the actual four-slot constraint still blocks the
+predicted faulting pages, despite the earlier raw-count rejections.
+
+A follow-up isolated diagnostic removed the raw gates while recording the
+actual breakpoint shortfall only when a global execute fault targeted the
+predicted page. All 262 VMX tests, the in-box SVM suite, and the full Tempo
+workload passed. Nearest marker snapshots cover about **20.97 million**
+global execute faults and **3.30 million** predicted-page misses. Of these,
+**1.12 million** occurred with all four breakpoint registers already used;
+**1.84 million** required a combined five slots, **206 thousand** six, and
+**108 thousand** seven. Missing cached alias proofs accounted for only about
+**10.6 thousand**; no admitted predicted page faulted. The diagnostic run
+took **58.956 s**. Its counters and extra lookup perturb timing, and it
+remains unmerged. Logs and snapshots are under ignored
+`target/boxctl-evidence/amd-proofslots-1012/`. The single-slot shortfall is
+the largest packable class, but precomputing one narrow merge in the prior
+packfive experiment did not reduce faults; merge feasibility among *faulting*
+predictions needs measurement before another packing change.
+
+The final isolated diagnostic checked whether any pair in each five-slot
+predicted-page combination could share a 32-byte AMD breakpoint mask. It
+passed all 262 VMX tests, the in-box SVM suite, and the complete Tempo
+workload. Between kernel logs closest to the transfer markers, about
+**862 thousand** faulting predicted-page combinations had such a pair.
+This is about **40%** of the **2.12 million** proof-overflow misses in that
+run, but only about **4%** of its **21,389,285** marker-bounded nested-page
+faults. It is an upper bound: extra masked #DB exits and planner work may
+outweigh saved fetch faults. The run took **59.342 s** with diagnostic
+overhead. The earlier precomputed one-merge variant did not lower fault count,
+so a new implementation would need to target the *actual faulting* five-slot
+combinations and demonstrate an end-to-end gain. Source remains isolated in
+`/tmp/bedrock-amd-proofslots-1012`; logs and snapshots are under ignored
+`target/boxctl-evidence/amd-proofslots-1012/`.
