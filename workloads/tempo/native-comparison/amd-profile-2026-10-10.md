@@ -3788,3 +3788,26 @@ reachable proof has no breakpoints. The targeted regression test, all 266
 VMX library tests, and the full in-box SVM suite pass. This is a correctness
 guard for the accelerated path; it does not explain the large Tempo timing
 gap.
+
+### Test cached global entry plans
+
+On the same EPYC 4245P box, the guarded baseline at `6cbb3e3` completed the
+pinned 10,000-transfer interval in **46.742 s**, with 17,821,678 NPT faults
+and about 2,680 VM-entry preparation cycles per exit. Caching the complete
+current-plus-successor-page plan passed 267 local VMX library tests, the
+in-box SVM suite, and 10,000/10,000 transfers, but took **50.494 s** and
+21,948,155 NPT faults. Reusing its stale-but-valid successor-page set saved
+preparation cycles while causing 4.13 million more NPT faults; this variant
+was discarded.
+
+A narrower cache retained only the current page's guarded breakpoint proof
+and recomputed successor pages on every entry. It hit on 71.74% of sampled
+lookups, passed the same correctness checks, and completed three full
+10,000-transfer runs in **47.019 s**, **46.756 s**, and **46.676 s** (the last
+using code-epoch validation). Nearby unchanged controls took **46.742 s**
+and **48.322 s**. The code-epoch run had 17,804,958 NPT faults and about
+2,720 preparation cycles per exit, versus 17,821,678 and about 2,680 for the
+46.742 s control. This cache has no reproducible whole-workload gain, so its
+source stays in isolated worktrees rather than the shared branch. Logs and
+fair-marker snapshots are under ignored
+`target/boxctl-evidence/amd-globalcompact-1012/`.
