@@ -122,9 +122,12 @@ SYM_FUNC_START(svm_run_guest)
  mov 24(%rcx), %rax
  mov %rax, %dr3
 .Lsvm_skip_dr3_entry:
- /* Address-mask MSRs are host state, not VMCB state. Only masked page
-  * batches need the extra four read/write pairs on each VMRUN. */
+ /* Address-mask MSRs are host state, not VMCB state. On a masked page
+  * batch, save all four values, but write and restore only those that
+  * differ from the requested guest masks. Bit flags at stack offset 128
+  * track the MSRs we changed. */
  movq $0, 88(%rsp)
+ movq $0, 128(%rsp)
  mov 32(%rcx), %rax
  or 40(%rcx), %rax
  or 48(%rcx), %rax
@@ -138,9 +141,13 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, 96(%rsp)
  mov 88(%rsp), %r10
  mov 32(%r10), %rax
+ cmp %rax, 96(%rsp)
+ je .Lsvm_skip_mask0_write
+ orq $1, 128(%rsp)
  mov %rax, %rdx
  shr $32, %rdx
  wrmsr
+.Lsvm_skip_mask0_write:
  mov $0xc0011019, %ecx
  rdmsr
  shl $32, %rdx
@@ -148,9 +155,13 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, 104(%rsp)
  mov 88(%rsp), %r10
  mov 40(%r10), %rax
+ cmp %rax, 104(%rsp)
+ je .Lsvm_skip_mask1_write
+ orq $2, 128(%rsp)
  mov %rax, %rdx
  shr $32, %rdx
  wrmsr
+.Lsvm_skip_mask1_write:
  mov $0xc001101a, %ecx
  rdmsr
  shl $32, %rdx
@@ -158,9 +169,13 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, 112(%rsp)
  mov 88(%rsp), %r10
  mov 48(%r10), %rax
+ cmp %rax, 112(%rsp)
+ je .Lsvm_skip_mask2_write
+ orq $4, 128(%rsp)
  mov %rax, %rdx
  shr $32, %rdx
  wrmsr
+.Lsvm_skip_mask2_write:
  mov $0xc001101b, %ecx
  rdmsr
  shl $32, %rdx
@@ -168,9 +183,13 @@ SYM_FUNC_START(svm_run_guest)
  mov %rax, 120(%rsp)
  mov 88(%rsp), %r10
  mov 56(%r10), %rax
+ cmp %rax, 120(%rsp)
+ je .Lsvm_skip_mask3_write
+ orq $8, 128(%rsp)
  mov %rax, %rdx
  shr $32, %rdx
  wrmsr
+.Lsvm_skip_mask3_write:
 .Lsvm_skip_addr_mask_entry:
  mov 16(%rsp), %rax
  vmsave %rax
@@ -328,26 +347,38 @@ SYM_FUNC_START(svm_run_guest)
 .Lsvm_skip_dr3_exit:
  cmpq $0, 88(%rsp)
  je .Lsvm_skip_addr_mask_exit
+ testq $1, 128(%rsp)
+ jz .Lsvm_skip_mask0_restore
  mov 96(%rsp), %rax
  mov %rax, %rdx
  shr $32, %rdx
  mov $0xc0011027, %ecx
  wrmsr
+.Lsvm_skip_mask0_restore:
+ testq $2, 128(%rsp)
+ jz .Lsvm_skip_mask1_restore
  mov 104(%rsp), %rax
  mov %rax, %rdx
  shr $32, %rdx
  mov $0xc0011019, %ecx
  wrmsr
+.Lsvm_skip_mask1_restore:
+ testq $4, 128(%rsp)
+ jz .Lsvm_skip_mask2_restore
  mov 112(%rsp), %rax
  mov %rax, %rdx
  shr $32, %rdx
  mov $0xc001101a, %ecx
  wrmsr
+.Lsvm_skip_mask2_restore:
+ testq $8, 128(%rsp)
+ jz .Lsvm_skip_mask3_restore
  mov 120(%rsp), %rax
  mov %rax, %rdx
  shr $32, %rdx
  mov $0xc001101b, %ecx
  wrmsr
+.Lsvm_skip_mask3_restore:
 .Lsvm_skip_addr_mask_exit:
  mov 32(%rsp), %rax
  /* VMEXIT disables host breakpoints. When the saved host DR7 was the

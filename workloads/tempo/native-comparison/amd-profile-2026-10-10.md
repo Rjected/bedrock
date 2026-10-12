@@ -3245,3 +3245,40 @@ to make its gain uncertain. The candidate remains unmerged in
 `/tmp/bedrock-amd-asid-reuse-1012.patch`; marker snapshots are under ignored
 `target/boxctl-evidence/amd-asid-reuse-1012/`. This path cannot close the
 roughly twofold Tempo gap while page faults dominate VM exits.
+
+### Cut AMD breakpoint-mask MSR writes and retest bounded page packing
+
+On another EPYC 4245P box, the SVM entry assembly now compares each saved
+host breakpoint-address mask with the requested guest mask. It writes only
+different MSRs and restores only those it changed. The in-box SVM suite,
+including masked breakpoints and exact deadlines, passed. Two complete
+unchanged-planner Tempo runs around an unchanged-module control yielded:
+
+| Run order | Mask MSR handling | Fair interval | VM exits | Execute faults | VM runner plus guest cycles/exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Conditional writes | 53.102 s | 26,778,456 | 19,151,298 | 4,713 |
+| 2 | Unchanged control | 53.278 s | 26,506,343 | 18,915,013 | 4,832 |
+| 3 | Conditional writes | 53.427 s | 26,814,367 | 19,140,424 | 4,722 |
+
+The conditional path consistently reduced normalized runner cost by about
+**110 cycles/exit (2.3%)**, although fault-count variation masks it in wall
+time. It is small but useful for already-masked pages and is retained.
+
+We also repeated the previously regressing 32-byte breakpoint-range packing
+policy with the cheaper MSR switching. Unrestricted candidate search cut
+faults to **17,554,514** but raised VM-entry preparation to **81.36 billion
+cycles** and took **58.745 s**. Limiting each full-breakpoint plan to two
+likely next pages kept nearly all the fault reduction (**17,615,394** faults),
+reduced preparation to **64.94 billion cycles**, and finished in **53.666 s**.
+Allowing just one likely next page when the current page already has four
+raw hazards produced **17,449,050** faults, **63.37 billion** preparation
+cycles, and **52.904 s**. The adjacent unchanged-planner control took
+**53.278 s**, with **18,915,013** faults and **60.50 billion** preparation
+cycles. The packing variants passed all 263 VMX tests; every variant passed
+the in-box suite and full Tempo workload. The one-page variant saves about 1.47 million
+faults but increases preparation by roughly 240 cycles per remaining exit;
+its 0.37-second apparent win is within run-to-run variation. It remains
+unmerged in `/tmp/bedrock-amd-mask32-one-1012.patch`. Marker snapshots for
+all runs are under ignored `target/boxctl-evidence/amd-maskwrite-1012/`.
+The next optimization must reduce the work of deciding whether a faulting
+page can fit, while keeping the four-register and exact alias-proof checks.
