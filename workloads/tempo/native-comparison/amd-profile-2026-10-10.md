@@ -4744,3 +4744,22 @@ image. This binary relocation is a pinned-workload diagnostic, not a general
 glibc or hypervisor fix. Raw logs and markers are in ignored
 `target/boxctl-evidence/amd-libc-rep-1013/`. All module builds, loads, and
 runtime tests remained on the disposable boxctl box.
+
+Two isolated follow-ups tested whether clearing another glibc page helps.
+Moving its six `REP STOSQ` sites from file page `0x3c000` to a previously
+hazard-free page gave **34.378 s** versus an adjacent two-site control of
+**34.376 s** (10,000 successes, zero failures in both). NPT faults were
+12,951,225 versus 13,002,141. The new guarded destination page erased the
+expected benefit, so this layout was not added to the shared branch.
+
+A second layout placed those six sites in code padding on pages `0x15a000`,
+`0x98000`, and `0x96000`, which already had REP hazards. It kept each page at
+four or fewer hazards and cleared `0x3c000` without adding a newly hazardous
+page. One complete pair gave **33.702 s** versus **34.209 s** for the
+two-site image, with 12,740,822 versus 12,924,807 NPT faults; both runs
+again had 10,000 successes and zero failures. The 0.507 s difference is
+close to observed run variation, so this layout remains an unconfirmed
+experiment, not an adopted workload change. Its exact-build diagnostic
+patcher is `diagnostics/relocate-libc-rep-reuse-oci.py`; the generated archive
+is in ignored `target/boxctl-artifacts/`, and the run logs and markers are in
+ignored `target/boxctl-evidence/amd-libc-rep-1013/`.
