@@ -4537,3 +4537,35 @@ elapsed time were effectively unchanged. It is not retained on the shared
 branch. Its source remains in `/tmp/bedrock-amd-region7-1013`; logs and marker
 snapshots are in ignored `target/boxctl-evidence/amd-region7-1013/`. All module
 builds and loads stayed inside the boxctl boxes.
+
+A follow-up low-rate counter run on the seven-hazard candidate completed the
+same 10,000 transfers. At the final sampled report, it had tried the
+seven-hazard reachable-region proof 393,216 times and used it 308,213 times
+(78.4%). Across all region proofs, the 256-entry work queue overflowed only
+62 times and the outgoing-edge array never overflowed. Raising those capacities
+is therefore unlikely to recover the missing speed. The lack of a wall-time
+gain despite frequent successful proofs suggests that the remaining proof
+frontier stops or the much larger NPT-fault volume dominate. This is an
+inference; a candidate-side false-hit histogram would distinguish the two.
+The diagnostic dmesg and fair markers are in the same ignored evidence folder.
+
+The candidate-side false-hit sampler explained the cancellation. The
+seven-hazard page fell from 577 sampled hits in the unchanged run to 86 in
+the candidate run. But a six-hazard page gained 502 sampled exact proof-frontier
+hits, 467 at ordinary offset `0x9c0`. The broad proof therefore moved hot
+breakpoints rather than removing enough of them. Both samples were one in 256
+harmless retries on complete 10,000-transfer runs; guest page placement and
+execution mix can vary between runs.
+
+A second isolated candidate kept the original five-hazard proof and enabled
+the new proof only for seven-hazard pages. It passed 268 VMX unit tests, the
+full in-box SVM suite, and 1,024 Linux fork replays from virtual count 8.0M
+to 8.1M against a scalar reference. Its two 10,000-transfer fair intervals
+on the same box were **39.274 s** and **39.504 s**; the adjacent unchanged
+control was **39.435 s**. All three runs had 10,000 successes and zero
+failures. The candidate's marker-bounded VM exit counts were 19,537,790 and
+19,637,337 versus 19,576,056 for the control. The effect is smaller than
+run-to-run variation, so the change stays isolated in
+`/tmp/bedrock-amd-region7-only-1013`. Its logs, fair markers, and compressed
+fork-replay output are in ignored `target/boxctl-evidence/amd-region7-only-1013/`.
+The unchanged branch's module was restored on the box and passed the SVM suite.
