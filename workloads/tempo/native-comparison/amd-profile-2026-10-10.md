@@ -5820,3 +5820,14 @@ marker snapshots, source patch, and host details are under ignored
 `target/boxctl-evidence/amd-cold-mask-1013/`; the diagnostic fault log and
 patch are under `target/boxctl-evidence/amd-postsysplt-profile-1013/`. All
 module operations stayed inside the disposable box.
+
+An offline exact-first-16-byte match against the pinned OCI layers mapped
+many of the retained samples to `usr/local/bin/tempo` and `usr/local/bin/bench`.
+The sampled Tempo pages do not share one hazard type: file pages `0x5d2a000`
+and `0x6f11000` have no in-page REP/RNG entry but end in `0x0f`, so they
+remain cross-page boundary hazards; `0x7a9a000` and `0x7a92000` contain
+multiple real `REP MOVSQ` sites; `0x6e7a000` contains an apparent `F2 A4`
+entry. This mix explains why removing one more individual false byte is
+unlikely to eliminate the larger NPT-fault volume. These are attribution
+samples from the later retained part of one run, not percentages of the full
+fair interval.
