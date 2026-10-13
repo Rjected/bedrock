@@ -5319,3 +5319,49 @@ source patch helps the unchanged workload, but it leaves the user-space
 hazardous-code working set as the main performance gap. Logs and counters
 are in ignored `target/boxctl-evidence/amd-gp-original-1013/`. All module
 builds and loads stayed inside the box.
+
+### Remove libjq's cold color-copy REP through the normal guest build (2026-10-13)
+
+The earlier exact-build `libjq` relocation saved 1.35–1.87 s on a shaped
+Tempo image, but could not be reproduced by rebuilding the guest. Nix's jq
+1.8.1 compiler generated `REP MOVSQ` for the eight-pointer fallback copy in
+`jq_set_colors`. That instruction shared file page `0x31000` with hot jq
+printing code. `guest/patches/jq-avoid-rep-colors.patch` makes only the
+fallback destination stores volatile, retaining the same pointer values while
+preventing that REP lowering. `nix/podman-initrd.nix` uses the patched jq in
+the guest closure. The compiled `libjq.so.1.0.4` has an ordinary scalar
+store loop at `0x317c0` and no disassembled REP on page `0x31000`. All nine
+upstream jq tests passed in the disposable box.
+
+Both control and patched `tempoInitrd` outputs were built through Nix inside
+the same EPYC 4245P HWE 7.0.0-38 box. The control used commit `8b2f4c7`,
+and the candidate applied only the jq guest override. The
+`native-comparison/prepare-initrd.sh` helper injected the identical
+`fair-bench` and `fair-run.sh` into both archives. Their normalized archive
+path lists were identical; the other rebuilt guest helper binaries
+(`bedrock-file-fetch`, `bedrock-file-store`, and `bedrock-pebs-register`) were
+byte-identical. The guest kernel was the same source-patched build in all
+runs (`vmlinux` SHA-256
+`8735375bae8368849a6d75665c70150c061e3756e09e38c8f31e0aad4091ea81`).
+The same in-box Bedrock module passed the SVM suite first. The original pinned
+`images.tar`, compose file, seed 12345, one host CPU, and 10,000 transfers
+were unchanged. `BEDROCK_FAIR_TIMING=1` provided host markers around the
+complete transfer command. Every measured run passed 10,000/10,000 with zero
+failures and zero reverted transactions.
+
+| Order | Guest jq | Fair interval | Whole-VM NPT faults | Total exits |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Patched | 37.559 s | 57,291,096 | 77,995,090 |
+| 2 | Control | 39.102 s | 58,690,813 | 79,751,207 |
+| 3 | Control | 37.764 s | 58,129,969 | 78,983,307 |
+| 4 | Patched | 36.647 s | 57,169,406 | 77,982,968 |
+
+The two adjacent pairs saved **1.54 s and 1.12 s**, with **1.40 million and
+0.96 million fewer NPT faults**, respectively. The run-to-run spread is real,
+so this is a roughly 3.5% measured improvement, not an exact prediction for
+other hosts. This is guest shaping, not a general AMD hypervisor solution:
+the original-image AMD result remains much slower than native and the
+historical Intel interval was measured on different hardware and guest bits.
+Build and runtime logs are in ignored
+`target/boxctl-evidence/amd-jq-source-1013/`. All module builds and loads
+remained inside the disposable box.

@@ -3,8 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 task_stage=$(mktemp -d /tmp/bedrock-fair-initrd.XXXXXX)
 trap 'chmod -R u+w "$task_stage"; find "$task_stage" -depth -delete' EXIT
-output=$PWD/initrd.gz
-source_initrd=$PWD/../initrd.gz
+output=${2:-$PWD/initrd.gz}
+source_initrd=${1:-$PWD/../initrd.gz}
 helper=$PWD/fair-bench
 runner=$PWD/fair-run.sh
 cd "$task_stage"

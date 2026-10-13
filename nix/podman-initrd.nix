@@ -26,6 +26,10 @@
 { pkgs, guestKernel }:
 
 let
+  jqGuest = pkgs.jq.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../guest/patches/jq-avoid-rep-colors.patch ];
+  });
+
   bedrockPebsRegister = pkgs.pkgsStatic.stdenv.mkDerivation {
     name = "bedrock-pebs-register";
     dontUnpack = true;
@@ -280,7 +284,7 @@ let
     pkgs.findutils
     pkgs.gnutar
     pkgs.gzip
-    pkgs.jq
+    jqGuest
     pkgs.cacert
     pkgs.podman-compose
     # systemd-journald + journalctl + systemd-cat: structured log

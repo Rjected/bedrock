@@ -1,0 +1,13 @@
+--- a/src/jv_print.c
++++ b/src/jv_print.c
+@@ -88,7 +88,10 @@ int jq_set_colors(const char *code_str) {
+   }
+   default_colors:
+   for (; ci < COLORS_LEN; ci++)
+-    colors[ci] = default_colors[ci];
++    // Keep this cold fallback copy as individual pointer stores. Some
++    // compilers turn the loop into REP MOVSQ, placing a REP instruction on
++    // the hot jq_print_value code page in the Bedrock guest.
++    *(const char *volatile *)&colors[ci] = default_colors[ci];
+   return 1;
+ }
