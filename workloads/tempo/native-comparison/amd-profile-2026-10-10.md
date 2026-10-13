@@ -4594,8 +4594,8 @@ The unchanged module was restored on the disposable box after profiling.
 
 ### Guard a proven successor across two hazardous pages (2026-10-13)
 
-The five-hazard reachable-region path used to return with only its current
-physical page executable. It can now admit one predicted successor when a
+The five-hazard reachable-region path returns with only its current
+physical page executable. An experimental version admitted one predicted successor when a
 direct edge from the first decoded region reaches that page. Both regions
 must prove every direct entry into the other is a visited instruction start,
 and their exact breakpoint union must fit four AMD debug registers. Unknown
@@ -4614,7 +4614,24 @@ count 8.0M to 8.1M against a single-step reference. Complete adjacent Tempo
 | Unchanged branch | 38.877 s | 19,287,151 | 15,851,868 | 1,208,825 |
 
 This pair saved 0.556 s (1.4%) and about 297,000 exits. An earlier unchanged
-run on the same box took 39.435 s, so run-to-run variation is material; a
-repeat pair is needed before calling the wall-time gain stable. Logs, fair
-markers, and stats are in ignored `target/boxctl-evidence/amd-twopage-1013/`.
-All module builds, loads, and runtime tests were performed on the boxctl box.
+run on the same box took 39.435 s, so run-to-run variation is material.
+Logs, fair markers, and stats are in ignored
+`target/boxctl-evidence/amd-twopage-1013/`. All module builds, loads, and
+runtime tests were performed on the boxctl box.
+
+A second EPYC 4245P box, `box-a3839887`, tested the same admission rule with
+minor planner-copy and duplicate-translation reductions. It passed 269 local
+unit tests, the in-box SVM suite, and another 1,024 Linux fork replays against
+the single-step reference. Its adjacent complete Tempo runs reversed the
+first pair:
+
+| Variant | Fair interval | VM exits | NPT faults | Synthetic MTF exits |
+| --- | ---: | ---: | ---: | ---: |
+| Two-page reachable proof | 39.529 s | 19,534,610 | 16,085,376 | 1,206,536 |
+| Unchanged branch | 39.049 s | 19,294,454 | 15,886,532 | 1,192,455 |
+
+Both runs again had 10,000 successes and zero failures. The candidate was
+0.479 s slower, with about 240,000 more exits. The two pairs show no
+repeatable speedup; the experimental code was removed from the shared branch.
+The second box's logs, fair markers, stats, and fork-replay log are in ignored
+`target/boxctl-evidence/amd-twopage-repeat-1013/`.

@@ -2313,13 +2313,11 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // exact breakpoint, avoiding harmless #DB exits across the mask.
         // The proof records every visited instruction start, so later entry
         // points within the same region reuse it under the same code revision.
-        if hazard.count == 5 {
-            if let Some(proof) = collect_reachable_breakpoints(ctx, batch, window.linear) {
-                if batch.page_breakpoint_count != 0 {
-                    admit_reachable_successor(ctx, batch, &hazard, &proof);
-                    return Some(());
-                }
-            }
+        if hazard.count == 5
+            && collect_reachable_breakpoints(ctx, batch, window.linear).is_some()
+            && batch.page_breakpoint_count != 0
+        {
+            return Some(());
         }
         collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
         if batch.page_breakpoint_count == 0 {
@@ -3051,98 +3049,11 @@ fn enqueue_region_target<C: VmContext>(
     Some(())
 }
 
-/// Extend a one-page reachable proof only across an observed direct edge.
-/// An unvisited entry into either executable page would bypass that page's
-/// exact breakpoint set, so leave the successor NX unless both directions
-/// are covered by the two independently decoded regions.
-fn admit_reachable_successor<C: VmContext>(
-    ctx: &mut C,
-    batch: &mut InstructionBatch,
-    first_hazard: &PageHazards,
-    first: &super::super::vm_state::SvmRegionProof,
-) {
-    let first_page = batch.pages[0];
-    let first_virtual = first.linear & !4095;
-    let root = match ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3) {
-        Ok(root) => root & 0x000f_ffff_ffff_f000,
-        Err(_) => return,
-    };
-    let recent = ctx.state().svm_recent_pages;
-    let guard = &ctx.state().svm_guard;
-    let candidate = predicted_second_successor(guard, root, recent[1], first_virtual)
-        .or_else(|| predicted_successor(guard, root, first_virtual));
-    let Some(candidate) = candidate else { return };
-    let candidate_virtual = candidate & !4095;
-    if candidate_virtual == first_virtual { return; }
-    let Some(second_page) = cached_code_translation(ctx, candidate_virtual) else { return };
-    if second_page == first_page || gate_table_contains(&ctx.state().svm_guard, second_page) {
-        return;
-    }
-    let mut entry = None;
-    for &address in &first.outgoing[..first.outgoing_count] {
-        if super::svm::physical(ctx, address)
-            .ok()
-            .is_some_and(|p| p.as_u64() & !4095 == second_page)
-        {
-            if address & !4095 != candidate_virtual { return; }
-            entry = Some(address);
-        }
-    }
-    let Some(entry) = entry else { return };
-    let Some(second_hazard) = cached_page_hazards(ctx, second_page) else { return };
-    if second_hazard.count == 0 || !second_hazard.boundary_guarded
-        || !hazard_boundary_safe(first_hazard, &second_hazard)
-        || !hazard_boundary_safe(&second_hazard, first_hazard)
-    {
-        return;
-    }
-    let mut second_batch = *batch;
-    second_batch.pages[0] = second_page;
-    let Some(second) = collect_reachable_breakpoints(ctx, &mut second_batch, entry) else { return };
-    for &address in &first.outgoing[..first.outgoing_count] {
-        if super::svm::physical(ctx, address)
-            .ok()
-            .is_some_and(|p| p.as_u64() & !4095 == second_page)
-            && (address & !4095 != candidate_virtual
-                || second.visited[(address as usize & 4095) >> 3]
-                    & (1 << (address as usize & 7)) == 0)
-        {
-            return;
-        }
-    }
-    for &address in &second.outgoing[..second.outgoing_count] {
-        if super::svm::physical(ctx, address)
-            .ok()
-            .is_some_and(|p| p.as_u64() & !4095 == first_page)
-            && (address & !4095 != first_virtual
-                || first.visited[(address as usize & 4095) >> 3]
-                    & (1 << (address as usize & 7)) == 0)
-        {
-            return;
-        }
-    }
-    let mut breakpoints = batch.page_breakpoints;
-    let mut count = batch.page_breakpoint_count;
-    for &address in &second.breakpoints[..second.count] {
-        if breakpoints[..count].contains(&address) {
-            continue;
-        }
-        if count == breakpoints.len() { return; }
-        breakpoints[count] = address;
-        count += 1;
-    }
-    batch.page_breakpoints = breakpoints;
-    batch.page_breakpoint_count = count;
-    batch.pages[1] = second_page;
-    batch.code_page_count = 2;
-    batch.page_count = 2;
-}
-
 fn collect_reachable_breakpoints<C: VmContext>(
     ctx: &mut C,
     batch: &mut InstructionBatch,
     linear: u64,
-) -> Option<super::super::vm_state::SvmRegionProof> {
+) -> Option<()> {
     if batch.code_page_count != 1 {
         return None;
     }
@@ -3172,7 +3083,7 @@ fn collect_reachable_breakpoints<C: VmContext>(
     }) {
         batch.page_breakpoints = proof.breakpoints;
         batch.page_breakpoint_count = proof.count;
-        return Some(*proof);
+        return Some(());
     }
     let bytes = &memo.bytes;
     let virtual_page = linear & !4095;
@@ -3267,7 +3178,7 @@ fn collect_reachable_breakpoints<C: VmContext>(
         outgoing_count,
     };
     cache.region_cursor = (index + 1) % cache.region_proofs.len();
-    Some(cache.region_proofs[index])
+    Some(())
 }
 
 fn edge_prefix(byte: u8) -> bool {
@@ -6583,8 +6494,6 @@ mod tests {
     fn five_hazard_region_does_not_admit_a_page_reentering_an_unvisited_hazard() {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x3000].fill(0x90);
-        ctx.memory[0x1000..0x1007]
-            .copy_from_slice(&[0x75, 0x0e, 0xe9, 0xf9, 0x0f, 0x00, 0x00]);
         ctx.memory[0x1010] = 0xc3;
         for offset in [0x100, 0x200, 0x300, 0x400, 0x500] {
             ctx.memory[0x1000 + offset..0x1000 + offset + 3]
@@ -6594,8 +6503,6 @@ mod tests {
         ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         ctx.state_mut().svm_guard.gate_ready = true;
         ctx.state_mut().svm_guard.gate_root = 0x3000;
-        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
-            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000, valid: true };
         let mut allocator = crate::test_mocks::MockFrameAllocator::new();
         ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
             &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
@@ -6616,89 +6523,6 @@ mod tests {
         let hazard = cached_page_hazards(&mut ctx, 0x1000).unwrap();
         assert_eq!(hazard.count, 5);
         ctx.state_mut().svm_recent_pages[0] = 0x2000;
-        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
-        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
-        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000]);
-        assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1010]);
-    }
-
-    #[test]
-    fn five_hazard_region_admits_proven_two_page_loop() {
-        let mut ctx = paged_context(&[0x90]);
-        ctx.memory[0x1000..0x3000].fill(0x90);
-        ctx.memory[0x1000..0x1007]
-            .copy_from_slice(&[0x75, 0x0e, 0xe9, 0xf9, 0x0f, 0x00, 0x00]);
-        ctx.memory[0x1010] = 0xc3;
-        for offset in [0x100, 0x200, 0x300, 0x400, 0x500] {
-            ctx.memory[0x1000 + offset..0x1000 + offset + 3]
-                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
-        }
-        ctx.memory[0x2000..0x2005].copy_from_slice(&[0xe9, 0xfb, 0xef, 0xff, 0xff]);
-        ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
-        ctx.state_mut().svm_guard.gate_ready = true;
-        ctx.state_mut().svm_guard.gate_root = 0x3000;
-        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
-            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000, valid: true };
-        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
-        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
-            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
-        ).unwrap();
-        for page in [0x1000, 0x2000] {
-            ctx.state_mut().ept.map_4k(
-                &mut allocator,
-                GuestPhysAddr::new(page),
-                HostPhysAddr::new(page + 0x100000),
-                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
-                bedrock_ept::EptMemoryType::WriteBack,
-            ).unwrap();
-        }
-        ctx.set_guest_rip(0x2000);
-        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
-        assert!(prepare_global(&mut ctx, &allocator, true, true, &window).is_some());
-        ctx.set_guest_rip(0x1000);
-        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
-        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
-        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000]);
-        assert_eq!(&batch.page_breakpoints[..batch.page_breakpoint_count], &[0x1010]);
-    }
-
-    #[test]
-    fn five_hazard_region_rejects_an_unvisited_second_page_entry() {
-        let mut ctx = paged_context(&[0x90]);
-        ctx.memory[0x1000..0x3000].fill(0x90);
-        ctx.memory[0x1000..0x100d].copy_from_slice(&[
-            0x75, 0x0e, 0x0f, 0x85, 0xf8, 0x0f, 0x00, 0x00,
-            0xe9, 0x03, 0x10, 0x00, 0x00,
-        ]);
-        ctx.memory[0x1010] = 0xc3;
-        ctx.memory[0x2000] = 0xc3;
-        ctx.memory[0x2010] = 0xc3;
-        for offset in [0x100, 0x200, 0x300, 0x400, 0x500] {
-            ctx.memory[0x1000 + offset..0x1000 + offset + 3]
-                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
-        }
-        ctx.memory[0x2100..0x2103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
-        ctx.state_mut().svm_guard.gate_ready = true;
-        ctx.state_mut().svm_guard.gate_root = 0x3000;
-        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
-            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000, valid: true };
-        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
-        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
-            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
-        ).unwrap();
-        for page in [0x1000, 0x2000] {
-            ctx.state_mut().ept.map_4k(
-                &mut allocator,
-                GuestPhysAddr::new(page),
-                HostPhysAddr::new(page + 0x100000),
-                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
-                bedrock_ept::EptMemoryType::WriteBack,
-            ).unwrap();
-        }
-        ctx.set_guest_rip(0x2000);
-        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
-        assert!(prepare_global(&mut ctx, &allocator, true, true, &window).is_some());
-        ctx.set_guest_rip(0x1000);
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000]);
