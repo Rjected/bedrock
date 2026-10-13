@@ -4700,3 +4700,47 @@ reachability and a same-box timing/correctness comparison before adoption.
 Raw logs and fair markers are in ignored
 `target/boxctl-evidence/amd-npt-pages-1013/`. The shared branch's stable
 module was restored and its in-box SVM suite passed afterward.
+
+### Relocate two cold glibc REP sites away from hot code (2026-10-13)
+
+A second sampled run on `box-7577ba69` translated each sampled RIP through
+the guest page tables. All 3,943 fair-interval samples had a translated RIP
+on the reported fault GPA page. The hottest page had 407 samples and matched
+the pinned Tempo glibc file page `0x152000`; 296 samples entered at offset
+`0x930` and 109 at `0x260`, while its two `REP MOVSB` hazards are at `0xc64`
+and `0xcca`. This confirms that the common execute faults on that page are
+caused by other entries sharing a page with the REP sites. The diagnostic
+module's logging distorted its 73.75 s fair time; it was used only for page
+and offset attribution. Its raw log is in ignored
+`target/boxctl-evidence/amd-npt-pages-1013/`.
+
+An exact-build OCI diagnostic,
+`diagnostics/relocate-libc-rep-oci.py`, moves each `REP MOVSB` and its following
+`VMOVDQU` unchanged into existing alignment padding after a `RET` on glibc
+page `0x15a000`. Relative jumps connect the original entry and continuation;
+they do not change flags or general-purpose registers. The script verifies the
+original libc SHA-256, both original instruction sequences, both code caves,
+and the patched libc SHA-256 before rebuilding the layer and OCI digests.
+The hypervisor's hazard-byte predicate finds zero hazards on the formerly
+hot page and two on the destination page. No kernel or hypervisor code changes
+are part of this candidate.
+
+The stable shared module passed the in-box SVM suite before these runs. Two
+adjacent comparisons in opposite orders used the same box, seed, 10,000
+transfers, and fair timing markers. Every run reported 10,000 successes and
+zero failures:
+
+| Order | Guest image | Fair interval | VM exits | NPT faults | Synthetic MTF exits |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Two glibc REP sites relocated | 33.989 s | 16,274,461 | 12,861,048 | 1,194,746 |
+| 2 | Original pinned image | 38.443 s | 18,957,020 | 15,594,568 | 1,184,458 |
+| 3 | Original pinned image | 38.745 s | 19,037,267 | 15,660,380 | 1,201,510 |
+| 4 | Two glibc REP sites relocated | 34.520 s | 16,429,102 | 13,008,558 | 1,197,054 |
+
+The repeatable fair-time reduction is 4.2–4.5 s (about 11%); each pair also
+removes roughly 2.6–2.7 million NPT faults. The result is still above the
+historical Intel 24.087 s run, which used different hardware and the original
+image. This binary relocation is a pinned-workload diagnostic, not a general
+glibc or hypervisor fix. Raw logs and markers are in ignored
+`target/boxctl-evidence/amd-libc-rep-1013/`. All module builds, loads, and
+runtime tests remained on the disposable boxctl box.
