@@ -5958,3 +5958,23 @@ module passed 268 local VMX tests and the in-box SVM suite; the guest passed
 all 10,000 transfers. Logs, patch, marker snapshots, and host details are
 under ignored `target/boxctl-evidence/amd-shaped-pagehist-1013/`. All module
 operations ran only inside the disposable box, which was deleted.
+
+### Current Intel DST CI baseline is a different workload (2026-10-13)
+
+Dispatched `tempoxyz/bedrock` [Tempo E2E run 38431442041](https://github.com/tempoxyz/bedrock/actions/runs/38431442041)
+on `main` SHA `f6f885a89d345359713169248b37ef5627b84ae9`, with two nodes,
+Tempo and txgen `origin/main`, one parallel stream, and one seed. Seed
+`14373434789495652599` passed with no verdict failures. The uploaded
+`summary.json` reports **65 wall seconds** for the DST campaign step (one
+active guest, 55.38 seeds/hour at this one-seed scale). The full CI job ran
+from 16:33:13 to 16:38:27 UTC, including source checkout and input build.
+
+This is a current Intel Bedrock DST baseline, but it cannot be divided into
+the AMD **24.5-second** result. The AMD timing brackets one pinned
+10,000-transfer `bench send` command after guest setup, while the CI timing
+includes a two-node deterministic campaign, warm checkpoint and a branch
+with nemesis and transfer load. The current CI `tempo-dst` scripts and
+Tempo/txgen revisions also differ from the AMD branch's pinned artifacts.
+An Intel-to-AMD DST ratio requires the same campaign, seed, guest inputs, and
+timing boundary on an AMD `boxctl` host; conversely, a current Intel
+10,000-transfer ratio requires the fair benchmark on the Intel runner.
