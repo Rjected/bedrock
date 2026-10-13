@@ -4933,3 +4933,28 @@ its output SHA-256 is
 The hot layout is retained only in ignored artifacts and run logs. Neither
 initrd rewrite is adopted as the performance baseline. Logs and markers are
 in ignored `target/boxctl-evidence/amd-libc-rep-1013/`.
+
+### Profile the fastest image during the full transfer (2026-10-13)
+
+On the same EPYC 4245P HWE box, the stable module and the three-site Tempo
+plus four-site txgen image passed **10,000/10,000** transfers with zero
+failures while host AMD IBS sampled the first 15 seconds of the fair interval
+at `ibs_op//`, period 100 million. The marker interval was **30.487 s**; this
+sampled diagnostic is not a replacement for the adjacent unsampled 30.301 s
+and 30.354 s comparisons. It recorded **754 samples, zero lost**, with
+22.68% attributed to `svm_run_guest`, 9.42% to `handle_run`, 3.58% to
+`collect_page_breakpoints`, 2.92% to `page_hazards_memo`, and 2.12% to
+`prepare_global_into`. Attribution to `svm_run_guest` may include guest
+residency at `VMRUN`, so it is not a measure of transition cost alone.
+
+The fair-marker deltas were **10,418,913 NPT faults**, **1,194,764 synthetic
+MTF exits**, and **13,848,766 total exits**. VM-entry preparation accounted
+for **37.64 billion of 117.26 billion measured runner cycles** (32.1%).
+The earlier in-kernel cycle probes remain better evidence for the internal
+planner split; this lower-resolution profile confirms that guarded-page
+faults and their per-entry software work still dominate after the guest
+relocations. A concurrent host `cycles` profile captured only four samples,
+so it cannot locate a new bottleneck. Raw logs, marker snapshots, and both
+`perf.data` files are in ignored
+`target/boxctl-evidence/amd-best-ibs-1013/`. All module execution and
+profiling occurred inside the disposable boxctl box.
