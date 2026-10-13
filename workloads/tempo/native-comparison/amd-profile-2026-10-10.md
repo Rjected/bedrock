@@ -4635,3 +4635,37 @@ Both runs again had 10,000 successes and zero failures. The candidate was
 repeatable speedup; the experimental code was removed from the shared branch.
 The second box's logs, fair markers, stats, and fork-replay log are in ignored
 `target/boxctl-evidence/amd-twopage-repeat-1013/`.
+
+### Replace the pinned Tempo binary's five ZSTD REP copies (2026-10-13)
+
+The hot user page identified above belongs to `ZSTD_compressLiterals` in the
+pinned `/usr/local/bin/tempo`. Its five hazards are all `REP MOVSQ`, at ELF
+file offsets `0x7a9a3e7`, `0x7a9a4c5`, `0x7a9a5f4`, `0x7a9a7ae`, and
+`0x7a9a81b`. An exact-build diagnostic rewrote each copy into a bounded
+ordinary `MOVSQ` loop in existing unreachable executable padding. It moves
+the following `TEST` or `CMP` into the trampoline, preserving the flags at
+the original continuation; the `CMP` at `0x7a9b7b1` is also a branch target,
+so that site's preceding `MOV` was moved instead. A byte scan using the
+hypervisor's hazard predicate found zero remaining hazards on this code page.
+The patch is reproducible with
+`diagnostics/patch-zstd-rep-oci.py workloads/tempo/images.tar OUTPUT.tar`.
+It verifies the pinned ELF hash, all stolen bytes and code caves, then updates
+the OCI layer, config, and manifest digests. No guest kernel or hypervisor
+code was changed for this experiment.
+
+Mounting a fetched replacement executable into the container failed with
+`Exec format error` even for the unmodified binary, despite a matching guest
+SHA-256. The valid comparison therefore rebuilt the OCI image layer itself.
+Both complete 10,000-transfer runs on `box-a3839887` passed with zero
+failures:
+
+| Guest image | Fair interval | VM exits | NPT faults | Synthetic MTF exits |
+| --- | ---: | ---: | ---: | ---: |
+| Five ZSTD REP sites rewritten | 38.998 s | 19,339,908 | 15,937,521 | 1,166,820 |
+| Original pinned image, adjacent | 38.938 s | 19,257,333 | 15,861,568 | 1,195,233 |
+
+The rewrite reduced MTF exits by about 28,000 but did not reduce NPT faults
+or wall time. It is retained as a diagnostic script, not a workload change.
+Raw logs and fair markers are in ignored
+`target/boxctl-evidence/amd-zstd-norep-1013/`. Module builds and runtime
+tests remained inside the disposable boxctl box.
