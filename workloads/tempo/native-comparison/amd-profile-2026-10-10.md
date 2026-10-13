@@ -5670,3 +5670,49 @@ host-perf path remains **unmerged**. The forced-mode diagnostic patch, full
 logs, box details, and failure record are in ignored
 `target/boxctl-evidence/amd-host-pmc-throttle-1013/`. All module operations
 were confined to the disposable boxctl box.
+
+### Profile the pinned AMD glibc-boundary initrd (2026-10-13)
+
+On a disposable EPYC 4245P HWE box, the pushed `73ecfc6` module and the
+`amdTempoInitrd` guest completed the shaped 10,000-transfer workload. A
+diagnostic module sampled one in 4,096 execute NPT faults while the guest TSC
+was between 180 and 240 billion. Logging perturbs wall time, and the kernel
+ring buffer retains only the later samples, so these are page rankings rather
+than benchmark percentages. Of 1,309 retained samples, the largest identified
+file pages were `libsystemd-shared-259.so` `0xb6000` (61) and `0xb5000`
+(45), Nix glibc `0x5e000` (42) and `0x180000` (29), and the Tempo executable
+`0x6e7a000` (29). The profile matched sampled page bytes against the exact
+initrd and OCI files, including Tempo's ELF file-offset/virtual-address
+shift.
+
+A second trace recorded the global-page proof at each sampled fault. All 577
+retained samples had a ready, clean page-table gate but `safe=false` and
+`trusted=false`: the repeatedly faulting pages had actual byte-level hazards.
+The systemd PLT pages contain six and four apparent REP entries in indirect
+jump displacements. Nix glibc `0x5e000` has `F2 AF` inside an assertion-only
+`LEA` displacement at `0x5e2ba`; its hot entry is `_itoa_word` at `0x5e9c0`.
+Tempo executable pages also contain REP-like bytes in GOT-call displacements,
+and some pages have real REP instructions or trailing `0x0f` boundary hazards.
+Promoting these physical pages globally without a trap would be unsound.
+
+An exact-build diagnostic moved the glibc assertion string one byte into
+existing NUL padding and retargeted all eight `LEA` references. This changed
+63 bytes inside the one glibc CPIO payload and removed its false `F2 AF`
+entry; archive entry order, metadata, and every other payload byte matched
+the control. The stable module passed the full in-box SVM suite. Three
+adjacent, uninstrumented runs on the same box all completed 10,000/10,000
+transfers:
+
+| Initrd | Fair interval | Fair NPT faults | Entry cycles |
+| --- | ---: | ---: | ---: |
+| Assertion-string candidate | 25.773 s | 7,835,554 | 33.45 billion |
+| Pushed AMD initrd | 25.920 s | 7,884,133 | 33.61 billion |
+| Assertion-string candidate | 26.363 s | 8,022,847 | 34.20 billion |
+
+The first candidate's small gain did not repeat, and run-to-run fault-count
+variation exceeded the expected saving from that page. The assertion-string
+patch is **unmerged**. The diagnostic source, complete logs, marker snapshots,
+and exact CPIO comparison are under ignored
+`target/boxctl-evidence/amd-postglibc-profile-1013/` and
+`target/boxctl-evidence/amd-assertshift-1013/`. All module operations stayed
+inside the disposable box.
