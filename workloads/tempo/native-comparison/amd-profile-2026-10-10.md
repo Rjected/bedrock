@@ -5490,3 +5490,50 @@ The libjq and boundary initrds are exact-build diagnostics, not production
 guest rebuilds. Full logs and fair-marker JSON are in ignored
 `target/boxctl-evidence/amd-boundary-shaped-1013/`. All module operations
 occurred inside the disposable box.
+
+### Try a CR3-scoped executable lease for the hot boundary (2026-10-13)
+
+An isolated hypervisor candidate temporarily promoted a guarded page whose
+sole `0x0f` boundary had a safe continuation under the current CR3. Before
+each guest entry it checked the guarded root, current-page write-protected
+hazard memo, NPT mapping generation, and trusted-code generation. It revoked
+the executable leaf on changed context, page-table guard, code proof, or
+mapping. It also cleared a selected counted plan if plan construction itself
+revoked the lease. On a write fault, the recurrent code path dropped the
+trusted leaf before restoring write permission. Forked AMD NPTs began with
+all child code NX, because a child has none of its parent's scoped proof
+state. These are safety requirements for any later version of this approach.
+
+The 19 EPT and 268 VMX library tests and full EPYC 4245P HWE box suite passed,
+including smoke, transitions, fork replay, mixed memory, and native loops.
+The same shaped OCI, libjq-only initrd, source-patched GP kernel, CLI, seed,
+CPU pin, and 10,000-transfer command were used on one box. Every full run
+passed 10,000 transfers with zero failures or reverts:
+
+| Module | Fair interval | Fair NPT faults | Fair MTF exits | Fair entry cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Initial scoped lease | 28.267 s | 9,053,992 | 1,180,304 | 37.44 billion |
+| Pushed control | 28.588 s | 9,401,222 | 1,183,443 | 36.79 billion |
+| Scoped lease with plan-revocation fix | 28.419 s | 9,209,479 | 1,187,185 | 37.01 billion |
+
+The corrected candidate saved **0.17 s** and **0.19 million NPT faults**
+against its one same-box control, while adding **0.22 billion entry cycles**.
+This is a much smaller gain than physically removing the guest boundary, and
+one control does not establish a stable percentage. The large safety surface
+is not justified by this result, so the scoped lease is **not merged**.
+
+Two diagnostic runs logged lease activity while passing the complete
+workload. The last periodic snapshots showed roughly **0.44–0.49 million
+lease arm/revoke pairs** and **139–153 million active-lease checks** per VM
+run. About **0.36–0.41 million** revocations came from guarded-tree state,
+**0.07–0.08 million** from CR3 changes, and around **5,000** from mapping or
+trusted-code generation; none came from hazard-memo eviction. Removing the
+scoped lease's check of the scratch tree generation did not materially alter
+the outcome (diagnostic fair intervals **28.322 / 28.326 s**). The guarded
+tree often becomes dirty or unavailable, so the page rarely stays executable
+long enough to replace the guest relocation. A later hypervisor attempt would
+need to revalidate and renew the lease after guarded-tree refresh, while
+preserving the fork, write, and plan-revocation invariants above. The exact
+candidate patches, complete logs, and diagnostic dmesg are in ignored
+`target/boxctl-evidence/amd-scoped-boundary-1013/`. No module was built or
+loaded on the workstation.
