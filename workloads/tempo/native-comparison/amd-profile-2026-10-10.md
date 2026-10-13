@@ -4974,3 +4974,41 @@ Measured VM-entry preparation was 37.46 billion cycles versus 37.38 billion
 for the control. The larger hint shows no end-to-end gain and is discarded;
 the shared branch retains 64 slots. Logs and fair markers are in ignored
 `target/boxctl-evidence/amd-hint256-1013/`.
+
+### Move the initrd libjq REP off a hot page (2026-10-13)
+
+The one-in-4,096 NPT profile of the shaped Tempo image found 74 fair-interval
+fault samples on the initrd's `libjq.so.1.0.4` file page `0x31000`, mainly
+at ordinary entry offsets `0x53a` and `0x33d`. Its one disassembled hazard is
+`REP MOVSQ` at `0x31801`, in `jq_set_colors`. Exact-build diagnostic
+`diagnostics/relocate-libjq-rep-initrd.py` replaces those three bytes with a
+short jump to otherwise unreachable alignment padding at `0x3183a`, which
+then jumps to a second padding cave at `0x34096` on a page already guarded
+for another REP. That cave executes the original `REP MOVSQ` and returns to
+`0x31804`, leaving the existing branch target and `MOV EAX,1` intact. The
+script checks the compressed initrd hash, libjq hash, each source/cave byte
+sequence, and patched hashes. Rebuilding produced exactly the tested
+initrd, SHA-256
+`8236cca295d44362989436882e0995e45308b472355583eb4e03b123f61c2029`.
+Static disassembly verifies the jump chain and the relocated REP. This is a
+pinned-build guest diagnostic, not a general hypervisor rewrite.
+
+On one EPYC 4245P HWE box with the stable module, same shaped OCI image,
+seed, and fair markers, alternating patched/original initrds gave:
+
+| Initrd | Fair interval | NPT faults | Synthetic MTF exits | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| libjq relocated | 29.074 s | 9,700,419 | 1,162,723 | 37.04 billion |
+| original control | 30.424 s | 10,530,206 | 1,156,155 | 37.79 billion |
+| libjq relocated | 28.635 s | 9,697,285 | 1,169,899 | 35.90 billion |
+| original control | 30.501 s | 10,562,070 | 1,188,344 | 38.10 billion |
+
+Every run passed **10,000/10,000** transfers with zero failures. The change
+removed about **0.83–0.86 million NPT faults** and improved the fair interval
+by **1.35–1.87 s** relative to the adjacent original-initrd controls. The
+best AMD interval is now **28.635 s**, about 1.19 times the historical Intel
+24.087 s interval on different hardware and guest inputs. The separately
+measured glibc tcache REP relocation did not help, so this libjq change is
+applied to the original initrd alone. Logs and marker snapshots are in
+ignored `target/boxctl-evidence/amd-libjq-1013/`. All module builds, loads,
+and runtime tests occurred inside disposable boxctl boxes.
