@@ -5921,3 +5921,40 @@ candidate is **not** part of the shaped-image pipeline. The diagnostic
 builder, full logs, marker snapshots, counters, and host details are under
 ignored `target/boxctl-evidence/amd-sdallocx-call-1013/`; all module
 operations ran only on the disposable box, which was deleted.
+
+### Count the shaped workload's execute-NPT pages (2026-10-13)
+
+A diagnostic-only 8,192-slot atomic histogram counted **7,021,463** execute
+NPT faults in guest-TSC window 190–233 billion, covering the 10,000-transfer
+fair interval (24.788 host seconds in this instrumented run). It recorded
+2,036 distinct guest-physical pages and dropped zero counts. The 293 pages
+with at least 1,000 faults account for 6,952,711 events (99.0%). This is a
+near-fair-window count, not an exact marker-to-marker count; the instrumented
+timing is for attribution, not a speed comparison.
+
+| Faults | Page source | Finding |
+| ---: | --- | --- |
+| 215,813 | Tempo file page `0x6f11000` | Ends in `0x0f`; boundary guard |
+| 195,867 | Guest physical `0x1fb0000`, source unresolved | Three hazards in an earlier sampled scan; first is `0x0f c7 f6` at page offset `0x8f5` |
+| 190,827 | Tempo file page `0x2374000` | False `F2 A5` inside the `sdallocx` call displacement |
+| 170,757 | Guest physical `0x1fad000`, source unresolved | Three hazards in an earlier sampled scan; first is `REP MOVSB` at offset `0x136` |
+| 154,046 | Tempo file page `0x6e7a000` | False `F2 A4` inside an indirect-call displacement |
+| 145,225 | Guest kernel physical `0x13ab000` | Guarded kernel code |
+| 138,841 | Tempo file page `0x7b8a000` | Bundled Keccak `REP MOVSB` plus boundary guard |
+| 136,130 | Nix glibc file page `0x180000` | Guarded libc code |
+| 135,170 | Tempo file page `0x5d2a000` | Ends in `0x0f`; boundary guard |
+| 126,814 | Benchmark client file page `0xe5a000` | `F3 AF` hazard |
+
+The ten leading pages account for 1,609,490 faults (22.9%). The two
+unresolved low physical pages were repeatably hazardous under the global
+scanner (`may_trust=true`, `safe=false`, clean page-table gate in an earlier
+sample); their first-16-byte fingerprints did not match the pinned Tempo,
+bench, or guest-kernel ELF. Their executable owner still needs identification.
+Tempo file pages `0x5b74000` (117,543 faults) and `0x5c21000` (89,678 faults)
+have no in-page REP/RNG byte pattern in the pinned ELF; the latter ends in
+`0x0f`, while the former needs a live reason check. A single REP-byte patch
+cannot eliminate the bulk of the remaining exits. The isolated diagnostic
+module passed 268 local VMX tests and the in-box SVM suite; the guest passed
+all 10,000 transfers. Logs, patch, marker snapshots, and host details are
+under ignored `target/boxctl-evidence/amd-shaped-pagehist-1013/`. All module
+operations ran only inside the disposable box, which was deleted.
