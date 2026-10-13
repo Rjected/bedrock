@@ -5073,3 +5073,27 @@ relocation. Its logged fair interval was 45.613 s and is for attribution,
 not speed comparison. The full live sample is in ignored
 `target/boxctl-evidence/amd-boundary-profile-1013/`; the stable module was
 restored afterward and passed the full in-box SVM suite.
+
+### Test a hypervisor-only single-alias boundary proof (2026-10-13)
+
+An isolated candidate tried to avoid the boundary breakpoint without
+rewriting libc. It required a single exact breakpoint at page offset `0xfff`
+under a guarded translation tree, one executable virtual alias, an active
+NPT write guard on the current page, and a trusted/write-protected next page.
+It read the joined instruction bytes on each entry and retained the
+breakpoint if they formed a forbidden instruction. Targeted tests checked
+the safe continuation and fallback for unsafe bytes, an untrusted next page,
+and a second alias. All 268 VMX library tests and the full in-box SVM suite
+passed.
+
+The complete libjq-only Tempo run passed 10,000 transfers with zero failures,
+but its fair interval was **29.911 s**, versus **29.520 s** and **29.644 s**
+for the adjacent stable-module controls. NPT faults fell to **9,733,231**
+from about **9.99 million**, while measured VM-entry preparation rose to
+**40.19 billion cycles** from **36.59–37.11 billion**. This does not match
+the guest relocation's 0.8–1.1 million-fault reduction or improve wall time.
+The source remains isolated and the stable module was restored and retested;
+the exact candidate diff and run evidence are in ignored
+`target/boxctl-evidence/amd-hv-boundary-1013/`. More work would need to
+identify why the proof misses most hot transitions and avoid its entry-time
+checks without weakening alias/write invalidation.
