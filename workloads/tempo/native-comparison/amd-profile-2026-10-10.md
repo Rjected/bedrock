@@ -5781,3 +5781,42 @@ in-box SVM smoke, deadline, fork/replay, and mixed-workload checks. Logs,
 marker snapshots, host details, and artifact hashes are under ignored
 `target/boxctl-evidence/amd-systemd-plt-1013/`. No module operation ran on
 the workstation.
+
+### Profile the PLT-patched guest and reject a cold breakpoint merge (2026-10-13)
+
+The pinned PLT-patched image was reprofiled on an EPYC 4245P HWE box. A
+diagnostic module sampled one in 8,192 execute NPT faults in a guest-TSC
+window overlapping the 10,000-transfer phase. The full workload passed, but
+logging stretched its fair interval to 32.613 s, so the sampled run is for
+attribution rather than timing. The kernel ring retained 498 samples, 441 of
+them before the second fair marker; its earlier part was overwritten. The
+old hot systemd PLT file pages `0xb5000` and `0xb6000` had no retained
+samples. The largest uniquely identified initrd page was systemd file page
+`0x2b4000` (17 fair samples), whose three hazards are real `REP STOSQ`
+instructions. Its hot sampled entries at `0xa80` and `0xae0` are away from
+those hazards. Nix glibc page `0x180000` had 11 fair samples. The two leading
+guest-kernel physical pages had 14 each. Exact first-16-byte matches to the
+pinned OCI layers identified 279 of the 441 retained fair samples, including
+many distinct Tempo executable pages and benchmark-client pages. Thus the
+remaining faults are spread across more than one library or syscall path.
+
+A hypervisor-only candidate merged two of the systemd page's cold hazard
+breakpoints inside aligned range `0x600–0x7ff` when a second guarded page
+needed the freed debug-register slot. The current RIP had to be outside the
+range, and the original exact addresses remained covered. All 269 VMX unit
+tests and the in-box SVM smoke, deadline, fork/replay, and mixed-workload
+checks passed. The same box then ran the identical pinned image, module build
+procedure, CPU pin, seed, and 10,000-transfer command with candidate and
+pushed control; both passed all transfers:
+
+| Module | Fair interval | Fair NPT faults | Entry cycles |
+| --- | ---: | ---: | ---: |
+| Cold-mask candidate | 25.415 s | 7,016,749 | 35.00 billion |
+| Pushed control | 24.625 s | 6,977,074 | 32.89 billion |
+
+The candidate added 39,675 NPT faults and 2.11 billion entry-preparation
+cycles, with no throughput gain. It remains **unmerged**. Complete logs,
+marker snapshots, source patch, and host details are under ignored
+`target/boxctl-evidence/amd-cold-mask-1013/`; the diagnostic fault log and
+patch are under `target/boxctl-evidence/amd-postsysplt-profile-1013/`. All
+module operations stayed inside the disposable box.
