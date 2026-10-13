@@ -5097,3 +5097,18 @@ the exact candidate diff and run evidence are in ignored
 `target/boxctl-evidence/amd-hv-boundary-1013/`. More work would need to
 identify why the proof misses most hot transitions and avoid its entry-time
 checks without weakening alias/write invalidation.
+
+An instrumented repeat passed 10,000/10,000 transfers and took **29.845 s**,
+with **9,684,164 NPT faults** and **38.89 billion VM-entry preparation
+cycles**. Its last periodic diagnostic snapshot, covering boot and transfer,
+recorded 56.62 million proof calls: 6.89 million had the single `0x0f`
+boundary shape, 6.49 million retained an active current-page write guard,
+and 4.52 million had a trusted next page and passed the joined-byte check.
+The one-alias and guarded-tree checks did not reject any of the shaped
+cases in that snapshot. Thus the proof often succeeds, but its repeated
+checks run millions of times to remove only roughly 0.25–0.31 million
+transfer-phase NPT faults. A cheaper cached proof would need explicit
+invalidation for page-table changes, both code pages' writes, and host
+mapping changes; simply widening this uncached proof cannot supply the
+measured guest-relocation gain. The diagnostic counters and instrumented
+candidate diff are in the same ignored evidence directory.
