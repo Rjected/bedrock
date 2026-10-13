@@ -158,6 +158,10 @@ impl Checkpoint {
             match exit.kind() {
                 ExitKind::VmcallReady => {
                     vm.set_stop_at_tsc(None)?;
+                    // Boot file transfers map a writable feedback buffer.
+                    // Protect it before branching so children can retain AMD
+                    // code and page-table proofs across RUN boundaries.
+                    vm.seal_memory()?;
                     return Self::initial_at_with_configured_rng(
                         vm,
                         at,

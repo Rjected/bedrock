@@ -30,6 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "intel-vmcall" {
         return test_intel_vmcall();
     }
+    if args.len() == 2 && args[1] == "fork-seal" {
+        return test_fork_seal();
+    }
     if args.len() == 2 && args[1] == "page-loops" {
         return test_page_loops(false, false);
     }
@@ -82,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | control-flow | rep | rep-proof | stores | rmw-stores | page-loops | guarded-loops | loop-deadlines | rax-delay-loop | intel-vmcall | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
+            "Usage: svm_bench [native | native-branches | control-flow | rep | rep-proof | stores | rmw-stores | page-loops | guarded-loops | loop-deadlines | rax-delay-loop | intel-vmcall | fork-seal | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
                 .into(),
         );
     }
@@ -110,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_counted_loop_deadlines()?;
     test_rax_delay_loop()?;
     test_intel_vmcall()?;
+    test_fork_seal()?;
     test_counter_idt_shadow()?;
     test_native_pushf_flags()?;
     const LOOPS: u16 = 4096;
@@ -229,6 +233,39 @@ fn test_intel_vmcall() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(exit.exit_reason, 266, "Intel VMCALL was not dispatched");
         assert_eq!(vm.get_regs()?.rip, 0x1003);
         println!("SVM_INTEL_VMCALL_PASS");
+        break;
+    }
+    Ok(())
+}
+
+fn test_fork_seal() -> Result<(), Box<dyn std::error::Error>> {
+    let mut root = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        root.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    // Ten thousand native loop instructions, then the ready hypercall.
+    root.memory_mut()?[0x1000..0x100d].copy_from_slice(&[
+        0x48, 0xff, 0xc8, 0x75, 0xfb, // dec rax; jnz
+        0xb8, 7, 0, 0, 0, // mov eax, HYPERCALL_READY
+        0x0f, 0x01, 0xd9, // vmmcall
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rax = 5_000;
+    root.set_regs(&regs)?;
+    root.seal_memory()?;
+    let child = root.fork()?;
+    let start = Instant::now();
+    loop {
+        let exit = child.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 266);
+        assert_eq!(exit.emulated_tsc, 10_001);
+        println!("SVM_FORK_SEAL_PASS seconds={:.6}", start.elapsed().as_secs_f64());
         break;
     }
     Ok(())

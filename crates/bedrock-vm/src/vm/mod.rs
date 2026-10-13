@@ -67,6 +67,8 @@ pub struct Vm {
     /// Indexed by slot; grows on demand. Same length as `feedback_buffer_sizes`.
     feedback_buffer_ptrs: Vec<Option<NonNull<u8>>>,
     feedback_buffer_sizes: Vec<usize>,
+    feedback_buffer_writable: Vec<bool>,
+    feedback_mappings_sealed: bool,
     ioctl_stats: Cell<IoctlStats>,
     forked: bool,
 }
@@ -185,6 +187,8 @@ impl Vm {
             event_mmap_offset,
             feedback_buffer_ptrs: Vec::new(),
             feedback_buffer_sizes: Vec::new(),
+            feedback_buffer_writable: Vec::new(),
+            feedback_mappings_sealed: false,
             ioctl_stats: Cell::new(IoctlStats::default()),
             forked: false,
         })
@@ -224,6 +228,8 @@ impl Vm {
             event_mmap_offset,
             feedback_buffer_ptrs: Vec::new(),
             feedback_buffer_sizes: Vec::new(),
+            feedback_buffer_writable: Vec::new(),
+            feedback_mappings_sealed: false,
             ioctl_stats: Cell::new(IoctlStats::default()),
             forked: true,
         })
@@ -232,7 +238,11 @@ impl Vm {
     /// Create a copy-on-write fork of this VM.
     pub fn fork(&self) -> io::Result<Self> {
         let vm_id = self.get_vm_id()?;
-        Self::create_forked(vm_id)
+        let mut child = Self::create_forked(vm_id)?;
+        // A new fork has no userspace guest-RAM or feedback mappings. Its
+        // inherited memory is stable only while its parent is sealed.
+        child.memory_sealed = self.memory_sealed;
+        Ok(child)
     }
 
     pub fn is_forked(&self) -> bool {
@@ -264,13 +274,7 @@ impl Vm {
     pub fn memory_mut(&mut self) -> io::Result<&mut [u8]> {
         match self.memory_ptr {
             Some(ptr) => {
-                if self.memory_sealed {
-                    let ret = unsafe { libc::mprotect(ptr.as_ptr().cast(), self.memory_size, libc::PROT_READ | libc::PROT_WRITE) };
-                    if ret != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    self.memory_sealed = false;
-                }
+                self.unseal_memory()?;
                 Ok(unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), self.memory_size) })
             }
             None => Err(io::Error::new(
@@ -280,18 +284,74 @@ impl Vm {
         }
     }
 
-    /// Make the root VM's userspace guest-RAM mapping read-only. While sealed,
+    fn unseal_memory(&mut self) -> io::Result<()> {
+        if self.memory_sealed {
+            if let Some(ptr) = self.memory_ptr {
+                let ret = unsafe {
+                    libc::mprotect(
+                        ptr.as_ptr().cast(),
+                        self.memory_size,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                    )
+                };
+                if ret != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            // After the first mapping becomes writable, a failed later
+            // mprotect must leave RUN on the conservative path.
+            self.memory_sealed = false;
+        }
+        if self.feedback_mappings_sealed {
+            for (index, ptr) in self.feedback_buffer_ptrs.iter().enumerate() {
+                if let Some(ptr) = ptr.filter(|_| self.feedback_buffer_writable[index]) {
+                    let ret = unsafe {
+                        libc::mprotect(
+                            ptr.as_ptr().cast(),
+                            self.feedback_buffer_sizes[index],
+                            libc::PROT_READ | libc::PROT_WRITE,
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+            }
+            self.feedback_mappings_sealed = false;
+        }
+        Ok(())
+    }
+
+    /// Make all userspace-writable guest mappings read-only. While sealed,
     /// RUN can retain guarded code and page-table proofs across userspace
-    /// exits. `memory_mut()` restores write access and the conservative RUN.
+    /// exits. Mutable access restores write access and the conservative RUN.
     pub fn seal_memory(&mut self) -> io::Result<()> {
-        let ptr = self.memory_ptr.ok_or_else(|| io::Error::new(
-            io::ErrorKind::Unsupported,
-            "forked VMs have no direct memory mapping",
-        ))?;
         if !self.memory_sealed {
-            let ret = unsafe { libc::mprotect(ptr.as_ptr().cast(), self.memory_size, libc::PROT_READ) };
-            if ret != 0 {
-                return Err(io::Error::last_os_error());
+            // Feedback buffers can alias code or page tables. Protect their
+            // aliases too, otherwise userspace can invalidate a retained
+            // proof without going through the guarded write path.
+            self.feedback_mappings_sealed = true;
+            for (index, ptr) in self.feedback_buffer_ptrs.iter().enumerate() {
+                if let Some(ptr) = ptr.filter(|_| self.feedback_buffer_writable[index]) {
+                    let ret = unsafe {
+                        libc::mprotect(
+                            ptr.as_ptr().cast(),
+                            self.feedback_buffer_sizes[index],
+                            libc::PROT_READ,
+                        )
+                    };
+                    if ret != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+            }
+            if let Some(ptr) = self.memory_ptr {
+                let ret = unsafe {
+                    libc::mprotect(ptr.as_ptr().cast(), self.memory_size, libc::PROT_READ)
+                };
+                if ret != 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             self.memory_sealed = true;
         }
@@ -709,6 +769,7 @@ impl Vm {
         self.ensure_feedback_slot(index);
         self.feedback_buffer_ptrs[index] = Some(ptr);
         self.feedback_buffer_sizes[index] = size;
+        self.feedback_buffer_writable[index] = false;
 
         Ok(unsafe { slice::from_raw_parts(ptr.as_ptr(), size) })
     }
@@ -722,6 +783,7 @@ impl Vm {
     /// writes land directly in the guest's pages (`bedrock_remap_pages` honours
     /// the VMA's `vm_page_prot`). Used by [`crate::file_xfer`].
     pub fn map_feedback_buffer_mut_at(&mut self, index: usize) -> io::Result<&mut [u8]> {
+        self.unseal_memory()?;
         if self.feedback_buffer_at(index).is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -758,6 +820,7 @@ impl Vm {
         self.ensure_feedback_slot(index);
         self.feedback_buffer_ptrs[index] = Some(ptr);
         self.feedback_buffer_sizes[index] = size;
+        self.feedback_buffer_writable[index] = true;
 
         Ok(unsafe { slice::from_raw_parts_mut(ptr.as_ptr(), size) })
     }
@@ -767,6 +830,10 @@ impl Vm {
     pub fn feedback_buffer_mut_at(&mut self, index: usize) -> Option<&mut [u8]> {
         if index >= self.feedback_buffer_ptrs.len() {
             return None;
+        }
+
+        if self.feedback_buffer_ptrs[index].is_some() {
+            self.unseal_memory().ok()?;
         }
 
         self.feedback_buffer_ptrs[index].map(|ptr| unsafe {
@@ -788,6 +855,7 @@ impl Vm {
                 );
             }
             self.feedback_buffer_sizes[index] = 0;
+            self.feedback_buffer_writable[index] = false;
         }
     }
 
@@ -829,6 +897,7 @@ impl Vm {
         if self.feedback_buffer_ptrs.len() <= index {
             self.feedback_buffer_ptrs.resize(index + 1, None);
             self.feedback_buffer_sizes.resize(index + 1, 0);
+            self.feedback_buffer_writable.resize(index + 1, false);
         }
     }
 
