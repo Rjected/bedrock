@@ -5448,3 +5448,45 @@ not close the gap to the historical Intel run on different hardware. Build,
 suite, full-run, and counter logs are in ignored
 `target/boxctl-evidence/amd-boundary-cache-1013/`. All module builds and
 loads occurred inside the disposable boxctl box.
+
+### Check the boundary cache against the shaped Tempo workload (2026-10-13)
+
+Commit `3685477` and its parent `5289f93` were built as separate modules on
+one EPYC 4245P HWE 7.0.0-38 box. The CLI, one CPU pin, seed 12345, 16 GiB
+guest, source-patched GP kernel (SHA-256 `8735375b…`), and shaped OCI archive
+(SHA-256 `05cf1c7e…`) were held constant. The initial cached/control/cached
+sequence used the original pinned initrd; all 10,000 transfers passed in
+**29.210 / 29.346 / 28.081 s**. The large spread between the cached runs
+prevents treating this as a precise cache speedup.
+
+The follow-up isolated the hot Nix glibc page-boundary hazard. The libjq-only
+initrd relocates its REP but leaves glibc's `0xc2fff` boundary intact. The
+second initrd additionally relocates that boundary; neither module nor OCI
+image changed between those two guest layouts. Fair marker snapshots count
+only the 10,000-transfer interval:
+
+| Module | Initrd | Fair interval | NPT faults | Synthetic MTF exits | Entry cycles |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Cached | libjq-only | 28.025 s | 9,216,687 | 1,147,493 | 35.80 billion |
+| Cached | libjq + boundary | 26.304 s | 8,280,629 | 1,143,537 | 33.86 billion |
+| Parent control | libjq-only | 28.561 s | 9,391,001 | 1,197,555 | 36.05 billion |
+| Cached | libjq + boundary | 27.257 s | 8,586,976 | 1,161,945 | 34.73 billion |
+| Cached | libjq-only | 27.903 s | 9,106,810 | 1,160,746 | 35.56 billion |
+
+All five runs passed 10,000/10,000 transfers with zero failures or reverts.
+The cached module is **0.54–0.66 s faster** than the one same-box parent
+control on the libjq-only layout, with **0.17–0.28 million fewer NPT faults**.
+Even with that cache, physically removing the glibc boundary saves
+**0.65–1.72 s** and **0.52–0.94 million NPT faults** relative to adjacent
+libjq-only runs of the same module. The exact interval varies with the host
+and workload. The cached proof suppresses a per-entry breakpoint under a
+guarded root, but it cannot mark the hazardous physical page globally trusted:
+another address space may give its trailing `0x0f` an unsafe continuation.
+One possible hypervisor path is a sound context-scoped execute proof that
+revokes on CR3 changes, translation-tree changes, current/next-page writes,
+and host mapping edits. Source-level removal of the boundary is another
+route; neither has been implemented for this glibc page.
+The libjq and boundary initrds are exact-build diagnostics, not production
+guest rebuilds. Full logs and fair-marker JSON are in ignored
+`target/boxctl-evidence/amd-boundary-shaped-1013/`. All module operations
+occurred inside the disposable box.
