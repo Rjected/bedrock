@@ -314,6 +314,8 @@ impl kernel::InPlaceModule for Bedrock {
             ::pin_init::pin_init_from_closure(|slot: *mut Self| {
                 log_info!("Bedrock module loading...\n");
 
+                machine::init_direct_map();
+
                 // SAFETY: Called exactly once during module initialization.
                 HANDLER.init();
                 let counters = svm::Counters::new()?;

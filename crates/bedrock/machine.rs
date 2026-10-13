@@ -4,6 +4,7 @@
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kernel::bindings;
 
@@ -20,6 +21,16 @@ use super::vmxon::RealVmx;
 /// Kernel operations implementation.
 pub(crate) struct LinuxKernel;
 
+static DIRECT_MAP_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// Capture x86's direct-map offset before the module exposes any VM. The
+/// kernel's `__va(phys)` is `__va(0) + phys`; reading it here includes KASLR.
+pub(crate) fn init_direct_map() {
+    // SAFETY: __va(0) computes the direct-map base without dereferencing it.
+    let base = unsafe { c_helpers::bedrock_phys_to_virt(0) } as usize;
+    DIRECT_MAP_BASE.store(base, Ordering::Relaxed);
+}
+
 impl Kernel for LinuxKernel {
     type P = KernelPage;
     type G = KernelGuestMemory;
@@ -33,8 +44,11 @@ impl Kernel for LinuxKernel {
     }
 
     fn phys_to_virt(&self, phys: HostPhysAddr) -> *mut u8 {
-        // SAFETY: bedrock_phys_to_virt wraps __va() which is valid for direct-mapped physical memory.
-        unsafe { c_helpers::bedrock_phys_to_virt(phys.as_u64()).cast::<u8>() }
+        let base = DIRECT_MAP_BASE.load(Ordering::Relaxed);
+        debug_assert_ne!(base, 0);
+        // The base is fixed for the life of the module, so no C call is needed
+        // for each nested-page-table lookup.
+        base.wrapping_add(phys.as_u64() as usize) as *mut u8
     }
 
     fn call_on_all_cpus_with_data<F, T, E>(&self, data: &T, func: F) -> Result<(), E>
