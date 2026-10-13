@@ -5565,3 +5565,43 @@ additional scoped-execute safety state; the candidate remains **unmerged**.
 Its patch, full logs, marker JSON, and box suite logs are in ignored
 `target/boxctl-evidence/amd-scoped-renew-1013/`. The ephemeral box was
 deleted. No module was built or loaded on the workstation.
+
+### Host perf guest-only counter on pre-PmcVirt EPYC (2026-10-13)
+
+An isolated candidate tested a host `perf_event` counting AMD guest-only
+retired instructions on an EPYC 4244P without SVM PMC virtualization. Linux
+perf delivered guest-only overflows, so the candidate armed a physical PMI
+before VMRUN and read the event after exit. It retained the existing PmcVirt
+path on newer CPUs. A 4,096-instruction advance margin was needed because
+physical PMI delivery lagged the requested period in short hardware tests.
+The initial candidate missed a deadline after forced CPU migration; the
+follow-up allowed this fallback only with a single-CPU affinity mask and
+permanently disabled it for a VM after a CPU change.
+
+The pinned hardware benchmark passed at **270,338 instructions in 0.037 s**
+(**7.30 million instructions/s**). An unpinned mixed-memory sample passed
+**37.75 million instructions in 0.0154 s**, with 6,179 exits versus
+0.00328 s native. A forced migration during a longer guest run preserved its
+checksum and exact **3.687 billion** instruction count, but triggered the
+conservative path: **458,590 exits**, 1.178 s guest versus 0.387 s native.
+The 19 EPT, 268 VMX, and 23 SVM library tests passed. These focused results
+do not establish full-guest correctness or safety for the new counter path.
+
+The same shaped Tempo boot, pinned to CPU 1, advanced only to guest virtual
+time 51.445 after roughly seven minutes of host time. It then failed before
+any fair transfer marker with `SVM PMU read failed` on exit code `0x61`
+(NMI); the exact reason the perf event stopped is undetermined. A five-second
+host-cycle profile during the boot assigned 33.17% of samples to
+`svm_run_guest`, 12.87% to `handle_run`, 7.17% to `prepare_global_into`,
+and just 0.84% to `perf_event_period`. This suggests that reprogramming the
+event is not the dominant sampled cost, although the profile does not
+explain the failed read. Because the boot did not reach the transfer interval,
+there is **no comparable Tempo throughput measurement** for this candidate.
+The existing pushed implementation remains the validated path, with shaped
+same-box 10,000-transfer intervals around 26–28 s in prior runs. The host
+perf candidate is **not merged**.
+
+The candidate patch, logs, local test results, host details, and profile
+summary are in ignored `target/boxctl-evidence/amd-host-pmc-1013/`. All
+module building and runtime tests took place inside a disposable boxctl box;
+no module was built or loaded on the workstation.
