@@ -4958,3 +4958,19 @@ so it cannot locate a new bottleneck. Raw logs, marker snapshots, and both
 `perf.data` files are in ignored
 `target/boxctl-evidence/amd-best-ibs-1013/`. All module execution and
 profiling occurred inside the disposable boxctl box.
+
+### Check whether a larger guarded-hazard hint helps (2026-10-13)
+
+The current guarded-page hazard fast path has a direct-mapped 64-slot hint.
+An isolated variant enlarged it to 256 slots to test whether collisions
+still account for material planner time. It passed the full in-box SVM suite,
+including replay and native-loop checks. On the same EPYC 4245P box, stable
+workload, seed, and shaped image, the variant took **30.199 s** for 10,000
+successful transfers and zero failures. After restoring the unchanged
+64-slot module and rerunning its suite, the adjacent control took **30.176 s**
+with the same transfer result. The variant had 10,471,087 NPT faults and
+1,154,451 synthetic MTF exits; the control had 10,452,588 and 1,182,277.
+Measured VM-entry preparation was 37.46 billion cycles versus 37.38 billion
+for the control. The larger hint shows no end-to-end gain and is discarded;
+the shared branch retains 64 slots. Logs and fair markers are in ignored
+`target/boxctl-evidence/amd-hint256-1013/`.
