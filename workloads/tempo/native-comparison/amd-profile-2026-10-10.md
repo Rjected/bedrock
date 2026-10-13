@@ -4835,3 +4835,32 @@ failed its control-flow acceleration assertion twice, reporting 20,030 and
 the full SVM suite before the adjacent comparison. This is an unresolved
 hardware-portability issue; the 4244P log is in ignored
 `target/boxctl-evidence/box-9a86491b/`.
+
+### Reprofile the faster combined image (2026-10-13)
+
+A one-in-4,096 execute-fault sample on `box-3fa32d2b` retained 2,621 hits
+inside the fair interval. The full transfer passed 10,000/10,000, but logging
+stretched that interval to 53.691 s; its counts are for attribution only.
+The former hot txgen libc pages `0x152000`, `0x98000`, and `0x96000` had
+zero sampled faults. The leading identified pages are now:
+
+| Guest file page | Fair samples | Leading entry offsets |
+| --- | ---: | --- |
+| Initrd Nix glibc `0xc2000` | 114 | `0x310` (all 114) |
+| Initrd Nix glibc `0xae000` | 92 | `0x7b0` (90) |
+| Initrd Nix glibc `0x180000` | 82 | `0x490` (41), `0x4b0` (26) |
+| Tempo libc `0x153000` | 75 | `0x350` (72) |
+| Initrd `libjq.so.1.0.4` `0x31000` | 74 | `0x53a` (41), `0x33d` (26) |
+| Initrd `libsystemd-shared-259.so` `0xb6000` | 70 | `0xb30` (25), `0xc10` (25) |
+| Initrd Nix glibc `0x5e000` | 61 | `0x9c0` (all 61) |
+| Initrd Nix glibc `0x95000` | 61 | `0x710` (49), `0x76f` (11) |
+
+Two of the hot Nix glibc pages (`0xc2000` and `0x95000`) end in an incomplete
+`0x0f` opcode. Bedrock's scanner already records that suffix as a boundary
+hazard even though disassembly shows no REP instruction on either page. A
+proposed zero-hazard-region optimization was discarded when its targeted
+unit test found one boundary hazard on a synthetic page with the same suffix.
+The remaining profile therefore calls for a plan that covers boundary
+hazards and common entry offsets without adding frequent proof-frontier
+stops. The raw sample and test output are in ignored
+`target/boxctl-evidence/amd-npt-pages-1013/` and the box logs.
