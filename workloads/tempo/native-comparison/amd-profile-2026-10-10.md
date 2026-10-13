@@ -4465,3 +4465,34 @@ stress, before using the fast path. The experimental code remains only in
 `/tmp/bedrock-amd-irperf-probe-1012`; raw logs and marker snapshots are in
 ignored `target/boxctl-evidence/amd-unified-rep-1013/`. No module was built or
 loaded on the workstation.
+
+### Guarded REP retirement follow-up (2026-10-13)
+
+The preceding fast candidate was unsafe because a global gate could enter a
+REP in the middle of a batch, then mistake a completed REP followed by a loop
+back to the same RIP for an unfinished REP. The follow-up rejects a global
+batch *starting* at REP and keeps REP in the page-hazard scanner. At a REP
+hazard breakpoint it uses the bounded native executor; a completed REP advances
+the virtual instruction clock once, and a partial REP advances it zero times.
+The AMD deadline tests were updated to this architectural retirement rule.
+The AMD RDRAND CPUID mask used during diagnosis was removed.
+
+On the disposable EPYC 4245P/HWE box, the guarded follow-up passed the cached
+code-write REP test, REP deadline and RF tests, 17 transition checks, 25 bench
+checks, and three independent 1,024-fork Linux replay runs against a scalar
+reference. The 10,000-transfer Tempo run completed with 10,000 successes and
+zero failures/reverts. Its fair-marker interval was **39.814 s**, 19.556 million
+VM exits, and 16.100 million NPT faults. The same-box guarded branch measured
+39.949 s, 19.671 million exits, and 16.187 million NPT faults: the interval is
+only 0.3% shorter, within run-to-run noise. The earlier 20.418-second candidate
+therefore does not establish a usable speedup. The historical Intel interval
+was 24.087 s on different hardware, so this guarded AMD result remains roughly
+1.65x slower as an indicative, non-equivalent comparison.
+
+Host IBS sampling via `perf record -e ibs_op//` caused replay divergence in
+both the guarded branch and the experimental follow-up. The 3×1,024 replay
+passes establish correctness only without concurrent host IBS sampling; that
+stress failure is unresolved. The guarded follow-up stays in the isolated
+`/tmp/bedrock-amd-irperf-probe-1012` worktree because it has no measured Tempo
+benefit and changes virtual-clock semantics. Logs and marker snapshots are in
+ignored `target/boxctl-evidence/amd-rep-guard-2026-10-13/`.
