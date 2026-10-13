@@ -24,6 +24,10 @@ if [[ -n ${BEDROCK_AMD_GLIBC_BOUNDARY:-} ]]; then
   python3 "$BEDROCK_AMD_GLIBC_PATCH" \
     ".$BEDROCK_AMD_GLIBC_BOUNDARY" ".$BEDROCK_AMD_GLIBC_BOUNDARY"
 fi
+if [[ -n ${BEDROCK_AMD_SYSTEMD_PLT:-} ]]; then
+  python3 "$BEDROCK_AMD_SYSTEMD_PATCH" \
+    ".$BEDROCK_AMD_SYSTEMD_PLT" ".$BEDROCK_AMD_SYSTEMD_PLT"
+fi
 # Stable metadata and entry order make the cached initrd reproducible.
 find . -exec touch -h -d @1 {} +
 LC_ALL=C find . -print0 | sort -z | cpio --null --reproducible --owner=0:0 --quiet -o -H newc | gzip -n -1 > "$output.tmp.$$"

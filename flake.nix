@@ -88,6 +88,7 @@
       amdTempoInitrd = import ./nix/tempo-initrd.nix {
         inherit pkgs podmanInitrd;
         amdGlibcBoundary = true;
+        amdSystemdPlt = true;
       };
       svmTempoInitrd = import ./nix/tempo-initrd.nix {
         inherit pkgs;

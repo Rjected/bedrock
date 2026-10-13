@@ -5745,3 +5745,39 @@ The remaining ~8 million NPT faults per fair interval dominate this target.
 Complete logs and marker snapshots are under ignored
 `target/boxctl-evidence/amd-proactive-rf-1013/`; all module operations stayed
 inside the disposable box.
+
+### Relocate false REP bytes in systemd PLT stubs (2026-10-13)
+
+The pinned initrd's full `libsystemd-shared-259.so` has eight apparent REP
+entries on file page `0xb5000` and four on `0xb6000`. Each is an `F2` byte in
+the displacement of a 16-byte lazy PLT stub's `JMP [RIP+disp32]`. These pages
+ranked among the most frequent remaining execute NPT faults. The AMD Tempo
+initrd now uses an exact-build, SHA-checked guest patch that replaces each
+stub's first six bytes with a direct jump into existing unreachable NOP
+alignment padding. There, an indirect jump reads the **same original GOT
+slot**. The original PLT `+6` PUSH/JMP resolver path is untouched, so both
+resolved and lazy bindings keep their targets and stack behavior. The patched
+binary's SHA is `1d32543f49e3444a2a1c80622df4a6cc59c2dfd21bab4b6ef2e4e8b30fd28c14`.
+
+The four affected 4 KiB pages (two PLT, two trampoline) have zero apparent
+hazard entries after patching. The pinned diagnostic initrd differs from its
+control by exactly 156 uncompressed bytes, all inside this one systemd
+payload. Both initrds ran the same pushed module on one disposable EPYC 4245P
+HWE box, with the same kernel, OCI archive, seed, and CPU pin. Every run
+completed 10,000 transfers with zero failures:
+
+| Initrd | Fair interval | Fair NPT faults | Entry cycles |
+| --- | ---: | ---: | ---: |
+| PLT patch | 24.737 s | 7,058,319 | 32.74 billion |
+| Unchanged control | 25.800 s | 7,869,719 | 33.65 billion |
+| PLT patch | 24.661 s | 6,991,910 | 33.16 billion |
+
+The patch saved **1.06–1.14 s (4.1–4.4%)** and **0.81–0.88 million** execute
+NPT faults relative to the adjacent control. The Nix-built `amdTempoInitrd`
+contained the same patched systemd binary and booted, but that standalone
+image lacks the pinned fair-benchmark harness, so its untimed run cannot be
+used as another transfer comparison. The paired run's module passed the
+in-box SVM smoke, deadline, fork/replay, and mixed-workload checks. Logs,
+marker snapshots, host details, and artifact hashes are under ignored
+`target/boxctl-evidence/amd-systemd-plt-1013/`. No module operation ran on
+the workstation.
