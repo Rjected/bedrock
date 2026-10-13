@@ -5635,3 +5635,38 @@ planner coverage and the extra faults point against the change. It remains
 the box was deleted. The source diff, test output, full logs, markers, and
 stats are in ignored `target/boxctl-evidence/amd-widen2-1013/`. No module was
 built or loaded on the workstation.
+
+### Diagnose host-perf fallback throttling (2026-10-13)
+
+The isolated host-perf candidate was instrumented to report perf event state
+when its guest-only instruction counter became unreadable. A disposable EPYC
+4245P box supports SVM PMC virtualization, so this diagnostic deliberately
+forced the host-perf fallback to exercise the older-CPU path; the pushed
+module still uses PMC virtualization on this processor. The forced fallback
+passed pinned smoke, transitions, exact-deadline benchmark, and mixed-memory
+workload. Its final 270,338-instruction benchmark interval took 0.0221 s,
+and the 37.75-million-instruction mixed-memory sample took 0.00313 s guest
+versus 0.00310 s native. These short results again failed to predict boot.
+
+The shaped full guest had reached only virtual time **6.273 s** after nearly
+three host minutes, then failed before loading either OCI image. At the
+failure, the event was active (`state=1`) but its hardware state was stopped
+(`hw=1`); its interrupt counter was **`2^64 - 1`**, after **855,912** overflow
+callbacks. [Linux perf's throttle path](https://github.com/torvalds/linux/blob/master/kernel/events/core.c#L2763-L2788)
+sets that exact sentinel and stops the event. This identifies perf overflow
+throttling as the proximate cause of the PMU read failure. It also shows that
+the physical-PMI fallback generates an impractical number of interrupts for
+this boot, rather than merely suffering from a slow period-reprogram call.
+
+An in-box diagnostic raised `kernel.perf_event_max_sample_rate` from 100,000
+to 1,000,000, reloaded the module, and ran the same guest with a 170-second
+wall-clock cap. It did not hit a second PMU read failure, but it again reached
+only virtual time **6.275 s** and did not load an OCI image or reach a fair
+transfer marker. The pushed PMC-virtualized path on the prior same-model box
+reached its first marker in roughly **121 s** and completed 10,000 transfers
+in **28.531 s**. Thus raising the kernel perf limit removes neither the large
+boot gap nor the need for a reliable exact deadline under delayed PMIs. The
+host-perf path remains **unmerged**. The forced-mode diagnostic patch, full
+logs, box details, and failure record are in ignored
+`target/boxctl-evidence/amd-host-pmc-throttle-1013/`. All module operations
+were confined to the disposable boxctl box.
