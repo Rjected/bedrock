@@ -4669,3 +4669,34 @@ or wall time. It is retained as a diagnostic script, not a workload change.
 Raw logs and fair markers are in ignored
 `target/boxctl-evidence/amd-zstd-norep-1013/`. Module builds and runtime
 tests remained inside the disposable boxctl box.
+
+### Sample executable NPT fault pages during the Tempo transfer (2026-10-13)
+
+An isolated diagnostic module on `box-a3839887` logged one in 4,096 execute
+NPT faults with guest TSC, RIP, fault GPA, CR3, and the first bytes of the
+faulting physical page. The full host `dmesg` stream was captured while the
+10,000-transfer workload ran. Filtering to its fair interval retained 3,812
+samples. The diagnostic run took 71.239 s because kernel logging perturbed
+it; these counts are for ranking pages, not a timing comparison.
+
+| Fault GPA page | Fair samples | Identified file page | Hazardous instructions on page |
+| --- | ---: | --- | --- |
+| `0x10a28f000` | 400 (10.5%) | Tempo `libc.so.6` `0x152000` | Two `REP MOVSB` |
+| `0x1173e6000` | 173 (4.5%) | Tempo `libc.so.6` `0x3c000` | Six `REP STOSQ` |
+| `0x11b983000` | 161 (4.2%) | Tempo `libc.so.6` `0x98000` | One `REP STOSQ` |
+| `0x13f1aa000` | 113 (3.0%) | Not yet mapped | Unknown |
+| `0x11b5ac000` | 101 (2.6%) | Tempo `libc.so.6` `0x96000` | One `REP STOSQ` |
+| `0x166e2a000` | 100 (2.6%) | Tempo executable `0x6f11000` | None within page |
+
+File pages were matched by their page-start bytes against the pinned guest
+artifacts. NPT execute faults report a physical page base, not the exact
+instruction offset. The sampled RIP may also belong to a different page,
+so this data does **not** prove that the listed REP instructions executed.
+For example, the six `REP STOSQ` sites on libc page `0x3c000` include
+`sigblock` setup code; that page's fault volume may largely be false masked
+hits. The high share on libc `0x152000` makes it a stronger next diagnostic
+target than the ZSTD page, but a guest rewrite needs instruction-level
+reachability and a same-box timing/correctness comparison before adoption.
+Raw logs and fair markers are in ignored
+`target/boxctl-evidence/amd-npt-pages-1013/`. The shared branch's stable
+module was restored and its in-box SVM suite passed afterward.
