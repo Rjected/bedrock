@@ -3979,6 +3979,31 @@ fn prepare_verified<C: VmContext>(
         instruction_budget: budget,
     };
     batch.pages[0] = physical.as_u64() & !4095;
+    // Register-only DEC RAX/JNZ loops can execute an exact bounded chunk
+    // without a PMC. The endpoint trap stops after the clamped iteration.
+    if long
+        && paged
+        && bytes[..available].starts_with(&[0x48, 0xff, 0xc8, 0x75, 0xfb])
+        && state.gprs.rax != 0
+    {
+        let iterations = state.gprs.rax.min(budget / 2).min(65536);
+        if iterations != 0 {
+            let mut candidate = batch;
+            candidate.count = 2;
+            candidate.offsets[1] = 3;
+            candidate.offsets[2] = 5;
+            candidate.counted_loop = Some(CountedLoopBatch {
+                register: 0,
+                width: 64,
+                original_count: state.gprs.rax,
+                iterations,
+                decrement_index: 0,
+            });
+            candidate.endpoint_intercepted = endpoint_intercepted(&bytes[5..available]);
+            collect_code_tables(ctx, &mut candidate, linear)?;
+            return Some(candidate);
+        }
+    }
     // A page guard would stop immediately at REP and force one scalar
     // iteration. Prefer its validated, deadline-bounded native chunk instead.
     if long
@@ -4615,6 +4640,22 @@ mod tests {
     fn planned(ctx: &MockVmContext) -> Option<InstructionBatch> {
         let window = super::super::svm::InstructionWindow::read(ctx).unwrap();
         prepare_verified(ctx, true, false, false, &window)
+    }
+
+    #[test]
+    fn register_only_rax_delay_loop_uses_bounded_native_chunk() {
+        let mut ctx = paged_context(&[0x48, 0xff, 0xc8, 0x75, 0xfb, 0x90]);
+        ctx.state_mut().gprs.rax = 100_000;
+        let batch = planned(&ctx).unwrap();
+        let counted = batch.counted_loop.unwrap();
+        assert_eq!(counted.register, 0);
+        assert_eq!(counted.original_count, 100_000);
+        assert_eq!(batch.count, 2);
+        assert_eq!(batch.endpoint(), 0x1005);
+        assert!(!batch.uses_counter);
+        assert!(!batch.accesses_memory);
+        ctx.state_mut().gprs.rax = 0;
+        assert!(!planned(&ctx).is_some_and(|batch| batch.counted_loop.is_some()));
     }
 
     #[test]

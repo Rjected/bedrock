@@ -191,6 +191,10 @@ pub(crate) unsafe fn run(
     }
     if let Some(counted) = batch.and_then(|b| b.counted_loop) {
         match counted.register {
+            0 => {
+                ctx.guest_rax = counted.iterations;
+                v.write(o::RAX, 8, counted.iterations);
+            }
             1 => ctx.guest_rcx = counted.iterations,
             2 => ctx.guest_rdx = counted.iterations,
             _ => return Err(VmEntryError::VmEntryFailed),
@@ -523,6 +527,7 @@ pub(crate) unsafe fn run(
             completed
         } else if let Some(counted) = batch.counted_loop {
             let counter = match counted.register {
+                0 => ctx.guest_rax,
                 1 => ctx.guest_rcx,
                 2 => ctx.guest_rdx,
                 _ => return Err(VmEntryError::VmEntryFailed),
@@ -544,6 +549,10 @@ pub(crate) unsafe fn run(
                 return Err(VmEntryError::VmEntryFailed);
             }
             match counted.register {
+                0 => {
+                    ctx.guest_rax = remaining;
+                    v.write(o::RAX, 8, remaining);
+                }
                 1 => ctx.guest_rcx = remaining,
                 2 => ctx.guest_rdx = remaining,
                 _ => return Err(VmEntryError::VmEntryFailed),

@@ -78,10 +78,10 @@ pub struct RepeatBatch {
     pub iterations: u64,
 }
 
-/// A MOV/LEA/DEC/JNZ loop with no other counter or flags consumers.
+/// A bounded DEC/JNZ loop with no other counter or flags consumers.
 #[derive(Clone, Copy, Debug)]
 pub struct CountedLoopBatch {
-    /// Architectural GPR index: RCX (1) or RDX (2).
+    /// Architectural GPR index: RAX (0), RCX (1), or RDX (2).
     pub register: u8,
     /// Width of the decrement, either 32 or 64 bits.
     pub width: u8,
@@ -104,7 +104,7 @@ impl CountedLoopBatch {
         if instruction > body_length
             || self.decrement_index >= body_length
             || !matches!(self.width, 32 | 64)
-            || !matches!(self.register, 1 | 2)
+            || !matches!(self.register, 0 | 1 | 2)
         {
             return None;
         }
@@ -165,7 +165,7 @@ mod counted_loop_tests {
 
     #[test]
     fn narrow_counters_match_native_zero_extension_and_flags() {
-        for register in [1, 2] {
+        for register in [0, 1, 2] {
             for original_count in [0x100000003u64, 0x180000000, 0x180000001, u64::MAX] {
                 for decrement_index in 0..3 {
                     let batch = CountedLoopBatch {

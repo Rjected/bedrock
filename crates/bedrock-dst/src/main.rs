@@ -594,6 +594,7 @@ fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Res
         .cmdline(&args.cmdline)
         .initramfs(&initrd);
     vm.setup_linux_boot(&boot)?;
+    vm.seal_memory()?;
     let path = |p: &Path| p.to_string_lossy().into_owned();
     let mut files = vec![
         ("compose.yaml".into(), path(&args.compose)),

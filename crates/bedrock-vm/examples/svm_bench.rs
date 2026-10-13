@@ -24,6 +24,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "loop-deadlines" {
         return test_counted_loop_deadlines();
     }
+    if args.len() == 2 && args[1] == "rax-delay-loop" {
+        return test_rax_delay_loop();
+    }
     if args.len() == 2 && args[1] == "page-loops" {
         return test_page_loops(false, false);
     }
@@ -76,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() != 1 {
         return Err(
-            "Usage: svm_bench [native | native-branches | control-flow | rep | rep-proof | stores | rmw-stores | page-loops | guarded-loops | loop-deadlines | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
+            "Usage: svm_bench [native | native-branches | control-flow | rep | rep-proof | stores | rmw-stores | page-loops | guarded-loops | loop-deadlines | rax-delay-loop | VMLINUX INITRD [INSTRUCTIONS [repeat]]]"
                 .into(),
         );
     }
@@ -102,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_page_loops(true, false)?;
     test_page_loops(true, true)?;
     test_counted_loop_deadlines()?;
+    test_rax_delay_loop()?;
     test_counter_idt_shadow()?;
     test_native_pushf_flags()?;
     const LOOPS: u16 = 4096;
@@ -145,6 +149,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(stopped);
         let seconds = start.elapsed().as_secs_f64();
         println!("SVM_BENCH_PASS instructions={EXPECTED} seconds={seconds:.6} instructions_per_second={:.0}", EXPECTED as f64 / seconds);
+        break;
+    }
+    Ok(())
+}
+
+fn test_rax_delay_loop() -> Result<(), Box<dyn std::error::Error>> {
+    const COUNT: u64 = 100_000;
+    const DEADLINE: u64 = 20_001;
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    vm.memory_mut()?[0x1000..0x1008]
+        .copy_from_slice(&[0x48, 0xff, 0xc8, 0x75, 0xfb, 0x0f, 0x01, 0xd9]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.rflags = 0x203;
+    regs.gprs.rsp = 0x8000;
+    regs.gprs.rax = COUNT;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(DEADLINE))?;
+    let start = Instant::now();
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 259);
+        assert_eq!(exit.emulated_tsc, DEADLINE);
+        let regs = vm.get_regs()?;
+        assert_eq!(regs.rip, 0x1003);
+        assert_eq!(regs.gprs.rax, COUNT - 10_001);
+        vm.set_stop_at_tsc(None)?;
+        break;
+    }
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 {
+            continue;
+        }
+        assert_eq!(exit.exit_reason, 258);
+        assert_eq!(exit.emulated_tsc, COUNT * 2);
+        let regs = vm.get_regs()?;
+        assert_eq!(regs.gprs.rax, 0);
+        assert_ne!(regs.rflags & (1 << 6), 0);
+        println!(
+            "SVM_RAX_DELAY_LOOP_PASS instructions={} seconds={:.6}",
+            COUNT * 2,
+            start.elapsed().as_secs_f64()
+        );
         break;
     }
     Ok(())
