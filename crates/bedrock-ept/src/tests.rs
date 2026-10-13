@@ -133,10 +133,15 @@ fn npt_code_gate_keeps_unknown_and_remapped_pages_nonexecutable() {
     assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
     assert!(!parent.npt_trusted_code_4k(&allocator, gpa));
 
+    let code_generation = parent.trusted_code_generation();
     parent.trust_npt_code_4k(&allocator, gpa).unwrap();
+    assert_eq!(parent.trusted_code_generation(), code_generation + 1);
+    parent.trust_npt_code_4k(&allocator, gpa).unwrap();
+    assert_eq!(parent.trusted_code_generation(), code_generation + 1);
     assert!(parent.npt_trusted_code_4k(&allocator, gpa));
     assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_EXECUTE);
     parent.invalidate_npt_code_4k(&allocator, gpa).unwrap();
+    assert_eq!(parent.trusted_code_generation(), code_generation + 2);
     assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
 
     let execute = parent.allow_npt_execute_4k(&allocator, gpa).unwrap();

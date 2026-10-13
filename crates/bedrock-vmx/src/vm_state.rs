@@ -103,6 +103,7 @@ pub(crate) struct SvmGuardScratch {
     pub alias_last_hit: usize,
     pub region_proofs: [SvmRegionProof; 32],
     pub region_cursor: usize,
+    pub boundary_continuations: [SvmBoundaryContinuation; 16],
     pub page_plans: [SvmPagePlan; 128],
     pub code_epoch: u64,
     pub tree_generation: u64,
@@ -280,6 +281,19 @@ pub(crate) struct SvmRegionProof {
     pub count: usize,
     pub outgoing: [u64; 16],
     pub outgoing_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SvmBoundaryContinuation {
+    pub valid: bool,
+    pub root: u64,
+    pub page: u64,
+    pub next_linear: u64,
+    pub next_physical: u64,
+    pub revision: u64,
+    pub tree_generation: u64,
+    pub mapping_generation: u64,
+    pub trusted_code_generation: u64,
 }
 
 #[derive(Clone, Copy)]

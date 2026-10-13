@@ -28,6 +28,7 @@ pub struct EptPageTable<Frame> {
     execution_workspace: Option<EptBox<NptExecutionScratch>>,
     execution_generation: u64,
     mapping_generation: u64,
+    trusted_code_generation: u64,
 }
 
 /// Temporary AMD execute restriction. Restore before changing mappings or
@@ -192,6 +193,7 @@ impl<Frame> EptPageTable<Frame> {
             execution_workspace: execution_workspace(format),
             execution_generation: 0,
             mapping_generation: 0,
+            trusted_code_generation: 0,
         })
     }
 
@@ -208,6 +210,11 @@ impl<Frame> EptPageTable<Frame> {
     /// Changes whenever a 4KB guest-to-host mapping is created or replaced.
     pub fn mapping_generation(&self) -> u64 {
         self.mapping_generation
+    }
+
+    /// Changes whenever an AMD trusted-code leaf is armed or revoked.
+    pub fn trusted_code_generation(&self) -> u64 {
+        self.trusted_code_generation
     }
 
     /// Host physical address and permissions for `gpa`, if mapped.
@@ -523,7 +530,12 @@ impl<Frame> EptPageTable<Frame> {
         let (table, index) = self.npt_leaf_4k(allocator, guest)?;
         let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
         // SAFETY: the guest is stopped while changing its NPT leaf.
-        unsafe { (*leaf.add(index as usize)).set_npt_trusted_code(true) };
+        unsafe {
+            if (*leaf.add(index as usize)).raw() & (1 << 9) == 0 {
+                (*leaf.add(index as usize)).set_npt_trusted_code(true);
+                self.trusted_code_generation = self.trusted_code_generation.wrapping_add(1);
+            }
+        };
         Some(())
     }
 
@@ -535,7 +547,12 @@ impl<Frame> EptPageTable<Frame> {
         let (table, index) = self.npt_leaf_4k(allocator, guest)?;
         let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
         // SAFETY: the guest is stopped while changing its NPT leaf.
-        unsafe { (*leaf.add(index as usize)).set_npt_trusted_code(false) };
+        unsafe {
+            if (*leaf.add(index as usize)).raw() & (1 << 9) != 0 {
+                (*leaf.add(index as usize)).set_npt_trusted_code(false);
+                self.trusted_code_generation = self.trusted_code_generation.wrapping_add(1);
+            }
+        };
         Some(())
     }
 
@@ -545,6 +562,7 @@ impl<Frame> EptPageTable<Frame> {
         if self.format != PageTableFormat::AmdNpt {
             return;
         }
+        self.trusted_code_generation = self.trusted_code_generation.wrapping_add(1);
         let pml4 = allocator.phys_to_virt(self.pml4_phys).cast::<EptEntry>();
         for a in 0..512 {
             // SAFETY: every index is within an owned NPT page.
@@ -938,6 +956,7 @@ impl<Frame> EptPageTable<Frame> {
             execution_workspace: execution_workspace(self.format),
             execution_generation: 0,
             mapping_generation: 0,
+            trusted_code_generation: 0,
         })
     }
 }

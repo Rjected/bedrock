@@ -2281,7 +2281,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     let batch = output.as_mut().unwrap();
     batch.pages[0] = page;
     if !trusted {
-        let hazard = cached_page_hazards(ctx, page)?;
+        let mut hazard = cached_page_hazards(ctx, page)?;
         if hazard.count == 0 {
             // A page first fetched while the translation gate was dirty can
             // remain on the scalar path after the gate becomes usable. The
@@ -2320,7 +2320,13 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             return Some(());
         }
         collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
-        if batch.page_breakpoint_count == 0 {
+        let boundary_proven = suppress_safe_single_alias_boundary(
+            ctx, allocator, batch, &hazard, window.linear,
+        );
+        if boundary_proven {
+            hazard.count = 0;
+        }
+        if batch.page_breakpoint_count == 0 && !boundary_proven {
             return None;
         }
         // A counted global interval can cross several recently visited
@@ -2451,6 +2457,94 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         }
     }
     Some(())
+}
+
+/// A sole `0x0f` at the end of a guarded code page is conservatively a
+/// breakpoint: another virtual alias could append RDRAND. When the guarded
+/// page-table tree proves exactly one executable alias and its next page is
+/// already trusted (hence write-protected), inspect that fixed continuation
+/// and release the otherwise unnecessary debug-register slot for this entry.
+fn suppress_safe_single_alias_boundary<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+    batch: &mut InstructionBatch,
+    hazard: &PageHazards,
+    linear: u64,
+) -> bool {
+    if hazard.count != 1 || hazard.offsets[0] != 4095
+        || hazard.boundary[31] != 0x0f
+        || batch.page_breakpoint_count != 1
+        || batch.page_breakpoint_masks[0] != 0
+    {
+        return false;
+    }
+    let address = batch.page_breakpoints[0];
+    if address != (linear & !4095) + 4095 {
+        return false;
+    }
+    let Some(next_linear) = address.checked_add(1) else { return false; };
+    let Some(root) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()
+        .map(|value| value & 0x000f_ffff_ffff_f000) else { return false; };
+    let guard = &ctx.state().svm_guard;
+    if !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted
+        || guard.gate_root != root
+    {
+        return false;
+    }
+    let page = batch.pages[0];
+    let (_, Some(index)) = hazard_memo_lookup(ctx, page) else { return false; };
+    let memo = &ctx.state().svm_guard.hazard_memos[index];
+    let mapping_generation = ctx.state().ept.mapping_generation();
+    if !memo.valid || !memo.guarded || memo.rejected
+        || memo.guarded_mapping_generation != mapping_generation
+    {
+        return false;
+    }
+    let revision = memo.revision;
+    // Tree changes, remapping, or any trusted-code leaf transition revoke
+    // the cached safe continuation. Both pages remain write protected.
+    let slot = ((page >> 12) as usize) & (ctx.state().svm_guard.boundary_continuations.len() - 1);
+    let cached = ctx.state().svm_guard.boundary_continuations[slot];
+    let tree_generation = ctx.state().svm_guard.tree_generation;
+    let trusted_code_generation = ctx.state().ept.trusted_code_generation();
+    let cache_hit = cached.valid && cached.root == root && cached.page == page
+        && cached.next_linear == next_linear && cached.revision == revision
+        && cached.tree_generation == tree_generation
+        && cached.mapping_generation == mapping_generation
+        && cached.trusted_code_generation == trusted_code_generation;
+    let next_physical = if cache_hit {
+        GuestPhysAddr::new(cached.next_physical)
+    } else {
+        let Ok(next_physical) = super::svm::physical(ctx, next_linear) else { return false; };
+        next_physical
+    };
+    if !cache_hit && !ctx.state().ept.npt_trusted_code_4k(allocator, next_physical) {
+        return false;
+    }
+    if !cache_hit {
+        let mut joined = [0u8; 16];
+        joined[0] = hazard.boundary[31];
+        if ctx.read_guest_memory(next_physical, &mut joined[1..]).is_err()
+            || hazardous_entry(&joined)
+        {
+            return false;
+        }
+        ctx.state_mut().svm_guard.boundary_continuations[slot] =
+            super::super::vm_state::SvmBoundaryContinuation {
+                valid: true,
+                root,
+                page,
+                next_linear,
+                next_physical: next_physical.as_u64(),
+                revision,
+                tree_generation,
+                mapping_generation,
+                trusted_code_generation,
+            };
+    }
+    batch.page_breakpoint_count = 0;
+    batch.page_breakpoints[0] = 0;
+    true
 }
 
 fn breakpoint_masks_supported() -> bool {
@@ -4798,6 +4892,68 @@ mod tests {
         let hazards = page_hazards(&mut ctx, 0x1000, None).unwrap().unwrap();
         assert_eq!(&hazards.offsets[..hazards.count], &[4091, 4092, 4093, 4094, 4095]);
         assert!(hazards.boundary_guarded);
+    }
+
+    #[test]
+    fn single_alias_boundary_relaxation_rechecks_the_guarded_continuation() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        ctx.memory[0x1fff] = 0x0f;
+        ctx.memory[0x2000..0x2002].copy_from_slice(&[0xfc, 0xc8]);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page),
+                HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(&first.page_breakpoints[..first.page_breakpoint_count], &[0x1fff]);
+        for _ in 0..17 {
+            assert_eq!(page_hazards_memo(&mut ctx, 0x1000).unwrap().count, 1);
+        }
+        protect_recurrent_code(&mut ctx, &allocator, 0x1000);
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x2000),
+        ).unwrap();
+        let proven = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(proven.page_breakpoint_count, 0);
+        // Model the trusted-code revocation that a real guest or host write
+        // performs before the modified bytes can execute.
+        ctx.state_mut().ept.invalidate_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x2000),
+        ).unwrap();
+        ctx.memory[0x2000..0x2002].copy_from_slice(&[0xc7, 0xf0]);
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x2000),
+        ).unwrap();
+        let unsafe_next = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(&unsafe_next.page_breakpoints[..unsafe_next.page_breakpoint_count], &[0x1fff]);
+        ctx.memory[0x2000..0x2002].copy_from_slice(&[0xfc, 0xc8]);
+        ctx.state_mut().ept.invalidate_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x2000),
+        ).unwrap();
+        let untrusted_next = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(&untrusted_next.page_breakpoints[..untrusted_next.page_breakpoint_count], &[0x1fff]);
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x2000),
+        ).unwrap();
+        // Model a completed, guarded page-table rebuild with another
+        // executable virtual alias of the same physical page.
+        ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
+        invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+        let aliased = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(aliased.page_breakpoint_count, 2);
+        assert!(aliased.page_breakpoints[..2].contains(&0x1fff));
+        assert!(aliased.page_breakpoints[..2].contains(&0x9fff));
     }
 
     #[test]

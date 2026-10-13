@@ -5403,3 +5403,48 @@ stable module, kernel, original Tempo OCI images, seed, and CPU pin, both
 The extra change did not improve elapsed time and produced about 103,000
 more NPT faults. It remains isolated in `/tmp/bedrock-jq-stos-1013` and was
 not pushed. Logs are in ignored `target/boxctl-evidence/amd-jq-stos-1013/`.
+
+### Cache the guarded boundary continuation proof (2026-10-13)
+
+The earlier single-alias proof removed some false breakpoint stops on pages
+ending in `0x0f`, but repeated translation and joined-byte inspection made
+VM entry more expensive than the saved NPT faults. The retained AMD path
+caches a safe continuation only when the guarded page-table tree, current
+hazard memo revision, and NPT mapping generation match. An EPT trusted-code
+generation changes whenever a trusted leaf is armed or revoked. A cache hit
+therefore skips the next-page translation and byte read while the current
+hazard memo remains write-guarded and the next page's trusted-code proof has
+not been revoked. A miss runs the complete existing proof; unsafe joins keep
+their breakpoint. Tests cover changed continuation bytes, an untrusted next
+page, a second executable alias, and the trusted-code generation transitions.
+
+The first cached prototype still walked both NPT protections on every hit.
+Although it cut about 0.53 million whole-VM NPT faults, its 39.968 s fair
+interval was slower than the 39.736 s control and its entry preparation rose
+from 190.28 to 198.14 billion cycles. A generation-checked version removed
+the repeated joined-byte read but still spent about 193.20 billion entry
+cycles and took 39.818 s. Neither prototype is retained. The final version
+uses the guarded-memo and mapping-generation invariant already used by the
+hazard-memo fast path and checks the next trusted leaf only on a cache miss.
+
+The final uninstrumented module passed 19 EPT and 268 VMX library tests and
+the in-box smoke, transition, mixed-memory, and native-loop suites. On one
+EPYC 4245P HWE 7.0.0-38 box, the original pinned Tempo `initrd.gz` and
+`images.tar`, original aligned GP kernel, seed 12345, 16 GiB guest RAM,
+one host CPU, and 10,000-transfer compose file were held constant. Every
+run passed 10,000/10,000 transfers with zero failures and zero reverts.
+The final candidate/control/candidate series gave:
+
+| Module | Fair interval | Whole-VM NPT faults | Total exits | Entry cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Cached boundary proof | 38.807 s | 60,488,972 | 81,300,094 | 189.39 billion |
+| Unchanged control | 39.493 s | 60,867,171 | 81,816,350 | 190.20 billion |
+| Cached boundary proof | 38.809 s | 60,355,016 | 81,178,594 | 190.34 billion |
+
+The candidate runs were **0.684–0.686 s faster** than the adjacent
+control, with **0.38–0.51 million fewer NPT faults**. An earlier unchanged
+control on the same box took 39.736 s. The observed gain is modest and does
+not close the gap to the historical Intel run on different hardware. Build,
+suite, full-run, and counter logs are in ignored
+`target/boxctl-evidence/amd-boundary-cache-1013/`. All module builds and
+loads occurred inside the disposable boxctl box.
