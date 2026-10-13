@@ -4496,3 +4496,44 @@ stress failure is unresolved. The guarded follow-up stays in the isolated
 `/tmp/bedrock-amd-irperf-probe-1012` worktree because it has no measured Tempo
 benefit and changes virtual-clock semantics. Logs and marker snapshots are in
 ignored `target/boxctl-evidence/amd-rep-guard-2026-10-13/`.
+
+### Sample actual masked-breakpoint false hits (2026-10-13)
+
+A disposable box ran the complete 10,000-transfer Tempo workload with one in
+256 harmless breakpoint retries logged, including the page's guarded hazard
+set and chosen breakpoint masks. The corrected diagnostic run had 979 samples
+in the transfer phase; all 10,000 transfers succeeded. The largest page had
+577 samples. Its seven hazards were `0x311`, `0x374`, `0x4d4`, `0x854`,
+`0x888`, `0xaeb`, and `0xfcc`. The four slots used a `0x7f` mask at `0x300`,
+exact breaks at `0x4d4` and `0xfcc`, and a `0x3ff` mask at `0x800`. The hot
+false-hit offsets around `0x9c0` through `0xa22` lie in that last range.
+With the existing 1 KiB mask limit and four slots, splitting the three
+hazards in `0x800`–`0xbff` needs a fifth slot; choosing a different pair alone
+cannot remove the hot range.
+
+The five-hazard REP page had 290 samples, but its plan used **exact**, unmasked
+reachable-region breakpoints at ordinary offsets such as `0x457`, `0x46d`, and
+`0x57b`. Those are proof-frontier stops, not REP entries or masked-range false
+hits. This distinguishes its remaining exits from the seven-hazard page's
+masked hits. Other pages accounted for 112 samples. The first diagnostic build
+had its info logger compiled out; a second run on the replacement box used a
+basic compose file without txgen. Neither is used for these counts. The
+corrected run and raw samples are in ignored
+`target/boxctl-evidence/amd-falsehit-hazards-1013/`.
+
+An isolated candidate extended the existing bounded reachability proof to
+pages with at least five hazards, including the seven-hazard page. A synthetic
+seven-hazard regression test, 267 VMX library tests, and the full in-box SVM
+suite passed. The complete Tempo candidate and adjacent unchanged control on
+the same box both completed 10,000 transfers with zero failures:
+
+| Variant | Fair interval | VM exits | NPT faults | Synthetic MTF exits |
+| --- | ---: | ---: | ---: | ---: |
+| Reachability on pages with ≥5 hazards | 39.389 s | 19,575,586 | 16,130,519 | 1,187,956 |
+| Unchanged branch | 39.435 s | 19,576,056 | 16,130,123 | 1,207,807 |
+
+The candidate removed about 20,000 synthetic MTF exits, but total exits and
+elapsed time were effectively unchanged. It is not retained on the shared
+branch. Its source remains in `/tmp/bedrock-amd-region7-1013`; logs and marker
+snapshots are in ignored `target/boxctl-evidence/amd-region7-1013/`. All module
+builds and loads stayed inside the boxctl boxes.
