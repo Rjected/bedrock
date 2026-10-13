@@ -5831,3 +5831,47 @@ entry. This mix explains why removing one more individual false byte is
 unlikely to eliminate the larger NPT-fault volume. These are attribution
 samples from the later retained part of one run, not percentages of the full
 fair interval.
+
+### Reject a full systemd libcall string-operation rebuild (2026-10-13)
+
+GCC's `-mstringop-strategy=libcall` removes compiler-generated REP string
+operations. A pinned Nix rebuild of systemd 259.3 passed the flag through
+Meson's `c_args` (global `NIX_CFLAGS_COMPILE` incorrectly also reaches the BPF
+Clang tool). The rebuilt `libsystemd-shared-259.so` has zero disassembled REP
+string operations, versus 784 in the original, and a byte-level scan of its
+executable file pages finds 50 apparent REP hazard entries on 41 pages,
+versus 831 entries on 338 pages in the original. Its dynamic exported symbol
+list matched the original. The rebuilt library SHA is
+`54979d7148c8d62a54099c71b7b2e48ce2563a506c12e18a93a9a9e07a950872`.
+
+The diagnostic builder `diagnostics/replace-systemd-in-initrd.py` replaced
+only that pinned library's CPIO payload and size in the fair initrd; the
+uncompressed archive matched the control everywhere else. The resulting
+initrd SHA is
+`4d3460b05840ff626803d3ce4180840b33d76d53a49a969b9755ea107b66ccb8`.
+On one disposable EPYC 4245P HWE box, the pushed SVM module passed its smoke,
+transition, mixed-workload, and native-loop checks. Each guest run passed all
+10,000 transfers with zero failures:
+
+| Guest library | Fair interval | Fair NPT faults | Entry cycles | Guest cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Full libcall rebuild | 29.174 s | 8,112,104 | 34.67 billion | 68.27 billion |
+| PLT-patched original control | 24.473 s | 6,927,425 | 32.74 billion | 53.98 billion |
+| Full libcall rebuild, repeat | 29.651 s | 8,147,664 | 35.69 billion | 69.05 billion |
+
+The broad rebuild is **rejected**: it is 4.70–5.18 seconds slower and adds
+about 1.2 million fair-interval NPT faults. A one-in-8,192 NPT diagnostic run
+on the rebuilt library retained 429 fair samples. Its PLT moved to file pages
+`0xbd000`/`0xbe000` and still contained ten false REP byte patterns, with
+25/54 retained samples respectively. Nix glibc file page `0x5e000` had 22
+samples; its `F2 AF` marker is in a RIP displacement. Thus removing real REP
+from systemd did not remove the PLT hazard, and the profile found another hot
+guarded glibc page. The samples
+attribute faults, while the uninstrumented paired runs establish the speed
+regression; the instrumented fair interval itself is not a speed comparison.
+The three real `REP STOSQ` sites on the formerly hot `0x2b4000` page all
+belong to `src/basic/signal-util.c`, making a much narrower experiment
+possible if that page becomes important again. Complete run logs, marker
+snapshots, profile log, and host details are under ignored
+`target/boxctl-evidence/amd-systemd-libcall-1013/`. All module builds and
+loads ran only on the disposable box.
