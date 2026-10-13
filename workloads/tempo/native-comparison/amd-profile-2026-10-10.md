@@ -4591,3 +4591,30 @@ would leave the transfer's roughly 16 million NPT faults as the larger cost.
 The diagnostic source remains in `/tmp/bedrock-amd-region7-1013`; logs and
 marker snapshots are in ignored `target/boxctl-evidence/amd-frontierbytes-1013/`.
 The unchanged module was restored on the disposable box after profiling.
+
+### Guard a proven successor across two hazardous pages (2026-10-13)
+
+The five-hazard reachable-region path used to return with only its current
+physical page executable. It can now admit one predicted successor when a
+direct edge from the first decoded region reaches that page. Both regions
+must prove every direct entry into the other is a visited instruction start,
+and their exact breakpoint union must fit four AMD debug registers. Unknown
+branches remain exact breakpoints; other pages remain NX. Tests cover a
+two-page loop, a jump back into an unvisited first-page hazard, and a second
+unvisited entry into the successor.
+
+On the EPYC 4245P box `box-67400f8a`, the candidate passed 269 local VMX
+unit tests, the in-box SVM suite, and 1,024 Linux fork replays from virtual
+count 8.0M to 8.1M against a single-step reference. Complete adjacent Tempo
+10,000-transfer runs both had 10,000 successes and zero failures:
+
+| Variant | Fair interval | VM exits | NPT faults | Synthetic MTF exits |
+| --- | ---: | ---: | ---: | ---: |
+| Two-page reachable proof | 38.320 s | 18,990,303 | 15,652,616 | 1,173,220 |
+| Unchanged branch | 38.877 s | 19,287,151 | 15,851,868 | 1,208,825 |
+
+This pair saved 0.556 s (1.4%) and about 297,000 exits. An earlier unchanged
+run on the same box took 39.435 s, so run-to-run variation is material; a
+repeat pair is needed before calling the wall-time gain stable. Logs, fair
+markers, and stats are in ignored `target/boxctl-evidence/amd-twopage-1013/`.
+All module builds, loads, and runtime tests were performed on the boxctl box.
