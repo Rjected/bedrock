@@ -4902,3 +4902,34 @@ relocations, this is a pinned-workload diagnostic, not a general hypervisor
 fix or an architecture-normalized overhead claim. Logs and fair markers are
 in ignored `target/boxctl-evidence/amd-libc-rep-1013/`; all kernel module
 builds, loads, and runtime tests were on disposable boxctl boxes.
+
+### Relocate the initrd's tcache REP without adding a hot guard (2026-10-13)
+
+The optimized-image profile retained 92 samples on the guest initrd's Nix
+glibc file page `0xae000`, chiefly ordinary entry offset `0x7b0`. That
+page has one `REP STOSQ` in `tcache_init.part.0` at `0xae9dc`. An exact-build
+initrd diagnostic moved the REP and following `LEA RCX,[RDX+0x90]` unchanged
+into executable alignment padding after a `RET`, replacing the original ten
+bytes with a relative jump and NOPs. It checks the pinned compressed initrd,
+libc build, source bytes, cave bytes, and patched libc hash before writing a
+same-size cpio payload and deterministic gzip output. Both layouts booted and
+passed the complete transfer on the EPYC 4245P box:
+
+| Initrd libc destination | Fair interval | NPT faults | Synthetic MTF exits |
+| --- | ---: | ---: | ---: |
+| Original initrd, two nearby controls | 30.301 / 30.354 s | 10,413,071 / 10,424,117 | 1,180,222 / 1,189,293 |
+| Existing hot libc page `0x180000` | 30.592 s | 10,802,717 | 1,190,342 |
+| Previously cold guarded page `0xa6000` | 30.268 s | 10,139,771 | 1,229,397 |
+
+Every run reported 10,000 successes and zero failures. Moving into hot page
+`0x180000` increased NPT faults by about 0.38 million; it consumes another
+debug-breakpoint slot on a page already used heavily. The cold-page layout
+removed about 0.28 million NPT faults but added about 40,000 synthetic traps
+and did **not** establish a wall-time gain beyond run variation. The cold
+layout is reproducible with
+`diagnostics/patch-nix-libc-rep-initrd.py ORIGINAL_INITRD_GZ OUTPUT_INITRD_GZ`;
+its output SHA-256 is
+`cff6ae36f303168c91e75447568dfd48f01595289ba60789807651e904066a0a`.
+The hot layout is retained only in ignored artifacts and run logs. Neither
+initrd rewrite is adopted as the performance baseline. Logs and markers are
+in ignored `target/boxctl-evidence/amd-libc-rep-1013/`.
