@@ -5365,3 +5365,41 @@ historical Intel interval was measured on different hardware and guest bits.
 Build and runtime logs are in ignored
 `target/boxctl-evidence/amd-jq-source-1013/`. All module builds and loads
 remained inside the disposable box.
+
+### Reprofile the source-patched jq initrd (2026-10-13)
+
+A diagnostic module logged one in 4,096 execute NPT faults while the new
+source-built jq initrd ran the original Tempo OCI images. It passed the full
+10,000-transfer workload. The fair interval contained 3,519 samples; 778
+matched a unique file page in the initrd. The former `libjq` page `0x31000`
+had **zero** sampled faults, confirming that its hazard was removed. The
+largest identified initrd pages were Nix glibc `0xc2000` (141 samples, all
+entry offset `0x310`), `libsystemd-shared` `0xb6000` (76), and Nix glibc
+`0x180000` (73). Other jq pages `0x2d000`, `0x2e000`, and `0x34000` had 42,
+40, and 36 samples, respectively. The glibc `0xc2000` page has the previously
+identified cross-page opcode boundary hazard; `0x180000` has two REP MOVSB
+instructions. The diagnostic logging stretched the fair interval to 71.647
+s, so it is only an attribution run. The stable module was restored in the
+box and passed smoke. The live kernel log and workload output are in ignored
+`target/boxctl-evidence/amd-postjq-source-profile-1013/`.
+
+### Check jq's remaining input-buffer REP (2026-10-13)
+
+`libjq` page `0x34000` contains a `REP STOSQ` at `0x34205` generated for
+`memset(state->buf, 0xff, sizeof(state->buf))` in
+`jq_util_input_read_more`. A source-level diagnostic used a volatile
+function pointer to call libc's `memset`, removing the REP from that jq page
+without changing the 4 KiB initialization. The rebuilt jq passed all nine
+upstream tests, and its disassembly showed the call through the pointer.
+The guest initrd was built normally through Nix in the box. With the same
+stable module, kernel, original Tempo OCI images, seed, and CPU pin, both
+10,000-transfer runs passed:
+
+| Guest jq | Fair interval | Whole-VM NPT faults | Total exits |
+| --- | ---: | ---: | ---: |
+| Additional input-buffer change | 37.322 s | 57,532,626 | 78,443,476 |
+| Pushed jq color-copy fix | 37.296 s | 57,429,484 | 78,297,387 |
+
+The extra change did not improve elapsed time and produced about 103,000
+more NPT faults. It remains isolated in `/tmp/bedrock-jq-stos-1013` and was
+not pushed. Logs are in ignored `target/boxctl-evidence/amd-jq-stos-1013/`.
