@@ -4427,3 +4427,41 @@ remaining work is a REP-aware interruption/retirement accounting rule that
 passes long fork replay and heavy host sampling before this speedup can be
 considered safe. Fair-marker snapshots for the timed runs are in ignored
 `target/boxctl-evidence/amd-irperf-ceiling-1012/`.
+
+### REP-aware IRPERF replay experiment (2026-10-13)
+
+An isolated candidate on a disposable EPYC 4245P box (HWE 7.0.0-38) made
+F3 MOVS/STOS eligible for bounded native execution, used IRPERF as a
+one-retirement-per-completed-REP clock, excluded host-interrupt exits from
+the one-tick PMC correction, and masked AMD RDRAND in guest CPUID. Normal
+code and page-table guards stayed enabled. A page-breakpoint replay initially
+looped at a REP entry with no retirement; forcing one scalar replay after the
+breakpoint fixed the cached-code-write test. The extra NPT write-replay change
+tried during diagnosis was removed because it did not fix that loop.
+
+The final candidate and the current guarded branch ran the same 10,000-transfer
+guest, seed, CPU pin, and fair markers on the *same* box:
+
+| Module | Fair interval | VM exits | NPT faults | Application result |
+| --- | ---: | ---: | ---: | --- |
+| Current guarded branch | 39.949 s | 19.671 million | 16.187 million | 10,000 successes, zero failures/reverts |
+| Candidate after breakpoint fix | 20.418 s | 8.723 million | 5.575 million | 10,000 successes, zero failures/reverts |
+
+The candidate's 19.744-second pre-fix run is excluded from the final comparison
+because its cached-code-write test hung. The fixed candidate is **1.96x faster**
+than the guarded branch in this workload. It is numerically below the
+historical Intel 24.087-second result, but that was on different hardware and
+the candidate changes REP virtual-clock semantics, so this is not an equivalent
+cross-vendor result.
+
+The candidate is **not safe to merge**. Its 16 MiB REP deadline probe was
+stable across 50 runs, and the cached-code-write test passed after the fix.
+One 1,024-fork replay passed before the fix, but the final candidate diverged
+at replay 386. Existing AMD REP deadline tests also fail because they require
+each iteration to advance virtual time; the candidate advances the clock only
+when the whole REP instruction retires. These clock semantics need an explicit
+decision and updated tests, followed by repeated long replay and host-interrupt
+stress, before using the fast path. The experimental code remains only in
+`/tmp/bedrock-amd-irperf-probe-1012`; raw logs and marker snapshots are in
+ignored `target/boxctl-evidence/amd-unified-rep-1013/`. No module was built or
+loaded on the workstation.
