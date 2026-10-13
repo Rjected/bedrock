@@ -5605,3 +5605,33 @@ The candidate patch, logs, local test results, host details, and profile
 summary are in ignored `target/boxctl-evidence/amd-host-pmc-1013/`. All
 module building and runtime tests took place inside a disposable boxctl box;
 no module was built or loaded on the workstation.
+
+### Limit optional-page widening to two recent pages (2026-10-13)
+
+An isolated candidate kept the predicted successor but screened only the two
+most recent pages for a counted global plan, rather than four. This reduces
+planner work while leaving omitted pages NX. Two of 268 VMX library tests
+failed because they explicitly require the three- and four-page breakpoint
+coverage that the candidate removes; the in-box SVM smoke, transition,
+benchmark, and mixed-memory suites passed. The candidate was measured only
+to determine whether the cheaper planner could outweigh its extra NPT faults.
+
+The pushed module and candidate ran with identical guest artifacts on one
+EPYC 4245P HWE 7.0.0-38 box: the pinned CPU, seed, 16 GiB RAM, exact-build
+GP-relocated kernel, libjq-relocated initrd, shaped OCI archive, compose file,
+and CLI were held constant. Both completed 10,000 transfers with zero
+failures or reverts:
+
+| Module | Fair interval | Fair NPT faults | Host time to first marker |
+| --- | ---: | ---: | ---: |
+| Pushed control | **28.531 s** | **9,357,302** | **121.436 s** |
+| Two recent pages | 29.182 s | 10,201,306 | 133.766 s |
+
+The candidate added **844,004** transfer-interval NPT faults, was **0.651 s**
+slower in that interval, and reached its first marker **12.330 s** later.
+This single pair is not a precise percentage estimate, but both the lost
+planner coverage and the extra faults point against the change. It remains
+**unmerged**. The unchanged module was restored and passed SVM smoke before
+the box was deleted. The source diff, test output, full logs, markers, and
+stats are in ignored `target/boxctl-evidence/amd-widen2-1013/`. No module was
+built or loaded on the workstation.
