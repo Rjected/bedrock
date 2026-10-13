@@ -85,6 +85,10 @@
       tempoInitrd = import ./nix/tempo-initrd.nix {
         inherit pkgs podmanInitrd;
       };
+      amdTempoInitrd = import ./nix/tempo-initrd.nix {
+        inherit pkgs podmanInitrd;
+        amdGlibcBoundary = true;
+      };
       svmTempoInitrd = import ./nix/tempo-initrd.nix {
         inherit pkgs;
         podmanInitrd = svmPodmanInitrd;
@@ -133,7 +137,7 @@
         # The Tempo workload's planner is also fetched into the guest at boot.
         tempo-dst = userland.tempo-dst;
         inherit podmanInitrd;
-        inherit tempoInitrd;
+        inherit tempoInitrd amdTempoInitrd;
         inherit svmPodmanInitrd svmTempoInitrd;
         default = userland.bedrock-cli;
       };
