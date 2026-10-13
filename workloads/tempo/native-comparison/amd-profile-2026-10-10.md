@@ -4879,6 +4879,11 @@ checks the pinned input/output libc hashes, the source bytes, and the code
 cave before rebuilding OCI digests. Static disassembly shows no REP sites on
 Tempo libc pages `0x152000` or `0x153000` and three on destination page
 `0x15a000`. The txgen image descriptor is identical in both archives.
+From the repository root, the full measured image can be rebuilt with
+`workloads/tempo/native-comparison/diagnostics/build-amd-tempo-shaped-image.sh workloads/tempo/images.tar OUTPUT.tar`.
+The wrapper's output SHA-256 is
+`05cf1c7ef4cf24f90d1f87c01708d3a7aced52c2817442e21bcb9901101ed04b`,
+identical to the archive used for the runs below.
 
 The same EPYC 4245P box, seed, stable module, and fair markers produced:
 
