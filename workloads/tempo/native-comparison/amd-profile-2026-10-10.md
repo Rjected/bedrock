@@ -5205,3 +5205,45 @@ logs, and marker snapshots are under ignored
 `target/boxctl-evidence/amd-coldmask-1013/`. The unchanged module was
 restored and passed the in-box suite. All module builds and loads were inside
 the disposable box.
+
+### Move a cold kernel REP off the hot syscall page (2026-10-13)
+
+The one-in-4,096 execute-fault profile of the fastest shaped image found 107
+fair-interval samples on guest-kernel physical page `0x1fb1000`, including 38
+entries at `do_syscall_64` offset `0x60` and 26 at its post-syscall offset
+`0x128`. The matching pinned `vmlinux-layout-candidate` has one REP hazard on
+that page: `REP MOVSQ` at `0xffffffff81fb1e39`, in the colder
+`exc_general_protection` handler. A byte-level scan using the hypervisor's
+hazard predicate found only that entry, and found none on the page after the
+diagnostic rewrite. The page's trailing bytes have no boundary hazard.
+
+`diagnostics/relocate-kernel-gp-rep.py` requires the exact original vmlinux
+SHA-256 and copies the REP plus its following stack `MOV` to 16 `INT3` padding
+bytes at `0xffffffff81fb0ef0`, on a different kernel page. It inserts a
+relative jump at the original site and a jump back after the copied bytes.
+The source, cave, and final output hashes are checked; disassembly verifies
+both jumps and the unchanged copied instructions. The output SHA-256 is
+`93f151be55863fd3d27de20e9b4e778fadd794ac93f29bd3e4db7ee08bf54b33`.
+This is an exact-build guest-layout diagnostic. The padding is within the
+kernel's `__noinstr_text_start` region and has no dedicated unwind metadata;
+the binary rewrite needs source-level integration and exception-path review
+before it can be called a general kernel change.
+
+On one disposable EPYC 4245P box with HWE 7.0.0-38, the stable module passed
+the full in-box SVM suite. The patched/control/patched sequence used the same
+module, pinned shaped OCI archive, initrd, seed, CPU pin, and 10,000-transfer
+command. All three runs passed the application check:
+
+| Kernel | Fair interval | Whole-VM NPT faults | Whole-VM entry cycles |
+| --- | ---: | ---: | ---: |
+| GP REP relocated | 27.094 s | 48,752,030 | 172.28 billion |
+| Unchanged layout | 27.905 s | 51,190,069 | 174.82 billion |
+| GP REP relocated | 27.373 s | 48,969,842 | 172.44 billion |
+
+The paired fair-time gain is **0.53–0.81 s**, or about **2–3%**, and the
+whole-VM NPT count fell by 2.22–2.44 million. The count covers startup as
+well as transfer and should not be interpreted as a fair-interval count.
+The fastest measured shaped-image interval is now 27.094 s, about 1.12 times
+the historical Intel 24.087 s interval on different hardware and inputs.
+Logs and counters are in ignored `target/boxctl-evidence/amd-kernel-gp-1013/`.
+No module was built or loaded on the workstation.
