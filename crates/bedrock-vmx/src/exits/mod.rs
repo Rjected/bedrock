@@ -54,6 +54,7 @@ use interrupts::{disable_interrupt_window_exiting, handle_external_interrupt};
 use io::handle_io;
 use misc::{dump_triple_fault_state, handle_exception_nmi, handle_xsetbv};
 use msr::{handle_msr_read, handle_msr_write};
+use qualifications::{InterruptionInfo, InterruptionType};
 use rdrand::{handle_rdrand, handle_rdseed};
 pub(crate) use svm::InstructionWindow;
 pub(crate) use svm_batch::retain_translation_cache;
@@ -209,10 +210,58 @@ pub fn handle_exit<C: VmContext, K: Kernel, A: CowAllocator<C::CowPage>>(
 ) -> ExitHandlerResult {
     let start_tsc = rdtsc();
 
-    let reason = match read_exit_reason(ctx) {
+    let mut reason = match read_exit_reason(ctx) {
         Ok(r) => r,
         Err(e) => return ExitHandlerResult::Error(e),
     };
+
+    // The prebuilt Intel guest helpers issue VMCALL (0f 01 c1). AMD raises
+    // #UD for that opcode, whereas its native hypercall is VMMCALL. Accept
+    // only the exact Intel opcode here so the same guest image can run on
+    // both backends; all other #UD faults are reinjected as before.
+    if C::V::uses_nested_paging() && reason == ExitReason::ExceptionNmi {
+        let info = ctx
+            .state()
+            .vmcs
+            .read32(VmcsField32::VmExitInterruptionInfo)
+            .map(InterruptionInfo::from);
+        if matches!(info, Ok(InterruptionInfo {
+            vector: 6,
+            interruption_type: InterruptionType::HardwareException,
+            valid: true,
+            ..
+        })) {
+            let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip);
+            let cs = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCsBase);
+            if let (Ok(rip), Ok(cs)) = (rip, cs) {
+                let linear = rip.wrapping_add(cs);
+                let mut opcode = [0u8; 3];
+                let mut readable = true;
+                for (offset, byte) in opcode.iter_mut().enumerate() {
+                    let address = linear.wrapping_add(offset as u64);
+                    readable &= svm::physical(ctx, address)
+                        .and_then(|physical| {
+                            ctx.read_guest_memory(physical, core::slice::from_mut(byte))
+                                .map_err(|_| EE::Fatal("VMCALL instruction fetch failed"))
+                        })
+                        .is_ok();
+                    if !readable {
+                        break;
+                    }
+                }
+                if readable && opcode == [0x0f, 0x01, 0xc1] {
+                    if let Err(error) = ctx
+                        .state()
+                        .vmcs
+                        .write32(VmcsField32::VmExitInstructionLen, 3)
+                    {
+                        return ExitHandlerResult::Error(error.into());
+                    }
+                    reason = ExitReason::Vmcall;
+                }
+            }
+        }
+    }
 
     let qual = match read_exit_qualification(ctx) {
         Ok(q) => q,
