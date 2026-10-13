@@ -5291,3 +5291,31 @@ inputs. This result applies to the shaped guest image; the original-image
 AMD guest still has a much larger gap. Logs and counters are in ignored
 `target/boxctl-evidence/amd-gp-fixed-source-1013/`. No module was built or
 loaded on the workstation.
+
+### Check the source-level GP fix with original Tempo images (2026-10-13)
+
+The preceding fixed-count GP kernel was also compared against the unchanged
+aligned-fallback kernel using the **original** pinned `images.tar` and
+`initrd.gz`, not the shaped OCI or initrd. One disposable EPYC 4245P HWE
+7.0.0-38 box ran the same stable module, seed, CPU pin, and 10,000-transfer
+command in control/fixed/control/fixed order. Its full in-box SVM suite passed
+before the workload. Every run reported 10,000 successes, zero failures, and
+zero reverted transactions:
+
+| Guest kernel | Fair interval | Whole-VM NPT faults |
+| --- | ---: | ---: |
+| Unchanged control | 39.644 s | 61,295,839 |
+| Fixed-count GP copy | 38.667 s | 58,851,890 |
+| Unchanged control | 39.128 s | 60,933,377 |
+| Fixed-count GP copy | 37.951 s | 58,549,011 |
+
+The paired gain is **0.98–1.18 s**, with about **2.4 million** fewer NPT
+faults over each entire VM run. The first control's startup was unusually
+slow, so only the marker-bounded transfer interval is used for the timing
+claim. The best original-image interval is now **37.951 s** on this host,
+still about 2.87 times the separate one-core EPYC native measurement and
+1.58 times the historical Intel 24.087 s run on different hardware. The
+source patch helps the unchanged workload, but it leaves the user-space
+hazardous-code working set as the main performance gap. Logs and counters
+are in ignored `target/boxctl-evidence/amd-gp-original-1013/`. All module
+builds and loads stayed inside the box.
