@@ -4763,3 +4763,14 @@ experiment, not an adopted workload change. Its exact-build diagnostic
 patcher is `diagnostics/relocate-libc-rep-reuse-oci.py`; the generated archive
 is in ignored `target/boxctl-artifacts/`, and the run logs and markers are in
 ignored `target/boxctl-evidence/amd-libc-rep-1013/`.
+
+A further exact-build diagnostic moved the `REP STOSQ` at libc offsets
+`0x9828e` and `0x96785` into the already guarded `0x15a000` page. This
+cleared two more source pages while keeping the destination at exactly four
+hazards. The full paired runs both passed 10,000 transfers with zero failures:
+the four-site image took **34.206 s**, with 16,408,298 exits and 12,965,740
+NPT faults; the adjacent two-site image took **34.447 s**, with 16,497,460
+exits and 13,036,732 NPT faults. The 0.241 s difference is below the observed
+run variation, so this is also retained only as a diagnostic script,
+`diagnostics/relocate-libc-rep-four-oci.py`. Raw logs and markers are in
+ignored `target/boxctl-evidence/amd-libc-rep-1013/`.
