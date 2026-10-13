@@ -5875,3 +5875,49 @@ possible if that page becomes important again. Complete run logs, marker
 snapshots, profile log, and host details are under ignored
 `target/boxctl-evidence/amd-systemd-libcall-1013/`. All module builds and
 loads ran only on the disposable box.
+
+### Map and test a remaining Tempo false-byte hazard (2026-10-13)
+
+The pinned `tempo-localnet` image declares source revision
+`d3f3b28f102946dcdca1a5beb12f328f2f1bbdbd`, which is present in the
+local Tempo checkout. Its ELF text has virtual addresses 0x1000 above file
+offsets; mapping the profiled file offsets through DWARF identified several
+different remaining hazard sources:
+
+| Tempo ELF file page | Byte-level hazard | Source |
+| --- | --- | --- |
+| `0x2374000` | False `F2 A5` in `sdallocx` call displacement | Rust `bytes::shallow_clone_vec` |
+| `0x6e7a000` | False `F2 A4` in indirect call displacement | Tempo precompile storage |
+| `0x7a92000`, `0x7a9a000` | Multiple real `REP MOVSQ` sites | bundled ZSTD C code |
+| `0x7b8a000` | Real `REP MOVSB` plus trailing `0x0f` | bundled Keccak assembly |
+| `0x7c20000` | Real `REP MOVSQ` | bundled jemalloc |
+| `0x5d2a000`, `0x6f11000` | Trailing `0x0f` without in-page REP | other Tempo code |
+
+The call at Tempo virtual address `0x23755a0` reads GOT slot `0x7ebfb98`,
+and an existing same-page stub at `0x2375575` jumps through that exact GOT
+slot. The exact-build diagnostic `diagnostics/patch-tempo-sdallocx-call-oci.py`
+replaces only the six-byte indirect call with a direct call to this stub plus
+a NOP. The callee sees the same arguments and GOT target; it returns to the
+NOP before execution resumes at the old continuation. A byte-level scan then
+finds zero hazards on that 4 KiB page. The patched Tempo ELF SHA-256 is
+`6672faef5559e3c8e82f8b3682ee47dc0d18aa92bed9405a8b100a89aa45c24e`.
+
+The existing shaped OCI archive, PLT-patched initrd, source-patched kernel,
+pushed module, CPU pin, seed, and 10,000-transfer workload were held constant
+on one disposable EPYC 4245P HWE box. The in-box SVM suite passed, and every
+guest run completed 10,000 transfers with zero failures:
+
+| OCI image | Fair interval | Fair NPT faults | Entry cycles |
+| --- | ---: | ---: | ---: |
+| Patched call | 24.137 s | 6,732,920 | 32.12 billion |
+| Unchanged control | 24.492 s | 6,910,115 | 32.83 billion |
+| Patched call, repeat | 24.887 s | 6,930,355 | 33.62 billion |
+
+The first pair favored the patch by 0.355 s and 177,195 NPT faults, but the
+repeat was 0.395 s slower than the same control and had 20,240 more NPT
+faults. The individual hazard is removable without changing its call target,
+but its workload-wide speed effect is below the observed run variation. The
+candidate is **not** part of the shaped-image pipeline. The diagnostic
+builder, full logs, marker snapshots, counters, and host details are under
+ignored `target/boxctl-evidence/amd-sdallocx-call-1013/`; all module
+operations ran only on the disposable box, which was deleted.
