@@ -4864,3 +4864,36 @@ The remaining profile therefore calls for a plan that covers boundary
 hazards and common entry offsets without adding frequent proof-frontier
 stops. The raw sample and test output are in ignored
 `target/boxctl-evidence/amd-npt-pages-1013/` and the box logs.
+
+### Clear the remaining hot Tempo libc REP page (2026-10-13)
+
+The combined image still sampled 75 faults on Tempo libc file page
+`0x153000`, mostly at ordinary entry offset `0x350`. Its one `REP STOSB`
+is at `0x15348a`. Exact-build diagnostic
+`diagnostics/relocate-tempo-libc-rep-third-oci.py` takes the two-site Tempo
+image (optionally with the txgen patch already applied) and moves that REP
+and its following `MOV RAX,RDX` to unused alignment padding at `0x15a98e`,
+between the two existing Tempo relocations. The original five bytes become
+a relative jump; the moved instructions return to `0x15348f`. The script
+checks the pinned input/output libc hashes, the source bytes, and the code
+cave before rebuilding OCI digests. Static disassembly shows no REP sites on
+Tempo libc pages `0x152000` or `0x153000` and three on destination page
+`0x15a000`. The txgen image descriptor is identical in both archives.
+
+The same EPYC 4245P box, seed, stable module, and fair markers produced:
+
+| Guest image | Fair interval | NPT faults | Synthetic MTF exits |
+| --- | ---: | ---: | ---: |
+| Tempo two-site plus txgen four-site control | 30.950 s | 10,806,879 | 1,201,357 |
+| Tempo three-site plus txgen four-site | 30.301 s | 10,413,071 | 1,180,222 |
+| Tempo two-site plus txgen four-site control | 31.166 s | 10,891,515 | 1,198,887 |
+| Tempo three-site plus txgen four-site | 30.354 s | 10,424,117 | 1,189,293 |
+
+All four runs passed 10,000 transfers with zero failures. The extra move
+repeatably saves about **0.6–0.8 s** and **0.38–0.47 million NPT faults**.
+The best AMD fair interval is now 30.301 s, about 1.26 times the historical
+Intel 24.087 s run on different hardware and guest inputs. As with the other
+relocations, this is a pinned-workload diagnostic, not a general hypervisor
+fix or an architecture-normalized overhead claim. Logs and fair markers are
+in ignored `target/boxctl-evidence/amd-libc-rep-1013/`; all kernel module
+builds, loads, and runtime tests were on disposable boxctl boxes.
