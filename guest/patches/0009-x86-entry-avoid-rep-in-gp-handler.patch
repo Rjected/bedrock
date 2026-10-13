@@ -1,0 +1,27 @@
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@ -791,9 +791,23 @@ static void gp_user_force_sig_segv(struct pt_regs *regs, int trapnr,
+ 
+ DEFINE_IDTENTRY_ERRORCODE(exc_general_protection)
+ {
+-	char desc[sizeof(GPFSTR) + 50 + 2*sizeof(unsigned long) + 1] = GPFSTR;
++	static const char initial_desc[sizeof(GPFSTR) + 50 +
++				       2*sizeof(unsigned long) + 1] = GPFSTR;
++	char desc[sizeof(initial_desc)];
++	const char *src = initial_desc;
++	char *dst = desc;
+ 	enum kernel_gp_hint hint = GP_NO_HINT;
+ 	unsigned long gp_addr;
+ 
++	/*
++	 * Bedrock's AMD backend must trap entry to an arbitrary-length REP on
++	 * any code page that contains one.  The compiler otherwise emits REP
++	 * MOVSQ for this fixed-size descriptor copy, on the hot syscall page.
++	 * Copy the same 92 bytes with a fixed number of MOVS instructions.
++	 */
++	BUILD_BUG_ON(sizeof(desc) != 92);
++	asm volatile(".rept 11\n\tmovsq\n\t.endr\n\tmovsl"
++		     : "+D" (dst), "+S" (src) : : "memory");
++
+ 	if (user_mode(regs) && try_fixup_enqcmd_gp())
+ 		return;

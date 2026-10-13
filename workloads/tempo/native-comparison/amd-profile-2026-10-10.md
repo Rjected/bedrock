@@ -5247,3 +5247,47 @@ The fastest measured shaped-image interval is now 27.094 s, about 1.12 times
 the historical Intel 24.087 s interval on different hardware and inputs.
 Logs and counters are in ignored `target/boxctl-evidence/amd-kernel-gp-1013/`.
 No module was built or loaded on the workstation.
+
+### Replace the kernel GP REP at source level (2026-10-13)
+
+A first source-level attempt aligned the entire `exc_general_protection`
+handler to a page boundary. The Nix guest-kernel build and full box SVM suite
+passed, and the new syscall page had no hazard bytes. On one EPYC 4245P box,
+however, the 10,000-transfer fair interval regressed to **29.787 s** versus
+**27.713 s** for the unchanged kernel. Whole-VM NPT faults fell from
+51,046,115 to 49,189,685, but entry-preparation cycles rose from 173.73 to
+183.87 billion. The alignment patch was discarded. Its paired logs are in
+ignored `target/boxctl-evidence/amd-gp-source-align-1013/`.
+
+The retained guest patch, `guest/patches/0009-x86-entry-avoid-rep-in-gp-handler.patch`,
+keeps the handler at its previous address. It initializes the same 92-byte
+GP descriptor using eleven explicit `MOVSQ` instructions and one `MOVSL`,
+without a `REP` prefix. The pinned kernel build succeeded; disassembly of
+its `vmlinux` shows `do_syscall_64` still at `0xffffffff81fb1060`,
+`exc_general_protection` still at `0xffffffff81fb1df0`, and zero hazard
+entries on page `0xffffffff81fb1000`. Unlike the earlier binary diagnostic,
+this patch uses normal source, linking, and kernel unwind generation. Its
+tested `vmlinux` SHA-256 is
+`8735375bae8368849a6d75665c70150c061e3756e09e38c8f31e0aad4091ea81`.
+
+The stable AMD module passed the full in-box SVM suite. On the same disposable
+EPYC 4245P HWE 7.0.0-38 box, alternating unchanged and fixed-copy guest
+kernels used the same shaped OCI archive, initrd, seed, CPU pin, and workload:
+
+| Guest kernel | Fair interval | Whole-VM NPT faults | Whole-VM entry cycles |
+| --- | ---: | ---: | ---: |
+| Unchanged control | 27.713 s | 51,046,115 | 173.73 billion |
+| Fixed-count GP copy | 26.849 s | 49,121,431 | 169.18 billion |
+| Unchanged control | 27.671 s | 51,195,734 | 173.84 billion |
+| Fixed-count GP copy | 26.075 s | 48,876,995 | 168.27 billion |
+
+All four runs completed 10,000 transfers with zero failures and zero
+reverts. The fixed-copy improvement was **0.82–1.64 s** against the adjacent
+controls; whole-VM NPT faults fell by roughly 1.9–2.3 million. The fair-time
+range reflects workload/host variation, so the 26.075 s run is the fastest
+observed interval rather than a guaranteed steady-state rate. It is about
+1.08 times the historical Intel 24.087 s interval on different hardware and
+inputs. This result applies to the shaped guest image; the original-image
+AMD guest still has a much larger gap. Logs and counters are in ignored
+`target/boxctl-evidence/amd-gp-fixed-source-1013/`. No module was built or
+loaded on the workstation.

@@ -37,6 +37,8 @@ let
       # Keep the non-REP memcpy/memset fallbacks off pages containing their
       # optional REP alternatives, so AMD can run those fallbacks as clean code.
       ../guest/patches/0008-x86-lib-isolate-non-rep-copy-fallbacks.patch
+      # Avoid a REP descriptor copy on the hot syscall page.
+      ../guest/patches/0009-x86-entry-avoid-rep-in-gp-handler.patch
     ];
   };
 
