@@ -4774,3 +4774,64 @@ exits and 13,036,732 NPT faults. The 0.241 s difference is below the observed
 run variation, so this is also retained only as a diagnostic script,
 `diagnostics/relocate-libc-rep-four-oci.py`. Raw logs and markers are in
 ignored `target/boxctl-evidence/amd-libc-rep-1013/`.
+
+### Attribute the remaining hot libc pages to txgen (2026-10-13)
+
+The two-site Tempo image was profiled again with one-in-4,096 execute-fault
+logging on `box-7577ba69`. Its 3,139 fair-interval samples showed no faults
+on the old Tempo libc page `0x152000` or its relocation page `0x15a000`.
+The leading libc pages were still file offsets `0x98000` (149 samples),
+`0x3c000` (140), and `0x96000` (87). Their first 16 bytes match both the
+Tempo and txgen copies of libc. However, every sample on those pages had CR3
+`0x125ce6000`, and 25 other samples in that address space matched libc page
+`0x152000` **only in txgen's build**. The same process attribution held for
+the later four-site Tempo image: its 3,142 fair samples still included 162,
+147, and 98 faults on the three pages, respectively, with txgen-only libc
+samples in the same CR3. The latter diagnostic run passed all 10,000 transfers
+but took 61.026 s because logging perturbed its timing. This explains why
+patching those pages in Tempo's libc barely changed the workload.
+
+The previously unidentified shared pages at physical addresses around
+`0x13f5...` map to the guest initrd's Nix glibc 2.42, including file pages
+`0xc2000`, `0xae000`, `0x180000`, `0x5e000`, and `0x95000`. Other sampled
+pages map to initrd `libsystemd-shared-259.so` and `libjq.so.1.0.4`.
+Those mappings came from page-start byte matches against the initrd, and
+they do not by themselves establish why each page repeatedly faults.
+
+`diagnostics/relocate-txgen-libc-rep-four-oci.py` is an exact-build diagnostic
+that applies **on top of** the two-site Tempo image. It moves txgen's two
+`REP MOVSB` sites from libc file page `0x152000` and its one `REP STOSQ`
+site each from `0x98000` and `0x96000` into alignment padding after a `RET`
+on previously unguarded page `0x15a000`. It verifies the original and patched
+libc hashes, source instructions, and code caves before updating OCI digests.
+Disassembly of the rebuilt txgen libc shows zero REP sites on all three
+source pages and four on the destination page. The stable module's SVM suite
+passed before the first full run.
+
+Two 10,000-transfer combined-image runs on separate EPYC 4245P boxes passed
+with zero failures. A second box ran an adjacent Tempo-only control:
+
+| Box and guest image | Fair interval | NPT faults | Synthetic MTF exits |
+| --- | ---: | ---: | ---: |
+| `box-7577ba69`, Tempo plus txgen relocation | 31.361 s | 10,951,582 | 1,203,316 |
+| `box-7577ba69`, closest earlier Tempo-only control | 34.447 s | 13,036,732 | 1,197,054 |
+| `box-3fa32d2b`, Tempo plus txgen relocation | 30.950 s | 10,806,879 | 1,201,357 |
+| `box-3fa32d2b`, adjacent Tempo-only control | 34.739 s | 13,029,092 | 1,190,320 |
+
+The adjacent pair saves **3.789 s** and **2,222,213 NPT faults**. This is
+larger than prior run variation and shows that moving the sites in the correct
+libc copy matters. The best AMD result is about 1.28 times the historical
+Intel 24.087 s run, but those runs used different hardware and guest images;
+that ratio is a workload reference, not an architecture-normalized overhead.
+The experiment remains a pinned guest-image rewrite, not a general hypervisor
+optimization. Logs and timing markers are in ignored
+`target/boxctl-evidence/amd-npt-pages-1013/` and
+`target/boxctl-evidence/amd-libc-rep-1013/`.
+
+One replacement `m4-metal-small` box exposed an EPYC 4244P (family 25)
+instead of the 4245P (family 26) used above. The stable module's SVM benchmark
+failed its control-flow acceleration assertion twice, reporting 20,030 and
+20,040 exits. It was not used for Tempo timing. The matching 4245P box passed
+the full SVM suite before the adjacent comparison. This is an unresolved
+hardware-portability issue; the 4244P log is in ignored
+`target/boxctl-evidence/box-9a86491b/`.
