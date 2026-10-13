@@ -984,7 +984,30 @@ fn finish(
         }
     }
     if guest_exit.is_none() {
-        guest_exit = d.run_until(end)?;
+        if std::env::var_os("BEDROCK_SEED_EXIT_PROGRESS").is_some() {
+            let started_wall = Instant::now();
+            while d.b.current_time() < end && guest_exit.is_none() {
+                let next = (d.b.current_time() + secs(10)).min(end);
+                guest_exit = d.run_until(next)?;
+                let stats = d.b.exit_stats()?;
+                eprintln!(
+                    "BEDROCK_SEED_EXIT_PROGRESS vt={:.3} wall={:.1} exits={} npt={} mtf={} rdtsc={} rdtscp={} exception={} other={} entry_cycles={} guest_cycles={}",
+                    d.b.current_time().as_secs_f64(),
+                    started_wall.elapsed().as_secs_f64(),
+                    stats.total_exit_count(),
+                    stats.ept_violation.count,
+                    stats.mtf.count,
+                    stats.rdtsc.count,
+                    stats.rdtscp.count,
+                    stats.exception_nmi.count,
+                    stats.other.count,
+                    stats.vmentry_overhead_cycles,
+                    stats.guest_cycles,
+                );
+            }
+        } else {
+            guest_exit = d.run_until(end)?;
+        }
     }
 
     let mut assertions = Vec::new();

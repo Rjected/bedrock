@@ -231,6 +231,11 @@ impl Branch {
         self.current_time
     }
 
+    /// Exit counters for this branch, including its forked guest execution.
+    pub fn exit_stats(&self) -> std::io::Result<bedrock_vm::ExitStats> {
+        self.vm().get_exit_stats()
+    }
+
     pub fn tsc_frequency(&self) -> u64 {
         self.lab.tsc_frequency
     }
