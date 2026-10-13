@@ -5537,3 +5537,31 @@ preserving the fork, write, and plan-revocation invariants above. The exact
 candidate patches, complete logs, and diagnostic dmesg are in ignored
 `target/boxctl-evidence/amd-scoped-boundary-1013/`. No module was built or
 loaded on the workstation.
+
+### Renew the scoped boundary lease after guarded-tree refresh (2026-10-13)
+
+An isolated follow-up deferred revocation while the guest was stopped for a
+guarded-tree refresh, then revalidated the current page's sole alias, the
+next-page translation and bytes, and both NPT code guards before the next
+VMRUN. A changed or unavailable proof still revoked the executable leaf.
+A focused test also covered an unsafe next-page remapping during refresh.
+The 19 EPT and 268 VMX library tests and the EPYC 4245P HWE box suite passed.
+
+The candidate and pushed control ran candidate/control/candidate on the same
+box, pinned to one CPU, with the same seed, 16 GiB guest, source-patched GP
+kernel, libjq-only initrd, and shaped OCI archive. All three passed 10,000
+transfers with zero failures or reverts. Fair markers cover only the transfer
+interval:
+
+| Module | Fair interval | Fair NPT faults | Fair MTF exits | Fair entry cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Lease renewal | 27.805 s | 9,030,564 | 1,154,346 | 36.08 billion |
+| Pushed control | 27.908 s | 9,236,438 | 1,160,795 | 35.70 billion |
+| Lease renewal | 27.725 s | 9,052,465 | 1,163,321 | 35.78 billion |
+
+Renewal saved **0.10–0.18 s** and **0.18–0.21 million NPT faults** against
+the one same-box control. This small, variable gain does not justify the
+additional scoped-execute safety state; the candidate remains **unmerged**.
+Its patch, full logs, marker JSON, and box suite logs are in ignored
+`target/boxctl-evidence/amd-scoped-renew-1013/`. The ephemeral box was
+deleted. No module was built or loaded on the workstation.
