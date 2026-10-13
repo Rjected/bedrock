@@ -5716,3 +5716,32 @@ and exact CPIO comparison are under ignored
 `target/boxctl-evidence/amd-postglibc-profile-1013/` and
 `target/boxctl-evidence/amd-assertshift-1013/`. All module operations stayed
 inside the disposable box.
+
+### Proactive RF at masked near branches: no repeatable Tempo gain
+
+On October 13, a hypervisor-only candidate tried to suppress false hardware
+breakpoint hits before entry. It armed synthetic RFLAGS.RF only at guarded,
+proven-nonhazard user-mode near indirect `FF 15`/`FF 25` branches covered by a
+masked breakpoint, excluding exact breakpoint hits and pending injections.
+This reused the existing post-exit RF cleanup. A focused byte-proof test and
+the disposable-box SVM smoke, deadline, fork/replay, and mixed-workload tests
+passed. The candidate was not merged.
+
+The same EPYC 4245P box, module build procedure, pinned CPU, relocated kernel,
+shaped initrd and OCI image, seed, and 10,000-transfer command were used in an
+adjacent candidate/control/candidate sequence. Every run completed 10,000
+transfers with zero failures:
+
+| Module | Fair interval | Fair NPT faults | Fair exception exits | Entry cycles |
+| --- | ---: | ---: | ---: | ---: |
+| Proactive RF candidate | 26.528 s | 7,861,789 | 49,825 | 34.95 billion |
+| Pushed control | 26.967 s | 8,074,804 | 49,523 | 35.14 billion |
+| Proactive RF candidate | 26.913 s | 8,051,468 | 48,684 | 35.13 billion |
+
+The second candidate and control differ by only 0.054 s (0.2%), while the
+candidate's own two runs differ by 0.385 s. Exception exits did not fall
+consistently, so this selective RF path has no demonstrated gain for Tempo.
+The remaining ~8 million NPT faults per fair interval dominate this target.
+Complete logs and marker snapshots are under ignored
+`target/boxctl-evidence/amd-proactive-rf-1013/`; all module operations stayed
+inside the disposable box.
