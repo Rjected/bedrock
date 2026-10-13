@@ -5012,3 +5012,64 @@ measured glibc tcache REP relocation did not help, so this libjq change is
 applied to the original initrd alone. Logs and marker snapshots are in
 ignored `target/boxctl-evidence/amd-libjq-1013/`. All module builds, loads,
 and runtime tests occurred inside disposable boxctl boxes.
+
+### Remove a conservative boundary hazard from hot Nix libc (2026-10-13)
+
+A new one-in-4,096 NPT sample of the libjq-relocated workload retained 2,373
+fault samples in its fair interval. The hottest identified initrd page was
+Nix glibc file page `0xc2000`: **137 samples**, all at entry offset `0x310`
+in `__strlen_sse2`. The page has no disassembled REP instruction, but its
+last byte is `0x0f`, inside a `PADDB` that starts at file offset `0xc2ffd`
+and crosses into page `0xc3000`. Bedrock conservatively treats that suffix
+as a possible instruction-boundary hazard under a different executable
+alias. The sample's 49.245 s fair interval is distorted by logging and is
+used only for attribution. A live `/dev/kmsg` reader captured the complete
+sample after the first attempt's kernel ring buffer lost its early lines.
+
+Exact-build diagnostic `diagnostics/relocate-nix-libc-boundary-initrd.py`
+starts from the libjq-patched initrd. It replaces the five-byte cross-page
+`PADDB` with a relative jump into otherwise unreachable alignment padding
+at `0xc21a2` on the same file page. The cave executes the original `PADDB`
+then jumps back to `0xc3002`. This leaves the hot `__strlen_sse2` entry
+unchanged and removes the trailing `0x0f` boundary hazard from its page.
+The script checks both input hashes, source/cave bytes, and output hashes;
+its output SHA-256 is
+`cf1632c3409f3d709cb5be5d2a7501f86201508af4ec68d660d268ddae2f70c4`.
+Static disassembly verifies the jump chain. This is a pinned-build guest
+diagnostic, not a general relaxation of the hypervisor's boundary proof.
+From the repository root, reproduce the two initrd changes in order:
+
+```sh
+python3 workloads/tempo/native-comparison/diagnostics/relocate-libjq-rep-initrd.py \
+  workloads/tempo/native-comparison/initrd.gz /tmp/bedrock-libjq-initrd.gz
+python3 workloads/tempo/native-comparison/diagnostics/relocate-nix-libc-boundary-initrd.py \
+  /tmp/bedrock-libjq-initrd.gz /tmp/bedrock-shaped-initrd.gz
+```
+
+The stable module on the same EPYC 4245P box, seed, and shaped OCI image
+gave these alternating full-workload results:
+
+| Initrd | Fair interval | NPT faults | Synthetic MTF exits | VM-entry preparation cycles |
+| --- | ---: | ---: | ---: | ---: |
+| libjq plus boundary relocation | 27.507 s | 8,853,684 | 1,193,771 | 35.32 billion |
+| libjq-only control | 29.520 s | 9,995,231 | 1,168,468 | 36.59 billion |
+| libjq plus boundary relocation | 28.421 s | 9,175,427 | 1,184,689 | 36.05 billion |
+| libjq-only control | 29.644 s | 9,983,536 | 1,200,024 | 37.11 billion |
+
+All four runs passed **10,000/10,000** transfers with zero failures. The
+relocation removed about **0.8–1.1 million NPT faults** and cut the fair
+interval by roughly **1.1–2.1 s** against adjacent controls. The best
+AMD interval is now **27.507 s**, about 1.14 times the historical Intel
+24.087 s interval on different hardware and guest inputs. Neither guest
+rewrite by itself closes the general AMD hypervisor performance gap; a
+transparent boundary/alias proof would need to validate every executable
+alias and writes/remappings of the next page. Logs and marker snapshots are
+in ignored `target/boxctl-evidence/amd-boundary-1013/`; the complete NPT
+sample is in ignored `target/boxctl-evidence/amd-postjq-profile-1013/`.
+An additional one-in-4,096 execute-fault profile of the boundary-patched
+initrd passed 10,000/10,000 transfers. **None of its 2,113 fair-interval
+samples** matched libc page `0xc2000`, versus 137 of 2,373 before this
+relocation. Its logged fair interval was 45.613 s and is for attribution,
+not speed comparison. The full live sample is in ignored
+`target/boxctl-evidence/amd-boundary-profile-1013/`; the stable module was
+restored afterward and passed the full in-box SVM suite.
