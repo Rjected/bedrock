@@ -4557,6 +4557,21 @@ breakpoints rather than removing enough of them. Both samples were one in 256
 harmless retries on complete 10,000-transfer runs; guest page placement and
 execution mix can vary between runs.
 
+The six-hazard page with the added `0x9c0` frontier stop is file page
+`0xb5000` of the pinned initrd's `libsystemd-shared-259.so`. Its six
+apparent hazards at offsets `0x172`, `0x372`, `0x572`, `0x772`, `0x972`, and
+`0xb72` are `f2` bytes inside the displacement of repeated PLT
+`jmp qword ptr [rip+disp32]` stubs. The hot `0x9c0` entry itself is
+`sd_json_variant_by_index@plt`, an indirect jump through GOT address
+`0x510590`. A reachability proof stops there because the target is read
+from guest memory; simply treating the PLT jump as outgoing could allow a
+changed GOT entry to branch into a hazardous byte on the same physical page.
+A sound extension would have to validate the target and write-protect its
+GOT page and translation tables for every accelerated interval, including
+cache invalidation. The observed 502 sampled frontier hits at one in 256
+represent a bounded part of the roughly 19 million transfer-phase exits,
+so this particular PLT proof alone is unlikely to close the application gap.
+
 A second isolated candidate kept the original five-hazard proof and enabled
 the new proof only for seven-hazard pages. It passed 268 VMX unit tests, the
 full in-box SVM suite, and 1,024 Linux fork replays from virtual count 8.0M
