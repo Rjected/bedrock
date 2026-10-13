@@ -4569,3 +4569,25 @@ run-to-run variation, so the change stays isolated in
 `/tmp/bedrock-amd-region7-only-1013`. Its logs, fair markers, and compressed
 fork-replay output are in ignored `target/boxctl-evidence/amd-region7-only-1013/`.
 The unchanged branch's module was restored on the box and passed the SVM suite.
+
+### Identify reachable-proof frontier instructions (2026-10-13)
+
+A follow-up diagnostic logged the first 16 instruction bytes on one in 256
+harmless breakpoint retries while the broad ≥5-hazard proof ran the complete
+Tempo workload. The 10,000 transfers succeeded. The retained transfer-phase
+kernel ring contains 816 samples over roughly ten seconds. Of those, 434
+belonged to one six-hazard page; 413 were at offset `0x9c0`, where the bytes
+start `ff 25`, a RIP-relative indirect `JMP`. The bounded region proof must
+stop there because its destination comes from memory and could be a different
+entry in an executable page. The five-hazard REP page contributed 83 samples
+at proof frontiers including direct `CALL`, indirect `CALL`, `RET`, and VEX
+instructions. The seven-hazard masked page contributed 63 samples, mostly
+ordinary comparisons and moves in its `0x800`–`0xbff` breakpoint range.
+
+Recognizing instruction lengths alone cannot safely remove the indirect
+branch and return stops: the proof must also validate their destinations and
+any mutable pointers they read. Even eliminating every logged frontier exit
+would leave the transfer's roughly 16 million NPT faults as the larger cost.
+The diagnostic source remains in `/tmp/bedrock-amd-region7-1013`; logs and
+marker snapshots are in ignored `target/boxctl-evidence/amd-frontierbytes-1013/`.
+The unchanged module was restored on the disposable box after profiling.
