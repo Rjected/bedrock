@@ -5175,3 +5175,33 @@ not merged; source remains in `/tmp/bedrock-amd-pmu-lean-1013` and logs and
 marker snapshots are in ignored `target/boxctl-evidence/amd-pmu-lean-1013/`.
 The unchanged module was restored and passed the in-box suite before its
 control run. No module was built or loaded on the workstation.
+
+### Try eager masked-breakpoint merging before slot admission (2026-10-13)
+
+An isolated candidate merged nearby hazard entries into a masked AMD debug
+slot before all four slots filled, then let the global planner admit another
+page based on actual occupied slots rather than raw hazard count. A focused
+test proved that three pages with six REP hazards could fit three conservative
+256-byte masks; all 269 VMX library tests and the full in-box SVM suite
+passed. The broad version made no guest serial progress in 90 seconds on an
+EPYC 4245P HWE box and was stopped. The unchanged module produced normal
+guest output within 30 seconds on that box.
+
+To isolate the promising glibc case, a diagnostic variant merged only the
+measured `0xc64`/`0xcca` REP pair and kept the other pages' mask policy.
+It passed the same local and in-box suites. Both full original-image Tempo
+runs passed 10,000 transfers with zero failures:
+
+| Module | Fair interval | NPT faults | Total exits | Entry cycles/exit | Runner plus guest cycles |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Pair-only diagnostic | 55.474 s | 14,620,726 | 18,011,746 | 3,426 | 215.11 billion |
+| Unchanged control | 38.068 s | 15,544,624 | 18,856,548 | 2,384 | 147.61 billion |
+
+Although the candidate removed about 924,000 NPT faults, its measured
+entry and runner/guest cycles rose far more than those faults saved.
+This is a measured regression, so neither the broad nor pair-only mask is
+merged. Source remains in `/tmp/bedrock-amd-coldmask-1013`; the exact patch,
+logs, and marker snapshots are under ignored
+`target/boxctl-evidence/amd-coldmask-1013/`. The unchanged module was
+restored and passed the in-box suite. All module builds and loads were inside
+the disposable box.
