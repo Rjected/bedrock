@@ -5112,3 +5112,28 @@ invalidation for page-table changes, both code pages' writes, and host
 mapping changes; simply widening this uncached proof cannot supply the
 measured guest-relocation gain. The diagnostic counters and instrumented
 candidate diff are in the same ignored evidence directory.
+
+### Measure the native Tempo floor on EPYC 4245P (2026-10-13)
+
+On a disposable `m4-metal-small` box with an AMD EPYC 4245P, Ubuntu
+6.8.0-146-generic, and Docker 29.1.3, `measure-native.py` ran the original
+pinned Tempo and txgen images without Bedrock. Both containers were restricted
+to the same host CPU set. Its host-monotonic fair markers cover 10,000
+unthrottled transfers and exclude setup. All four runs had 10,000 successes,
+zero failures, and zero reverted transactions:
+
+| Native CPU set | Run 1 | Run 2 |
+| --- | ---: | ---: |
+| CPUs 2–6 (five logical CPUs) | 13.080 s | 13.080 s |
+| CPU 1 only | 13.217 s | 13.211 s |
+
+The one-CPU check shows that the five-CPU native result is not mainly a CPU
+allocation effect. Against the one-CPU native interval, the original-image
+AMD guest's stable 38.877–38.938 s fair runs are about **2.94×**, while the
+best 27.507 s shaped-image guest run is about **2.08×**. The native box has
+the same CPU model as the guest test box but is a separate physical machine,
+and the shaped guest uses different image and initrd bytes. These ratios
+locate the gap; they are not a precise virtualization-overhead measurement.
+The historical Intel Bedrock 24.087 s result is on different hardware.
+Native logs and JSON results are in ignored
+`target/boxctl-evidence/amd-native-1013/`.
