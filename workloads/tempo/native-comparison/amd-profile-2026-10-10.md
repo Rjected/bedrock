@@ -5152,3 +5152,26 @@ locate the gap; they are not a precise virtualization-overhead measurement.
 The historical Intel Bedrock 24.087 s result is on different hardware.
 Native logs and JSON results are in ignored
 `target/boxctl-evidence/amd-native-1013/`.
+
+### Test removal of unused virtual-PMC resets (2026-10-13)
+
+An isolated SVM candidate skipped ten VMCB writes that re-zero PMC1–5 on
+each counted entry. These fields start zero, their guest MSRs are intercepted,
+and Bedrock only arms PMC0. All 23 local `bedrock-svm` tests and the full
+in-box SVM suite passed on a disposable EPYC 4245P HWE 7.0 box. The original
+pinned Tempo guest and images, seed, CPU affinity, and fair markers were
+identical in the adjacent complete runs; both passed 10,000/10,000 transfers
+with zero failures:
+
+| Module | Fair interval | NPT faults | Total exits | Entry cycles/exit |
+| --- | ---: | ---: | ---: | ---: |
+| Skip unused PMC resets | 38.572 s | 15,723,322 | 19,117,801 | 2,395 |
+| Unchanged control | 39.250 s | 16,041,879 | 19,479,886 | 2,401 |
+
+The candidate had about 319,000 fewer NPT faults, which can explain the
+0.678-second wall-time difference. The six-cycle normalized entry difference
+does not establish a useful saving from the removed writes. This change is
+not merged; source remains in `/tmp/bedrock-amd-pmu-lean-1013` and logs and
+marker snapshots are in ignored `target/boxctl-evidence/amd-pmu-lean-1013/`.
+The unchanged module was restored and passed the in-box suite before its
+control run. No module was built or loaded on the workstation.
