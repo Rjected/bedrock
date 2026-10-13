@@ -598,10 +598,19 @@ fn direct_write_guards_preserve_cow_execute_restrictions_and_accessed_dirty_bits
         )
         .unwrap();
     }
-    assert!(ept
+    let cow_guard = ept
         .restrict_write_4k(&allocator, GuestPhysAddr::new(0x2000))
         .unwrap()
-        .is_none());
+        .unwrap();
+    assert!(cow_guard.is_active(&ept, &allocator, GuestPhysAddr::new(0x2000)));
+    cow_guard.restore(&mut ept, &allocator);
+    assert_eq!(
+        ept.lookup(&allocator, GuestPhysAddr::new(0x2000))
+            .unwrap()
+            .1
+            .bits(),
+        5
+    );
     assert!(matches!(
         ept.restrict_write_4k(&allocator, GuestPhysAddr::new(0x4000)),
         Err(EptRemapError::NotMapped)

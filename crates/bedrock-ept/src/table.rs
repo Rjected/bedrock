@@ -47,6 +47,7 @@ pub struct NptWriteGuard {
     table: HostPhysAddr,
     index: u16,
     host: HostPhysAddr,
+    originally_writable: bool,
 }
 
 /// One scalar AMD entry may fetch from an otherwise non-executable page.
@@ -95,9 +96,9 @@ impl NptWriteGuard {
         assert_eq!(ept.pml4_phys, self.root);
         let table = allocator.phys_to_virt(self.table).cast::<EptEntry>();
         // SAFETY: the owned leaf table and mapping stay fixed while guarded.
-        // Only originally writable leaves receive a guard. Keep hardware A/D.
+        // Keep inherited COW leaves read-only. Preserve hardware A/D bits.
         let leaf = unsafe { &mut *table.add(self.index as usize) };
-        if leaf.addr() == self.host {
+        if self.originally_writable && leaf.addr() == self.host {
             leaf.set_npt_writable(true);
         }
     }
@@ -422,8 +423,8 @@ impl<Frame> EptPageTable<Frame> {
         Some(NptExecutionGuard { saved: guard })
     }
 
-    /// Restrict a writable AMD leaf without replacing its HPA or other bits.
-    /// Read-only COW mappings return None and are never promoted on restoration.
+    /// Guard an AMD leaf without replacing its HPA or other bits. An already
+    /// read-only leaf is guarded by its existing restriction and stays read-only.
     pub fn restrict_write_4k<A: FrameAllocator>(
         &mut self,
         allocator: &A,
@@ -448,15 +449,16 @@ impl<Frame> EptPageTable<Frame> {
                 return Err(EptRemapError::NotMapped);
             }
             if level == 3 {
-                if entry.raw() & 2 == 0 {
-                    return Ok(None);
+                let originally_writable = entry.raw() & 2 != 0;
+                if originally_writable {
+                    entry.set_npt_writable(false);
                 }
-                entry.set_npt_writable(false);
                 return Ok(Some(NptWriteGuard {
                     root: self.pml4_phys,
                     table: physical,
                     index: index as u16,
                     host: entry.addr(),
+                    originally_writable,
                 }));
             }
             physical = entry.addr();
