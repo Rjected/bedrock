@@ -1762,6 +1762,7 @@ fn hazard_memo_lookup<C: VmContext>(ctx: &C, physical: u64) -> (usize, Option<us
 }
 
 fn page_hazards_memo<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageHazards> {
+    ctx.state_mut().svm_guard.mark_possible_code_page(physical);
     // Unguarded pages always compare exact bytes before reusing a scan.
     // Recurrent guarded pages can skip that comparison while the NPT mapping
     // stays fixed: guest writes fault, and host writes invalidate the memo.
@@ -2732,6 +2733,11 @@ fn remember_alias_proof<C: VmContext>(
     hazard_pages: usize,
     insert: bool,
 ) {
+    for (i, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
+        if hazard.count != 0 {
+            ctx.state_mut().svm_guard.mark_possible_code_page(batch.pages[i]);
+        }
+    }
     let proof = &mut ctx.state_mut().svm_guard.alias_proof;
     proof.valid = true;
     proof.key_hash = key_hash;

@@ -67,6 +67,9 @@ pub(crate) struct SvmGuardScratch {
     pub code_cursor: usize,
     // One-based hint into `code`; the page and active count are checked on hit.
     pub code_lookup: [u8; 256],
+    /// Pages whose bytes may have contributed to code or alias proofs. Bits
+    /// are never cleared; false positives only skip the data-COW fast path.
+    pub possible_code_pages: [u64; 1024],
     pub hazard_memos: [SvmHazardMemo; SVM_HAZARD_MEMO_CAPACITY],
     pub hazard_memo_cursor: usize,
     pub hazard_guard_clock: u64,
@@ -145,6 +148,22 @@ pub(crate) struct SvmGuardScratch {
 }
 
 impl SvmGuardScratch {
+    pub fn mark_possible_code_page(&mut self, page: u64) {
+        let hash = (page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let first = (hash >> 48) as usize;
+        let second = (hash.rotate_left(29) >> 48) as usize;
+        self.possible_code_pages[first >> 6] |= 1u64 << (first & 63);
+        self.possible_code_pages[second >> 6] |= 1u64 << (second & 63);
+    }
+
+    pub fn may_have_code_proof(&self, page: u64) -> bool {
+        let hash = (page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let first = (hash >> 48) as usize;
+        let second = (hash.rotate_left(29) >> 48) as usize;
+        self.possible_code_pages[first >> 6] & (1u64 << (first & 63)) != 0
+            && self.possible_code_pages[second >> 6] & (1u64 << (second & 63)) != 0
+    }
+
     pub fn leaf_filter_cache_slot(page: u64) -> usize {
         ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
             & (SVM_LEAF_FILTER_CACHE_CAPACITY - 1)

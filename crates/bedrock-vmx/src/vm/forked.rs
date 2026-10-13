@@ -404,6 +404,17 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             return None;
         }
 
+        let old_mapping_generation = self.state.ept.mapping_generation();
+        let unrelated_data_page = {
+            let guard = &self.state.svm_guard;
+            let page = page_gpa.as_u64();
+            let table = super::super::exits::gate_table_contains(guard, page)
+                || guard.tables[..guard.count].contains(&page)
+                || guard.retained_guards[..guard.retained_guard_count]
+                    .iter().any(|saved| saved.valid && saved.guest == page);
+            let code = guard.may_have_code_proof(page);
+            !table && !code
+        };
         if let Err(_e) = self.state.ept.remap_4k(
             allocator,
             page_gpa,
@@ -418,7 +429,21 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             return None;
         }
 
-        self.state.svm_guard.gate_dirty = true;
+        if unrelated_data_page {
+            // An ordinary data COW changes only the NPT HPA. Guest page-table
+            // mappings, guarded code bytes, and existing guard state are
+            // unchanged, including any pending dirty-table refresh.
+            let generation = self.state.ept.mapping_generation();
+            let guard = &mut self.state.svm_guard;
+            if guard.gate_mapping_generation == old_mapping_generation {
+                guard.gate_mapping_generation = generation;
+            }
+            if guard.retained_mapping_generation == old_mapping_generation {
+                guard.retained_mapping_generation = generation;
+            }
+        } else {
+            self.state.svm_guard.gate_dirty = true;
+        }
 
         // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a leaf's
         // HPA. EPT-violation auto-invalidation only covers the faulting linear

@@ -456,6 +456,41 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_data_cow_keeps_retained_guards_even_with_a_dirty_gate() {
+        let (root, mut allocator) = create_test_root_vm();
+        let mut forked = ForkedVm::<MockVmcs, MockPage, NullInstructionCounter>::new(
+            &root, &MockMachine, &mut allocator, 0xDEAD_BEEF_0000,
+            NullInstructionCounter,
+        ).unwrap();
+        let before = forked.state.ept.mapping_generation();
+        let guard = &mut forked.state.svm_guard;
+        guard.gate_ready = true;
+        guard.gate_dirty = true;
+        guard.gate_mapping_generation = before;
+        guard.retained_mapping_generation = before;
+        guard.retained_guard_count = 1;
+        guard.retained_guards[0].guest = 0x2000;
+        guard.retained_guards[0].valid = true;
+
+        forked.handle_cow_fault(GuestPhysAddr::new(0x1000), &mut allocator).unwrap();
+        let after = forked.state.ept.mapping_generation();
+        assert_ne!(before, after);
+        assert_eq!(forked.state.svm_guard.gate_mapping_generation, after);
+        assert_eq!(forked.state.svm_guard.retained_mapping_generation, after);
+        assert!(forked.state.svm_guard.gate_dirty);
+        assert!(forked.state.svm_guard.retained_guards[0].valid);
+
+        forked.handle_cow_fault(GuestPhysAddr::new(0x2000), &mut allocator).unwrap();
+        assert_ne!(forked.state.svm_guard.retained_mapping_generation,
+            forked.state.ept.mapping_generation());
+
+        forked.state.svm_guard.mark_possible_code_page(0x3000);
+        let before_code = forked.state.svm_guard.gate_mapping_generation;
+        forked.handle_cow_fault(GuestPhysAddr::new(0x3000), &mut allocator).unwrap();
+        assert_eq!(forked.state.svm_guard.gate_mapping_generation, before_code);
+    }
+
+    #[test]
     fn test_forkedvm_memory_isolation() {
         let (mut root, mut allocator) = create_test_root_vm();
         let machine = MockMachine;
