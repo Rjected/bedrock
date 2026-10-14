@@ -21,14 +21,15 @@ source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 box_target="ubuntu@${box_name}"
 ssh_opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 
-if [[ $driver == progress ]]; then
-    # Userland-only build. This driver logs virtual-time checkpoints for
-    # diagnostics; final timing comparisons use the pinned CI binary.
-    (cd "$source_dir" && cargo build --release -p bedrock-dst)
-    rsync -az -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' \
-        "$source_dir/target/release/bedrock-dst" \
-        "$box_target:/home/ubuntu/ci-dst/bedrock-dst-progress"
-fi
+# Always stage the current userspace driver. A previously staged executable
+# can silently predate changes in this branch even while the box module is
+# current, invalidating a performance comparison.
+(cd "$source_dir" && cargo build --release -p bedrock-dst)
+remote_binary=bedrock-dst
+if [[ $driver == progress ]]; then remote_binary=bedrock-dst-progress; fi
+rsync -az -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' \
+    "$source_dir/target/release/bedrock-dst" \
+    "$box_target:/home/ubuntu/ci-dst/$remote_binary"
 
 ssh "${ssh_opts[@]}" "$box_target" bash -s -- \
     "$run_name" "$driver" "$run_secs" "$images_tar" <<'REMOTE'
@@ -67,6 +68,7 @@ fi
 start=$(date +%s)
 printf 'started_utc=%s\ndriver=%s\nrun_secs=%s\nimages_tar=%s\n' \
     "$(date -u +%FT%TZ)" "$driver" "$run_secs" "$images_tar" >"$status_file"
+printf 'driver_sha256=%s\n' "$(sha256sum "$binary" | cut -d' ' -f1)" >>"$status_file"
 timeout 1250 "$binary" "${args[@]}" >"$log" 2>&1
 process_status=$?
 failed=unknown
