@@ -3,17 +3,19 @@
 # Kernel modules are built and loaded only by run-boxctl-svm.sh on the box.
 set -euo pipefail
 
-if (( $# < 2 || $# > 4 )); then
-    echo 'usage: run-boxctl-tempo-ci.sh BOX_NAME RUN_NAME [pinned|progress] [RUN_SECS]' >&2
+if (( $# < 2 || $# > 5 )); then
+    echo 'usage: run-boxctl-tempo-ci.sh BOX_NAME RUN_NAME [pinned|progress] [RUN_SECS] [IMAGES_TAR]' >&2
     exit 2
 fi
 box_name=$1
 run_name=$2
 driver=${3:-pinned}
 run_secs=${4:-180}
+images_tar=${5:-images.tar}
 [[ $box_name =~ ^[a-zA-Z0-9-]+$ && $run_name =~ ^[a-zA-Z0-9-]+$ ]] || exit 2
 [[ $driver == pinned || $driver == progress ]] || exit 2
 [[ $run_secs =~ ^[1-9][0-9]*$ ]] || exit 2
+[[ $images_tar =~ ^[a-zA-Z0-9._-]+\.tar$ ]] || exit 2
 
 source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 box_target="ubuntu@${box_name}"
@@ -29,14 +31,15 @@ if [[ $driver == progress ]]; then
 fi
 
 ssh "${ssh_opts[@]}" "$box_target" bash -s -- \
-    "$run_name" "$driver" "$run_secs" <<'REMOTE'
+    "$run_name" "$driver" "$run_secs" "$images_tar" <<'REMOTE'
 set -uo pipefail
 run_name=$1
 driver=$2
 run_secs=$3
+images_tar=$4
 cd /home/ubuntu/ci-dst || exit 1
 export PATH="$PWD:$PATH"
-test -x ./bedrock-dst && test -f ./images.tar && test -f ./compose-run.yaml || exit 1
+test -x ./bedrock-dst && test -f "./$images_tar" && test -f ./compose-run.yaml || exit 1
 grep -q '^bedrock ' /proc/modules || { echo 'Bedrock module is not loaded on the box' >&2; exit 1; }
 output="results-ci-${run_name}"
 log="campaign-ci-${run_name}.log"
@@ -46,7 +49,7 @@ test ! -e "$output" && test ! -e "$status_file" || {
     exit 2
 }
 args=(campaign --vmlinux ./vmlinux --initrd ./initrd.gz
-    --compose ./compose-run.yaml --images ./images.tar
+    --compose ./compose-run.yaml --images "./$images_tar"
     --cmdline 'console=hvc0 nopti nokaslr mitigations=off break audit=0 bedrock_ncpus=5 bedrock_loop_delay lpj=1000000'
     --memory-mb 5120 --seed-start 14373434789495652599 --seeds 1
     --workload-cmd 'podman exec tempo-dst /usr/local/bin/tempo-dst'
@@ -62,8 +65,8 @@ if [[ $driver == progress ]]; then
     export BEDROCK_SEED_EXIT_PROGRESS=1
 fi
 start=$(date +%s)
-printf 'started_utc=%s\ndriver=%s\nrun_secs=%s\n' \
-    "$(date -u +%FT%TZ)" "$driver" "$run_secs" >"$status_file"
+printf 'started_utc=%s\ndriver=%s\nrun_secs=%s\nimages_tar=%s\n' \
+    "$(date -u +%FT%TZ)" "$driver" "$run_secs" "$images_tar" >"$status_file"
 timeout 1250 "$binary" "${args[@]}" >"$log" 2>&1
 process_status=$?
 failed=unknown

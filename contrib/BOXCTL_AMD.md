@@ -35,6 +35,11 @@ installs the userspace Rust toolchain and checks for AMD `svm`, `npt`, and
 `perfctr_core` CPU flags. A matching header package alone cannot make a
 module load into a different running kernel.
 
+`boxctl patch box NAME --keep-alive DURATION` sets the lifetime relative to
+the box's **creation**, not the time of the patch. Inspect `expires_at` with
+`boxctl get box NAME -o json` before and after changing it. Setting a duration
+shorter than the box's current age can destroy it immediately.
+
 ## Fast edit–test loop
 
 ```sh
