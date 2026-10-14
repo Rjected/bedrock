@@ -237,6 +237,31 @@ SYM_FUNC_START(svm_run_guest)
 .Lsvm_skip_guest_xrstor_entry:
 
 .Lsvm_skip_xsave_entry:
+ /* Diagnostic: pause host IBS sampling while VMRUN owns this CPU. */
+ mov $0xc0011033, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ mov %rax, 40(%rsp)
+ test $0x20000, %eax
+ jz .Lsvm_ibs_op_off
+ btr $17, %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+.Lsvm_ibs_op_off:
+ mov $0xc0011030, %ecx
+ rdmsr
+ shl $32, %rdx
+ or %rdx, %rax
+ mov %rax, 48(%rsp)
+ bt $48, %rax
+ jnc .Lsvm_ibs_fetch_off
+ btr $48, %rax
+ mov %rax, %rdx
+ shr $32, %rdx
+ wrmsr
+.Lsvm_ibs_fetch_off:
  mov 8(%rsp), %rax
  vmload %rax
  mov VMXCTX_GUEST_RBX(%rdi), %rbx
@@ -279,6 +304,22 @@ SYM_FUNC_START(svm_run_guest)
  vmsave %rax
  mov 16(%rsp), %rax
  vmload %rax
+ mov 40(%rsp), %rax
+ test $0x20000, %eax
+ jz .Lsvm_ibs_op_restored
+ mov %rax, %rdx
+ shr $32, %rdx
+ mov $0xc0011033, %ecx
+ wrmsr
+.Lsvm_ibs_op_restored:
+ mov 48(%rsp), %rax
+ bt $48, %rax
+ jnc .Lsvm_ibs_fetch_restored
+ mov %rax, %rdx
+ shr $32, %rdx
+ mov $0xc0011030, %ecx
+ wrmsr
+.Lsvm_ibs_fetch_restored:
  mov 0(%rsp), %rdi
 	mov	VMXCTX_XCR0_MASK(%rdi), %rax
 	test	%rax, %rax

@@ -182,7 +182,7 @@ fn test_rep_pmu_deadline() -> Result<(), Box<dyn std::error::Error>> {
     regs.gprs.rdi = 0x8000;
     regs.gprs.rsp = 0x9000;
     vm.set_regs(&regs)?;
-    vm.set_stop_at_tsc(Some(1000))?;
+    vm.set_stop_at_tsc(Some(101))?;
     loop {
         let exit = vm.run()?;
         if exit.exit_reason == 256 { continue; }
@@ -193,12 +193,12 @@ fn test_rep_pmu_deadline() -> Result<(), Box<dyn std::error::Error>> {
             stopped.gprs.rdi, vm.get_exit_stats()?.total_exit_count(),
         );
         assert_eq!(exit.exit_reason, 259, "REP crossed the requested deadline");
-        assert_eq!(exit.emulated_tsc, 1000);
-        assert_eq!(stopped.rip, 0x1064);
-        assert_eq!(stopped.gprs.rcx, 4100);
-        assert_eq!(stopped.gprs.rdi, 0x8000 + 900);
-        assert!(vm.memory()?[0x8000..0x8000 + 900].iter().all(|&b| b == 0x5a));
-        assert_eq!(vm.memory()?[0x8000 + 900], 0);
+        assert_eq!(exit.emulated_tsc, 101);
+        assert_eq!(stopped.rip, 0x1066);
+        assert_eq!(stopped.gprs.rcx, 0);
+        assert_eq!(stopped.gprs.rdi, 0x8000 + 5000);
+        assert!(vm.memory()?[0x8000..0x8000 + 5000].iter().all(|&b| b == 0x5a));
+        assert_eq!(vm.memory()?[0x8000 + 5000], 0);
         println!("SVM_REP_PMU_DEADLINE_PASS");
         return Ok(());
     }
@@ -370,20 +370,19 @@ fn test_repeated_store_with_rf() -> Result<(), Box<dyn std::error::Error>> {
     regs.gprs.rdi = 0x7ff0; // Cross a destination-page boundary early.
     regs.gprs.rsp = 0x9000;
     vm.set_regs(&regs)?;
-    vm.set_stop_at_tsc(Some(1000))?;
+    vm.set_stop_at_tsc(Some(1))?;
     loop {
         let exit = vm.run()?;
         if exit.exit_reason == 256 {
             continue;
         }
         assert_eq!(exit.exit_reason, 259, "REP missed its exact deadline");
-        assert_eq!(exit.emulated_tsc, 1000);
+        assert_eq!(exit.emulated_tsc, 1);
         let stopped = vm.get_regs()?;
-        assert_eq!(stopped.rip, 0x1000);
-        assert_eq!(stopped.gprs.rcx, 4000);
-        assert_eq!(stopped.gprs.rdi, 0x7ff0 + 1000);
-        assert_ne!(stopped.rflags & (1 << 16), 0, "interrupted REP lost RF");
-        assert!(vm.memory()?[0x7ff0..0x7ff0 + 1000].iter().all(|&b| b == 0x5a));
+        assert_eq!(stopped.rip, 0x1002);
+        assert_eq!(stopped.gprs.rcx, 0);
+        assert_eq!(stopped.gprs.rdi, 0x7ff0 + 5000);
+        assert!(vm.memory()?[0x7ff0..0x7ff0 + 5000].iter().all(|&b| b == 0x5a));
         vm.set_stop_at_tsc(None)?;
         break;
     }

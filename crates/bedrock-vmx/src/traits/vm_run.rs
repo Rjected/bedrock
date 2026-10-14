@@ -613,6 +613,12 @@ where
         ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
             pre_guest_tsc.saturating_sub(pre_entry_tsc);
         let state = ctx.state_mut();
+        state.vmx_ctx.svm_entry_repeat = u64::from(
+            batch.is_none()
+                && instruction_window.as_ref().is_some_and(|window| {
+                    super::super::exits::bounded_repeat_entry(&window.bytes)
+                }),
+        );
         if arm_masked_retry {
             state.vmcs.write_natural(
                 VmcsFieldNatural::GuestRflags,
@@ -703,9 +709,8 @@ where
             } else {
                 ctx.state_mut().svm_gate_scalar_page = window.as_ref()
                     .map(|window| window.physical.as_u64() & !4095);
-                // A recognized REP can use its validated, deadline-bounded batch
-                // after the hazard breakpoint. Other intercepted instructions
-                // still replay once without preparing another global gate.
+                // At a REP breakpoint, the global gate yields to the bounded
+                // REP executor. Other hazards replay one scalar instruction.
                 force_single_step = !window.as_ref().is_some_and(|window| {
                     super::super::exits::bounded_repeat_entry(&window.bytes)
                 });
@@ -738,7 +743,8 @@ where
             if (batch.as_ref().is_some_and(|batch| batch.global_execution)
                 && !replay && !force_single_step && masked_retry_rip.is_none())
                 || (batch.as_ref().is_none_or(|batch| !batch.page_execution)
-                    && runner.completed_instructions().is_some_and(|count| count != 0)
+                    && (runner.completed_instructions().is_some_and(|count| count != 0)
+                        || ctx.state().vmx_ctx.svm_entry_repeat != 0)
                     && ctx.state().svm_gate_scalar_page.is_some_and(|page| {
                         ctx.state()
                             .ept

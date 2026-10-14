@@ -1689,26 +1689,8 @@ fn validate_store<C: VmContext>(
 
 fn forbidden_page_bytes(bytes: &[u8]) -> bool {
     for start in 0..bytes.len() {
-        // RDRAND/RDSEED/RDPID have no general SVM interception. Checking
-        // their opcode at every byte also covers overlapping code and data.
-        if bytes.get(start..start + 2) == Some(&[0x0f, 0xc7])
-            && bytes.get(start + 2).is_some_and(|b| b & 0xf0 == 0xf0)
-        {
+        if hazardous_entry(&bytes[start..]) {
             return true;
-        }
-        if !matches!(bytes[start], 0xf2 | 0xf3) {
-            continue;
-        }
-        for &byte in bytes.iter().skip(start + 1).take(14) {
-            if matches!(byte, 0xa4..=0xa7 | 0xaa..=0xaf) {
-                return true;
-            }
-            if !matches!(
-                byte,
-                0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0x40..=0x4f | 0xf2 | 0xf3
-            ) {
-                break;
-            }
         }
     }
     false
@@ -1972,7 +1954,8 @@ fn hazardous_entry(bytes: &[u8]) -> bool {
             repeat |= matches!(byte, 0xf2 | 0xf3);
             continue;
         }
-        return (repeat && matches!(byte, 0xa4..=0xa7 | 0xaa..=0xaf))
+        return (repeat && matches!(byte, 0xa4..=0xa7 | 0xaa..=0xaf)
+            && repeat_len(bytes).is_none())
             || (bytes[index..].starts_with(&[0x0f, 0xc7])
                 && bytes.get(index + 2).is_some_and(|&b| b >= 0xf0));
     }
@@ -2021,7 +2004,9 @@ fn page_hazards<C: VmContext>(
             let marker = (byte == 0x0f
                 && bytes[index..].starts_with(&[0x0f, 0xc7])
                 && bytes.get(index + 2).is_some_and(|&b| b >= 0xf0))
-                || (matches!(byte, 0xf2 | 0xf3) && hazardous_entry(&bytes[index..]));
+                // Even if the REP at this byte is handled natively, an
+                // earlier prefix (notably 67h) may make that entry unsafe.
+                || matches!(byte, 0xf2 | 0xf3);
             if position < 0 || position >= 4096 || !marker {
                 continue;
             }
@@ -2238,6 +2223,9 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     let page = window.physical.as_u64() & !4095;
     let trusted = ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page));
     if !can_count
+        // A REP that restarts and a completed REP followed by a loop can
+        // both leave RIP at the entry address. Use the bounded executor.
+        || repeat_len(&window.bytes).is_some()
         || !ctx.state().svm_guard.gate_ready
         || ctx.state().svm_guard.gate_dirty
         || gate_table_contains(&ctx.state().svm_guard, page)
@@ -3956,7 +3944,7 @@ fn prepare_verified<C: VmContext>(
     let bytes = &window.bytes;
 
     let budget = instruction_budget(ctx);
-    let limit = budget.min(4096) as usize;
+    let limit = if repeat_entry && budget != 0 { 4096 } else { budget.min(4096) } as usize;
     if limit < 2 {
         return None;
     }
@@ -5650,7 +5638,7 @@ mod tests {
         assert!(page_safe(&ctx, 0x1000).is_some());
         for bytes in [
             &[0x0f, 0xc7, 0xf0][..],
-            &[0xf3, 0x48, 0xab],
+            &[0xf2, 0x48, 0xab],
             &[0xf2, 0xa6],
         ] {
             for offset in [0, 254, 255, 256, 4094, 4095] {
@@ -5953,9 +5941,8 @@ mod tests {
             let mut joined = [0; 32];
             joined[..16].copy_from_slice(&left.boundary[16..]);
             joined[16..].copy_from_slice(&right.boundary[..16]);
-            assert_eq!(
-                hazard_boundary_safe(&left, &right),
-                !forbidden_page_bytes(&joined),
+            assert!(
+                !hazard_boundary_safe(&left, &right) || !forbidden_page_bytes(&joined),
                 "suffix={suffix:x?} prefix={prefix:x?}"
             );
         };
@@ -6576,10 +6563,10 @@ mod tests {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
         ctx.memory[0x1000..0x1003].copy_from_slice(&[0x90, 0xeb, 0x2e]);
-        ctx.memory[0x1020..0x1022].copy_from_slice(&[0xf3, 0xa4]);
+        ctx.memory[0x1020..0x1022].copy_from_slice(&[0xf2, 0xa4]);
         ctx.memory[0x1031] = 0xc3;
         for offset in [0x100, 0x200] {
-            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf3, 0xa4]);
+            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf2, 0xa4]);
         }
         // A second executable alias needs all six hazardous entries covered.
         ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
@@ -6614,9 +6601,9 @@ mod tests {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
         ctx.memory[0x1000..0x1003].copy_from_slice(&[0x90, 0xeb, 0x2e]);
-        ctx.memory[0x1020..0x1022].copy_from_slice(&[0xf3, 0xa4]);
+        ctx.memory[0x1020..0x1022].copy_from_slice(&[0xf2, 0xa4]);
         ctx.memory[0x1031] = 0xc3;
-        ctx.memory[0x1100..0x1102].copy_from_slice(&[0xf3, 0xa4]);
+        ctx.memory[0x1100..0x1102].copy_from_slice(&[0xf2, 0xa4]);
         ctx.memory[0x6048..0x6050].copy_from_slice(&0x1007u64.to_le_bytes());
         ctx.state_mut().svm_guard.gate_ready = true;
         ctx.state_mut().svm_guard.gate_dirty = true;
@@ -6658,7 +6645,7 @@ mod tests {
         ctx.memory[0x1000..0x2000].fill(0x90);
         ctx.memory[0x1000..0x1005].copy_from_slice(&[0xe9, 0xfb, 0x7f, 0, 0]);
         for offset in [0x100, 0x200, 0x300] {
-            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf3, 0xa4]);
+            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf2, 0xa4]);
         }
         ctx.memory[0x6050..0x6058].copy_from_slice(&0x1007u64.to_le_bytes());
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
@@ -7037,7 +7024,7 @@ mod tests {
                 .page_execution
         );
         ctx.state_mut().svm_guard.valid = false;
-        ctx.memory[0x1100..0x1105].copy_from_slice(&[0xf3, 0x66, 0x48, 0xa4, 0x90]);
+        ctx.memory[0x1100..0x1105].copy_from_slice(&[0xf2, 0x66, 0x48, 0xa4, 0x90]);
         let b = prepare(&mut ctx, true, true, &window).unwrap();
         assert_eq!(&b.page_breakpoints[..b.page_breakpoint_count], &[0x1100]);
     }
@@ -7173,7 +7160,7 @@ mod tests {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
         for offset in [0x100, 0x110, 0x120, 0x130, 0x140] {
-            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf3, 0xa4]);
+            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf2, 0xa4]);
         }
         let hazard = page_hazards_memo(&mut ctx, 0x1000).unwrap();
         assert_eq!(hazard.count, 5);
@@ -7191,7 +7178,7 @@ mod tests {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x2000].fill(0x90);
         for offset in (0..17).map(|index| 0x100 + index * 0x80) {
-            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf3, 0xa4]);
+            ctx.memory[0x1000 + offset..0x1002 + offset].copy_from_slice(&[0xf2, 0xa4]);
         }
         let mut allocator = crate::test_mocks::MockFrameAllocator::new();
         ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
@@ -7329,7 +7316,7 @@ mod tests {
         for offset in [128, 254, 255, 256, 510, 511, 768, 4000] {
             for (bytes, expected) in [
                 (&[0x66, 0x48, 0x0f, 0xc7, 0xf0][..], &[0, 1, 2][..]),
-                (&[0xf3, 0x66, 0x48, 0xa4], &[0]),
+                (&[0xf2, 0x66, 0x48, 0xa4], &[0]),
             ] {
                 ctx.memory[0x1000..0x2000].fill(0x90);
                 ctx.memory[0x1000 + offset..0x1000 + offset + bytes.len()].copy_from_slice(bytes);
@@ -7339,6 +7326,32 @@ mod tests {
                     assert!(hazards.offsets[..hazards.count].contains(&((offset + prefix) as u16)));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn only_bounded_repeats_leave_the_page_hazard_set() {
+        let mut ctx = paged_context(&[0x90]);
+        for bytes in [
+            &[0xf3, 0xa4][..],
+            &[0xf3, 0x48, 0xa5],
+            &[0x66, 0xf3, 0xab],
+        ] {
+            ctx.memory[0x1000..0x2000].fill(0x90);
+            ctx.memory[0x11ff..0x11ff + bytes.len()].copy_from_slice(bytes);
+            let hazards = page_hazards(&mut ctx, 0x1000, None).unwrap().unwrap();
+            assert_eq!(hazards.count, 0, "bounded repeat {bytes:x?}");
+        }
+        for bytes in [
+            &[0xf2, 0xa4][..],
+            &[0xf3, 0xa6],
+            &[0x67, 0xf3, 0xa4],
+            &[0x0f, 0xc7, 0xf0],
+        ] {
+            ctx.memory[0x1000..0x2000].fill(0x90);
+            ctx.memory[0x11ff..0x11ff + bytes.len()].copy_from_slice(bytes);
+            let hazards = page_hazards(&mut ctx, 0x1000, None).unwrap().unwrap();
+            assert!(hazards.count > 0, "unbounded entry {bytes:x?}");
         }
     }
 

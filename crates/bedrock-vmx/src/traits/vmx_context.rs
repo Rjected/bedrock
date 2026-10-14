@@ -76,6 +76,9 @@ pub struct VmxContext {
     // The guest XSAVE image needs flushing before a reservation ends, a fork,
     // or an XSETBV changes the component mask (offset 312).
     pub svm_guest_fpu_dirty: u64,
+
+    // The scalar entry starts at F3 MOVS/STOS and retires only on completion.
+    pub svm_entry_repeat: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
@@ -132,6 +135,7 @@ impl VmxContext {
             svm_host_fpu_reserved: 0,
             svm_guest_fpu_resident: 0,
             svm_guest_fpu_dirty: 0,
+            svm_entry_repeat: 0,
         }
     }
 }

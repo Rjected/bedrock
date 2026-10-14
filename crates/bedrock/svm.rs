@@ -524,7 +524,7 @@ pub(crate) unsafe fn run(
                 // preserve that state before exposing a timer or interrupt.
                 v.write(o::RFLAGS, 8, v.read(o::RFLAGS, 8) | (1 << 16));
             }
-            completed
+            u64::from(ctx.guest_rcx == 0 && rip == batch.endpoint())
         } else if let Some(counted) = batch.counted_loop {
             let counter = match counted.register {
                 0 => ctx.guest_rax,
@@ -572,10 +572,13 @@ pub(crate) unsafe fn run(
                 || (batch.counter_bounded && count > batch.count as u64)
             {
                 kernel::pr_err!(
-                    "SVM PMU exceeded budget: count={} budget={} code={:#x}\n",
+                    "SVM PMU exceeded budget: count={} budget={} batch_count={} bounded={} start={:#x} rip={:#x} code={:#x} raw={} pmc={:#x} status={:#x}\n",
                     count,
                     batch.instruction_budget,
-                    code
+                    batch.count, batch.counter_bounded, batch.start,
+                    v.read(o::RIP, 8), code,
+                    v.read(o::INSTR_RETIRED_CTR, 8),
+                    v.read(o::PERF_CTR0, 8), v.read(o::PERF_GLOBAL_STATUS, 8)
                 );
                 return Err(VmEntryError::VmEntryFailed);
             }
@@ -592,7 +595,11 @@ pub(crate) unsafe fn run(
             })?
         }
     } else {
-        u64::from(debug_step || (code == 0x41 && original_tf != 0 && original_dr7 & 0x20ff == 0))
+        if ctx.svm_entry_repeat != 0 {
+            u64::from(v.read(o::RIP, 8) != entry_rip)
+        } else {
+            u64::from(debug_step || (code == 0x41 && original_tf != 0 && original_dr7 & 0x20ff == 0))
+        }
     };
     v.write(
         o::RFLAGS,
