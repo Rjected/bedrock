@@ -2231,7 +2231,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &A,
     can_count: bool,
-    allow_unsafe: bool,
+    _allow_unsafe: bool,
     window: &super::svm::InstructionWindow,
     output: &mut Option<InstructionBatch>,
 ) -> Option<()> {
@@ -2240,7 +2240,6 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     if !can_count
         || !ctx.state().svm_guard.gate_ready
         || ctx.state().svm_guard.gate_dirty
-        || (!trusted && !allow_unsafe)
         || gate_table_contains(&ctx.state().svm_guard, page)
         || ctx.state().mtf_enabled
         || ctx.state().vmcs.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
@@ -4828,6 +4827,13 @@ mod tests {
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
             .unwrap().page_breakpoint_count, 1);
+        // The page has no preceding execute-fault marker, but its exact
+        // hazards and guarded aliases are enough to plan from a safe RIP.
+        assert_eq!(prepare_global(&mut ctx, &allocator, true, false, &window)
+            .unwrap().page_breakpoint_count, 1);
+        ctx.set_guest_rip(0x2100);
+        let hazard = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(prepare_global(&mut ctx, &allocator, true, false, &hazard).is_none());
         ctx.state_mut().ept.trust_npt_code_4k(
             &allocator, GuestPhysAddr::new(0x1000)).unwrap();
         ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =

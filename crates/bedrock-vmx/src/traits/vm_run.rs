@@ -512,7 +512,7 @@ where
             masked_retry_rip = None;
             masked_retry_plan = None;
         }
-        let scalar_execute = if !software_exit {
+        let mut scalar_execute = if !software_exit {
             scalar_page
                 .map(|page| {
                     let page = instruction_window.as_ref()
@@ -544,6 +544,29 @@ where
         });
         if batch.is_some() && guard.is_none() {
             batch = None;
+        }
+        // A global batch has validated the current hazardous page's exact
+        // bytes and executable aliases. It can grant NPT execute permission
+        // for this interval even without an earlier execute-fault marker.
+        // Wait until protection succeeds so a rejected batch cannot grant
+        // permission to an unvalidated scalar entry.
+        if scalar_execute.is_none() {
+            if let Some(page) = batch.as_ref()
+                .filter(|batch| batch.global_execution)
+                .map(|batch| batch.pages[0])
+            {
+                let Some(execute) = ctx.state_mut().ept.allow_npt_execute_4k(
+                    allocator, GuestPhysAddr::new(page),
+                ) else {
+                    if let Some(guard) = guard {
+                        guard.restore(ctx, allocator);
+                    }
+                    return Err(VmRunError::ExitHandler(
+                        super::super::exits::ExitError::Fatal("SVM global code page is unmapped"),
+                    ));
+                };
+                scalar_execute = Some(execute);
+            }
         }
         // Protection can reject the batch after the retry decision was made.
         // In that case the synthetic flag must not reach a scalar entry.
