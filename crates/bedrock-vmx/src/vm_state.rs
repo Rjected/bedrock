@@ -31,6 +31,9 @@ pub(crate) const SVM_ALIAS_PROOF_WAYS: usize = 4;
 pub(crate) const SVM_ALIAS_PROOF_PAGE_CAPACITY: usize = 4;
 pub(crate) const SVM_LEAF_PAGE_INDEX_CAPACITY: usize = 1024;
 pub(crate) const SVM_LEAF_FILTER_CACHE_CAPACITY: usize = 2048;
+// The wider filter keeps ordinary executable PTE populations from
+// saturating the alias walk's negative lookup.
+pub(crate) const SVM_LEAF_FILTER_WORDS: usize = 16;
 pub(crate) const SVM_LEAF_SNAPSHOT_CAPACITY: usize = 4;
 // Tempo's send-phase address space can exceed 512 reachable page-table pages.
 pub(crate) const SVM_TABLE_CAPACITY: usize = 1024;
@@ -130,12 +133,12 @@ pub(crate) struct SvmGuardScratch {
     pub gate_upper_count: usize,
     /// Cached Bloom filters of executable GPAs in guarded leaf tables.
     /// A cleared bit proves a page cannot have an alias through that table.
-    pub gate_leaf_filters: [[u64; 4]; SVM_TABLE_CAPACITY],
+    pub gate_leaf_filters: [[u64; SVM_LEAF_FILTER_WORDS]; SVM_TABLE_CAPACITY],
     pub gate_leaf_filter_valid: [bool; SVM_TABLE_CAPACITY],
     /// Filters survive guarded CR3 switches; writes and mapping changes revoke them.
     pub leaf_filter_cache_pages: [u64; SVM_LEAF_FILTER_CACHE_CAPACITY],
     pub leaf_filter_cache_generations: [u64; SVM_LEAF_FILTER_CACHE_CAPACITY],
-    pub leaf_filter_cache_values: [[u64; 4]; SVM_LEAF_FILTER_CACHE_CAPACITY],
+    pub leaf_filter_cache_values: [[u64; SVM_LEAF_FILTER_WORDS]; SVM_LEAF_FILTER_CACHE_CAPACITY],
     pub gate_count: usize,
     pub gate_root: u64,
     /// Leaf-only refresh is valid only while all guarded NPT mappings persist.

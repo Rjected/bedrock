@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static REFRESH_PENDING: AtomicU64 = AtomicU64::new(0);
@@ -59,6 +59,7 @@ const _: () = assert!(SVM_TABLE_CAPACITY.is_power_of_two() && SVM_TABLE_CAPACITY
 const _: () = assert!(SVM_SUCCESSOR_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_SECOND_SUCCESSOR_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_ALIAS_PROOF_LOOKUP_CAPACITY.is_power_of_two());
+const _: () = assert!(SVM_LEAF_FILTER_WORDS == 16);
 
 fn successor_slot(root: u64, from: u64) -> usize {
     let key = (from >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -2761,8 +2762,8 @@ type LeafFilterProbe = (usize, u64, usize, u64);
 
 fn leaf_filter_probe(page: u64) -> LeafFilterProbe {
     let hash = (page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    let first = (hash >> 56) as usize;
-    let second = (hash.rotate_left(27) >> 56) as usize;
+    let first = (hash >> 54) as usize;
+    let second = (hash.rotate_left(27) >> 54) as usize;
     (
         first >> 6,
         1u64 << (first & 63),
@@ -2771,7 +2772,7 @@ fn leaf_filter_probe(page: u64) -> LeafFilterProbe {
     )
 }
 
-fn leaf_filter_contains(filter: &[u64; 4], probe: LeafFilterProbe) -> bool {
+fn leaf_filter_contains(filter: &[u64; SVM_LEAF_FILTER_WORDS], probe: LeafFilterProbe) -> bool {
     filter[probe.0] & probe.1 != 0 && filter[probe.2] & probe.3 != 0
 }
 
@@ -3047,7 +3048,7 @@ fn collect_page_breakpoints<C: VmContext>(
                 continue;
             }
         }
-        let mut leaf_filter = [0u64; 4];
+        let mut leaf_filter = [0u64; SVM_LEAF_FILTER_WORDS];
         for offset in (0..4096).step_by(2048) {
             if ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes).is_err() {
                 COLLECT_WALK_READ_FAIL.fetch_add(1, Ordering::Relaxed);
@@ -4559,6 +4560,27 @@ impl BatchGuard {
 mod tests {
     use super::*;
     use crate::tests::MockVmContext;
+
+    #[test]
+    fn wide_leaf_filter_preserves_membership_without_saturating() {
+        let mut filter = [0u64; SVM_LEAF_FILTER_WORDS];
+        for page in 0..96u64 {
+            let probe = leaf_filter_probe((page * 37 + 11) << 12);
+            filter[probe.0] |= probe.1;
+            filter[probe.2] |= probe.3;
+        }
+        for page in 0..96u64 {
+            assert!(leaf_filter_contains(
+                &filter, leaf_filter_probe((page * 37 + 11) << 12)
+            ));
+        }
+        let false_positives = (0..1024u64)
+            .filter(|&page| leaf_filter_contains(
+                &filter, leaf_filter_probe(((page + 96) * 37 + 11) << 12)
+            ))
+            .count();
+        assert!(false_positives < 256, "{false_positives} false positives");
+    }
 
     #[test]
     fn guarded_table_index_handles_collisions_and_falls_back_while_rebuilding() {
