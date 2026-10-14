@@ -39,6 +39,7 @@ pub(crate) const SVM_LEAF_SNAPSHOT_CAPACITY: usize = 4;
 pub(crate) const SVM_TABLE_CAPACITY: usize = 1024;
 /// Guards retained for page tables belonging to recently inactive CR3 roots.
 pub(crate) const SVM_RETAINED_GUARD_CAPACITY: usize = 4096;
+pub(crate) const SVM_REBUILD_GUARD_INDEX_CAPACITY: usize = 8192;
 pub(crate) const SVM_TABLE_WORDS: usize = SVM_TABLE_CAPACITY / 64;
 pub(crate) const SVM_TABLE_INDEX_CAPACITY: usize = SVM_TABLE_CAPACITY * 2;
 
@@ -123,6 +124,9 @@ pub(crate) struct SvmGuardScratch {
     pub gate_table_index_valid: bool,
     pub gate_guards: [SvmGuardSaved; SVM_TABLE_CAPACITY],
     pub retained_guards: [SvmGuardSaved; SVM_RETAINED_GUARD_CAPACITY],
+    /// Temporary lookup for one complete guarded-tree rebuild. Recomputed
+    /// from live retained guards before the rebuild's per-table loop.
+    pub rebuild_guard_index: [u16; SVM_REBUILD_GUARD_INDEX_CAPACITY],
     pub retained_guard_count: usize,
     pub retained_mapping_generation: u64,
     pub gate_levels: [u8; SVM_TABLE_CAPACITY],
