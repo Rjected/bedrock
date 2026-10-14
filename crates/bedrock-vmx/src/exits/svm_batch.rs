@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static REFRESH_PENDING: AtomicU64 = AtomicU64::new(0);
@@ -60,8 +60,6 @@ const _: () = assert!(SVM_SUCCESSOR_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_SECOND_SUCCESSOR_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_ALIAS_PROOF_LOOKUP_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_LEAF_FILTER_WORDS == 16);
-const _: () = assert!(SVM_REBUILD_GUARD_INDEX_CAPACITY.is_power_of_two());
-const _: () = assert!(SVM_REBUILD_GUARD_INDEX_CAPACITY > SVM_RETAINED_GUARD_CAPACITY);
 
 fn successor_slot(root: u64, from: u64) -> usize {
     let key = (from >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -835,53 +833,6 @@ fn retained_guard_for(guard: &super::super::vm_state::SvmGuardScratch, page: u64
         .position(|saved| saved.valid && saved.guest == page)
 }
 
-fn rebuild_guard_index_slot(page: u64) -> usize {
-    ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
-        & (SVM_REBUILD_GUARD_INDEX_CAPACITY - 1)
-}
-
-fn index_retained_guards_for_rebuild(guard: &mut super::super::vm_state::SvmGuardScratch) {
-    guard.rebuild_guard_index.fill(0);
-    for index in 0..guard.retained_guard_count {
-        let saved = guard.retained_guards[index];
-        if !saved.valid { continue; }
-        let mut slot = rebuild_guard_index_slot(saved.guest);
-        loop {
-            let entry = guard.rebuild_guard_index[slot];
-            if entry == 0 {
-                guard.rebuild_guard_index[slot] = (index + 1) as u16;
-                break;
-            }
-            // Keep the first live matching registry entry, exactly as the
-            // original linear search does if duplicate entries ever exist.
-            if guard.retained_guards[usize::from(entry - 1)].guest == saved.guest {
-                break;
-            }
-            slot = (slot + 1) & (SVM_REBUILD_GUARD_INDEX_CAPACITY - 1);
-        }
-    }
-}
-
-fn indexed_retained_guard_for(
-    guard: &super::super::vm_state::SvmGuardScratch,
-    page: u64,
-) -> Option<usize> {
-    let mut slot = rebuild_guard_index_slot(page);
-    loop {
-        let entry = guard.rebuild_guard_index[slot];
-        if entry == 0 { break; }
-        let index = usize::from(entry - 1);
-        if index < guard.retained_guard_count {
-            let saved = &guard.retained_guards[index];
-            if saved.valid && saved.guest == page { return Some(index); }
-        }
-        slot = (slot + 1) & (SVM_REBUILD_GUARD_INDEX_CAPACITY - 1);
-    }
-    // Newly installed guards during this rebuild are not in the snapshot.
-    // The complete scan also protects against stale or colliding entries.
-    retained_guard_for(guard, page)
-}
-
 fn forget_active_global_tree<C: VmContext>(ctx: &mut C) {
     let guard = &mut ctx.state_mut().svm_guard;
     guard.gate_count = 0;
@@ -1294,7 +1245,6 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         return;
     }
     let count = ctx.state().svm_guard.count;
-    index_retained_guards_for_rebuild(&mut ctx.state_mut().svm_guard);
     ctx.state_mut().svm_guard.gate_table_index_valid = false;
     for index in 0..count {
         let page = ctx.state().svm_guard.tables[index];
@@ -1306,7 +1256,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         ctx.state_mut().svm_guard.gate_upper_lengths[index] = ctx.state().svm_guard.upper_lengths[index];
         ctx.state_mut().svm_guard.gate_guards[index].valid = false;
         let _ = ctx.state_mut().ept.invalidate_npt_code_4k(allocator, gpa);
-        if let Some(retained_index) = indexed_retained_guard_for(&ctx.state().svm_guard, page) {
+        if let Some(retained_index) = retained_guard_for(&ctx.state().svm_guard, page) {
             let saved = ctx.state().svm_guard.retained_guards[retained_index];
             if saved.write_guard.is_active(&ctx.state().ept, allocator, gpa) {
                 ctx.state_mut().svm_guard.gate_guards[index] = saved;
@@ -4610,33 +4560,6 @@ impl BatchGuard {
 mod tests {
     use super::*;
     use crate::tests::MockVmContext;
-
-    #[test]
-    fn rebuild_guard_index_matches_linear_lookup_with_collisions_and_changes() {
-        let mut ctx = MockVmContext::new();
-        let first = 0x1000u64;
-        let collision = first + ((SVM_REBUILD_GUARD_INDEX_CAPACITY as u64) << 12);
-        assert_eq!(rebuild_guard_index_slot(first), rebuild_guard_index_slot(collision));
-        let guard = &mut ctx.state_mut().svm_guard;
-        for (index, page) in [first, collision, first].into_iter().enumerate() {
-            guard.retained_guards[index].guest = page;
-            guard.retained_guards[index].valid = true;
-        }
-        guard.retained_guard_count = 3;
-        index_retained_guards_for_rebuild(guard);
-        assert_eq!(indexed_retained_guard_for(guard, first), Some(0));
-        assert_eq!(indexed_retained_guard_for(guard, collision), Some(1));
-        assert_eq!(indexed_retained_guard_for(guard, 0xbeef000), None);
-
-        // A guard installed after the snapshot remains findable, and stale
-        // entries never hide a later live match.
-        guard.retained_guards[3].guest = 0xbeef000;
-        guard.retained_guards[3].valid = true;
-        guard.retained_guard_count = 4;
-        assert_eq!(indexed_retained_guard_for(guard, 0xbeef000), Some(3));
-        guard.retained_guards[0].valid = false;
-        assert_eq!(indexed_retained_guard_for(guard, first), Some(2));
-    }
 
     #[test]
     fn wide_leaf_filter_preserves_membership_without_saturating() {
