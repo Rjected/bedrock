@@ -40,7 +40,12 @@ run_secs=$3
 images_tar=$4
 cd /home/ubuntu/ci-dst || exit 1
 export PATH="$PWD:$PATH"
-test -x ./bedrock-dst && test -f "./$images_tar" && test -f ./compose-run.yaml || exit 1
+binary=./bedrock-dst
+if [[ $driver == progress ]]; then
+    binary=./bedrock-dst-progress
+    export BEDROCK_SEED_EXIT_PROGRESS=1
+fi
+test -x "$binary" && test -f "./$images_tar" && test -f ./compose-run.yaml || exit 1
 grep -q '^bedrock ' /proc/modules || { echo 'Bedrock module is not loaded on the box' >&2; exit 1; }
 output="results-ci-${run_name}"
 log="campaign-ci-${run_name}.log"
@@ -59,11 +64,6 @@ args=(campaign --vmlinux ./vmlinux --initrd ./initrd.gz
 if [[ $run_secs != 180 ]]; then
     args+=(--run-secs "$run_secs")
     echo 'Diagnostic duration changes the workload verdict; do not compare it to Intel CI.' >&2
-fi
-binary=./bedrock-dst
-if [[ $driver == progress ]]; then
-    binary=./bedrock-dst-progress
-    export BEDROCK_SEED_EXIT_PROGRESS=1
 fi
 start=$(date +%s)
 printf 'started_utc=%s\ndriver=%s\nrun_secs=%s\nimages_tar=%s\n' \
