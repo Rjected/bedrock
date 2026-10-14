@@ -1,0 +1,104 @@
+diff --git a/crates/bedrock-vmx/src/exits/ept.rs b/crates/bedrock-vmx/src/exits/ept.rs
+index 0b3f9a3..882f5b5 100644
+--- a/crates/bedrock-vmx/src/exits/ept.rs
++++ b/crates/bedrock-vmx/src/exits/ept.rs
+@@ -9,6 +9,9 @@ use super::helpers::ExitHandlerResult;
+ use super::pebs::{handle_pebs_precise_exit, is_pebs_induced};
+ use super::qualifications::EptViolationQualification;
+ use super::reasons::ExitReason;
++use core::sync::atomic::{AtomicU64, Ordering};
++
++static AMD_EXEC_FAULT_SAMPLES: AtomicU64 = AtomicU64::new(0);
+ 
+ #[cfg(not(feature = "cargo"))]
+ use super::super::prelude::*;
+@@ -59,6 +62,22 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
+                 && !gate.gate_dirty
+                 && !super::svm_batch::gate_table_contains(gate, page);
+             let safe = may_trust && super::svm_batch::globally_safe_code(ctx, page);
++            // Diagnostic-only, bounded-rate sample of real execute faults.
++            let fault = AMD_EXEC_FAULT_SAMPLES.fetch_add(1, Ordering::Relaxed) + 1;
++            if fault & 8191 == 0 {
++                let mut first = [0u8; 16];
++                let _ = ctx.read_guest_memory(GuestPhysAddr::new(page), &mut first);
++                let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).unwrap_or(0);
++                log_err!("AMD_EXEC_SAMPLE n={} vt={} gpa={:#x} rip={:#x} prev={:#x} prev2={:#x} plan={} bp={} p0={:#x} p1={:#x} p2={:#x} p3={:#x} safe={} ready={} first={:016x} second={:016x}\n",
++                    fault, ctx.state().emulated_tsc, page, rip,
++                    ctx.state().svm_recent_pages[0], ctx.state().svm_recent_pages[1],
++                    ctx.state().svm_last_batch_count, ctx.state().svm_last_batch_breakpoints,
++                    ctx.state().svm_last_batch_pages[0], ctx.state().svm_last_batch_pages[1],
++                    ctx.state().svm_last_batch_pages[2], ctx.state().svm_last_batch_pages[3],
++                    safe, may_trust,
++                    u64::from_le_bytes(first[..8].try_into().unwrap()),
++                    u64::from_le_bytes(first[8..].try_into().unwrap()));
++            }
+             if may_trust {
+                 super::svm_batch::protect_recurrent_code(ctx, allocator, page);
+             }
+diff --git a/crates/bedrock-vmx/src/traits/vm_run.rs b/crates/bedrock-vmx/src/traits/vm_run.rs
+index e8a5bd8..56e0c68 100644
+--- a/crates/bedrock-vmx/src/traits/vm_run.rs
++++ b/crates/bedrock-vmx/src/traits/vm_run.rs
+@@ -613,6 +613,17 @@ where
+         ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
+             pre_guest_tsc.saturating_sub(pre_entry_tsc);
+         let state = ctx.state_mut();
++        if Ctx::V::uses_nested_paging() {
++            state.svm_last_batch_pages = [u64::MAX; 4];
++            state.svm_last_batch_count = 0;
++            state.svm_last_batch_breakpoints = 0;
++            if let Some(batch) = batch.as_ref().filter(|batch| batch.global_execution) {
++                let count = batch.code_page_count.min(4);
++                state.svm_last_batch_pages[..count].copy_from_slice(&batch.pages[..count]);
++                state.svm_last_batch_count = count as u8;
++                state.svm_last_batch_breakpoints = batch.page_breakpoint_count as u8;
++            }
++        }
+         if arm_masked_retry {
+             state.vmcs.write_natural(
+                 VmcsFieldNatural::GuestRflags,
+diff --git a/crates/bedrock-vmx/src/vm_state.rs b/crates/bedrock-vmx/src/vm_state.rs
+index 1a02744..46d72fb 100644
+--- a/crates/bedrock-vmx/src/vm_state.rs
++++ b/crates/bedrock-vmx/src/vm_state.rs
+@@ -1153,6 +1153,10 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
+     pub svm_rejected_cursor: usize,
+     /// Recent virtual code pages; immutable hazard scans live in `svm_guard`.
+     pub svm_recent_pages: [u64; SVM_RECENT_PAGE_CAPACITY],
++    /// Diagnostic-only: code pages and DR slots selected for the last SVM entry.
++    pub svm_last_batch_pages: [u64; 4],
++    pub svm_last_batch_count: u8,
++    pub svm_last_batch_breakpoints: u8,
+     pub svm_gate_scalar_page: Option<u64>,
+     /// A page-table store whose write guard was released but has not retired.
+     pub svm_gate_pending_write: bool,
+@@ -1415,6 +1419,9 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
+             svm_rejected_pages: [u64::MAX; 64],
+             svm_rejected_cursor: 0,
+             svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
++            svm_last_batch_pages: [u64::MAX; 4],
++            svm_last_batch_count: 0,
++            svm_last_batch_breakpoints: 0,
+             svm_gate_scalar_page: None,
+             svm_gate_pending_write: false,
+             svm_host_memory_stable: false,
+@@ -2197,6 +2204,9 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
+             svm_rejected_pages: [u64::MAX; 64],
+             svm_rejected_cursor: 0,
+             svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
++            svm_last_batch_pages: [u64::MAX; 4],
++            svm_last_batch_count: 0,
++            svm_last_batch_breakpoints: 0,
+             svm_gate_scalar_page: None,
+             svm_gate_pending_write: false,
+             svm_host_memory_stable: false,
+@@ -2419,6 +2429,9 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
+             svm_rejected_pages: [u64::MAX; 64],
+             svm_rejected_cursor: 0,
+             svm_recent_pages: [u64::MAX; SVM_RECENT_PAGE_CAPACITY],
++            svm_last_batch_pages: [u64::MAX; 4],
++            svm_last_batch_count: 0,
++            svm_last_batch_breakpoints: 0,
+             svm_gate_scalar_page: None,
+             svm_gate_pending_write: false,
+             svm_host_memory_stable: false,
