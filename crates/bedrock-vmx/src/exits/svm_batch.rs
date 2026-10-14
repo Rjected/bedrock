@@ -865,7 +865,13 @@ fn index_retained_guards_for_rebuild(guard: &mut super::super::vm_state::SvmGuar
 fn indexed_retained_guard_for(
     guard: &super::super::vm_state::SvmGuardScratch,
     page: u64,
+    index_stale: bool,
 ) -> Option<usize> {
+    // Reusing a registry slot can change which duplicate the original scan
+    // selects. Once this rebuild changes the registry, use that scan again.
+    if index_stale {
+        return retained_guard_for(guard, page);
+    }
     let mut slot = rebuild_guard_index_slot(page);
     loop {
         let entry = guard.rebuild_guard_index[slot];
@@ -1295,6 +1301,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     }
     let count = ctx.state().svm_guard.count;
     index_retained_guards_for_rebuild(&mut ctx.state_mut().svm_guard);
+    let mut guard_index_stale = false;
     ctx.state_mut().svm_guard.gate_table_index_valid = false;
     for index in 0..count {
         let page = ctx.state().svm_guard.tables[index];
@@ -1306,7 +1313,9 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         ctx.state_mut().svm_guard.gate_upper_lengths[index] = ctx.state().svm_guard.upper_lengths[index];
         ctx.state_mut().svm_guard.gate_guards[index].valid = false;
         let _ = ctx.state_mut().ept.invalidate_npt_code_4k(allocator, gpa);
-        if let Some(retained_index) = indexed_retained_guard_for(&ctx.state().svm_guard, page) {
+        if let Some(retained_index) =
+            indexed_retained_guard_for(&ctx.state().svm_guard, page, guard_index_stale)
+        {
             let saved = ctx.state().svm_guard.retained_guards[retained_index];
             if saved.write_guard.is_active(&ctx.state().ept, allocator, gpa) {
                 ctx.state_mut().svm_guard.gate_guards[index] = saved;
@@ -1330,6 +1339,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
                     return;
                 }
                 guard.retained_guards[slot] = saved;
+                guard_index_stale = true;
                 guard.retained_guard_count = guard.retained_guard_count.max(slot + 1);
                 guard.gate_guards[index] = saved;
             }
@@ -4624,18 +4634,44 @@ mod tests {
         }
         guard.retained_guard_count = 3;
         index_retained_guards_for_rebuild(guard);
-        assert_eq!(indexed_retained_guard_for(guard, first), Some(0));
-        assert_eq!(indexed_retained_guard_for(guard, collision), Some(1));
-        assert_eq!(indexed_retained_guard_for(guard, 0xbeef000), None);
+        assert_eq!(indexed_retained_guard_for(guard, first, false), Some(0));
+        assert_eq!(indexed_retained_guard_for(guard, collision, false), Some(1));
+        assert_eq!(indexed_retained_guard_for(guard, 0xbeef000, false), None);
 
-        // A guard installed after the snapshot remains findable, and stale
-        // entries never hide a later live match.
+        // A guard installed after the snapshot remains findable once the
+        // caller marks that snapshot stale.
         guard.retained_guards[3].guest = 0xbeef000;
         guard.retained_guards[3].valid = true;
         guard.retained_guard_count = 4;
-        assert_eq!(indexed_retained_guard_for(guard, 0xbeef000), Some(3));
+        assert_eq!(indexed_retained_guard_for(guard, 0xbeef000, true), Some(3));
         guard.retained_guards[0].valid = false;
-        assert_eq!(indexed_retained_guard_for(guard, first), Some(2));
+        assert_eq!(indexed_retained_guard_for(guard, first, true), Some(2));
+    }
+
+    #[test]
+    fn rebuild_guard_index_matches_linear_lookup_after_slot_reuse() {
+        let mut ctx = MockVmContext::new();
+        let guard = &mut ctx.state_mut().svm_guard;
+        let old_page = 0x1000u64;
+        let reused_page = 0x2000u64;
+        assert_ne!(rebuild_guard_index_slot(old_page), rebuild_guard_index_slot(reused_page));
+        guard.retained_guards[0].guest = old_page;
+        guard.retained_guards[0].valid = true;
+        guard.retained_guards[1].guest = reused_page;
+        guard.retained_guards[1].valid = true;
+        guard.retained_guard_count = 2;
+        index_retained_guards_for_rebuild(guard);
+
+        // A rebuild can invalidate a saved guard and fill its slot before
+        // the snapshot index is rebuilt. The linear scan then sees slot 0.
+        guard.retained_guards[0].valid = false;
+        guard.retained_guards[0].guest = reused_page;
+        guard.retained_guards[0].valid = true;
+        assert_eq!(indexed_retained_guard_for(guard, reused_page, false), Some(1));
+        assert_eq!(
+            indexed_retained_guard_for(guard, reused_page, true),
+            retained_guard_for(guard, reused_page),
+        );
     }
 
     #[test]
