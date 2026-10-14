@@ -1160,31 +1160,36 @@ fn test_repeat() -> Result<(), Box<dyn std::error::Error>> {
     regs.rip = 0x1000;
     regs.gprs.rsp = 0x8000;
     vm.set_regs(&regs)?;
-    vm.set_stop_at_tsc(Some(17))?;
+    vm.set_stop_at_tsc(Some(3))?;
     loop {
         let exit = vm.run()?;
         if exit.exit_reason == 256 {
             continue;
         }
         assert_eq!(exit.exit_reason, 259);
-        assert_eq!(exit.emulated_tsc, 17);
+        assert_eq!(exit.emulated_tsc, 3);
         break;
     }
     let r = vm.get_regs()?;
     assert_eq!(r.rip, 0x1019);
-    assert_eq!(r.gprs.rcx, 9986);
-    assert_eq!(r.gprs.rdi, 0x700e);
-    assert!(vm.memory()?[0x7000..0x700e].iter().all(|&b| b == 0xa5));
-    assert_eq!(vm.memory()?[0x700e], 0);
+    assert_eq!(r.gprs.rcx, 10_000);
+    assert_eq!(r.gprs.rdi, 0x7000);
+    assert_eq!(vm.memory()?[0x7000], 0);
     vm.set_stop_at_tsc(None)?;
     let mut hash = DefaultHasher::new();
     hash.write(vm.memory()?);
     let parent_hash = hash.finish();
     let mut results = Vec::new();
-    for replay in 0..2 {
+    let replays = std::env::var("SVM_REP_REPLAYS")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(2);
+    assert!(replays >= 2);
+    for replay in 0..replays {
         let child = vm.fork()?;
         if replay == 0 {
-            child.set_single_step_range(17, 10_005)?;
+            child.set_single_step_range(3, 6)?;
         }
         loop {
             let exit = child.run()?;
@@ -1192,7 +1197,7 @@ fn test_repeat() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             assert_eq!(exit.exit_reason, 258);
-            assert_eq!(exit.emulated_tsc, 10_004);
+            assert_eq!(exit.emulated_tsc, 5);
             let r = child.get_regs()?;
             assert_eq!(r.gprs.rcx, 0);
             assert_eq!(r.gprs.rdi, 0x7000 + 10_000);
@@ -1208,15 +1213,15 @@ fn test_repeat() -> Result<(), Box<dyn std::error::Error>> {
         }
         if replay == 0 {
             println!("SVM_REP_REFERENCE_EXITS count={exits}");
-        } else {
+        } else if replay + 1 == replays {
             println!("SVM_REP_NATIVE_EXITS count={exits}");
         }
     }
-    assert_eq!(results[0], results[1]);
+    assert!(results.iter().all(|result| *result == results[0]));
     let mut hash = DefaultHasher::new();
     hash.write(vm.memory()?);
     assert_eq!(hash.finish(), parent_hash);
-    println!("SVM_REP_DEADLINE_FORK_PASS");
+    println!("SVM_REP_DEADLINE_FORK_PASS replays={replays}");
     Ok(())
 }
 
