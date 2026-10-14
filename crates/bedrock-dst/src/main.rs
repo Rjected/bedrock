@@ -991,7 +991,7 @@ fn finish(
                 guest_exit = d.run_until(next)?;
                 let stats = d.b.exit_stats()?;
                 eprintln!(
-                    "BEDROCK_SEED_EXIT_PROGRESS vt={:.3} wall={:.1} exits={} npt={} mtf={} rdtsc={} rdtscp={} exception={} other={} entry_cycles={} guest_cycles={}",
+                    "BEDROCK_SEED_EXIT_PROGRESS vt={:.3} wall={:.1} exits={} npt={} mtf={} rdtsc={} rdtscp={} exception={} other={} entry_cycles={} guest_cycles={} run_cycles={} exit_cycles={} vmexit_cycles={} irq_cycles={} npt_cycles={} mtf_cycles={}",
                     d.b.current_time().as_secs_f64(),
                     started_wall.elapsed().as_secs_f64(),
                     stats.total_exit_count(),
@@ -1003,6 +1003,12 @@ fn finish(
                     stats.other.count,
                     stats.vmentry_overhead_cycles,
                     stats.guest_cycles,
+                    stats.total_run_cycles,
+                    stats.total_exit_cycles(),
+                    stats.vmexit_overhead_cycles,
+                    stats.irq_window_cycles,
+                    stats.ept_violation.cycles,
+                    stats.mtf.cycles,
                 );
             }
         } else {
