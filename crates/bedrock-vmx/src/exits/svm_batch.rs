@@ -2930,10 +2930,9 @@ fn collect_page_breakpoints<C: VmContext>(
     };
     let mut count = 1;
     let mut cursor = 0;
-    // Page-table reads are often backed by a parent/COW page lookup. Read in
-    // two chunks so a leaf walk resolves that page twice instead of eight
-    // times, while keeping the temporary buffer below a full kernel page.
-    let mut bytes = [0u8; 2048];
+    // Page-table reads are often backed by a parent/COW page lookup. Read the
+    // whole aligned page once so each raw leaf walk resolves it only once.
+    let mut bytes = [0u8; 4096];
     batch.page_breakpoint_count = 0;
     batch.page_breakpoint_masks = [0; 4];
     while cursor < count {
@@ -3007,7 +3006,7 @@ fn collect_page_breakpoints<C: VmContext>(
             }
         }
         let mut leaf_filter = [0u64; SVM_LEAF_FILTER_WORDS];
-        for offset in (0..4096).step_by(2048) {
+        for offset in (0..4096).step_by(4096) {
             if ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes).is_err() {
                 return None;
             }
