@@ -16,9 +16,15 @@ does not identify the guest instruction or prove why it stopped. Without a
 hardware PMU event, `perf record -e cpu-clock -F 199 -g` captured 7,931
 samples and the full campaign passed in **98 seconds**. Its timer samples
 collapsed onto `bedrock_local_irq_enable`, so they cannot rank host code.
-The contrast suggests hardware PMU profiling interferes with this opt-in;
-it does not establish a hardware or hypervisor root cause from one stalled
-run. The opt-in remains off by default.
+The initial contrast raised a possible hardware-PMU profiling interaction;
+one stalled run cannot establish a hardware or hypervisor root cause. The
+opt-in remains off by default.
+
+Follow-up controls on the same box make that caveat narrower. With the
+patched guest and hardware-cycle profiler, a clock-**off** campaign passed
+in **108 seconds** with 7,926 samples, and a clock-**on** repeat passed in
+**93 seconds** with 7,940 samples. The sampled stall is intermittent; it
+does not reproduce reliably under the clock-enabled setting.
 
 The IBS-pause module passed the full box SVM suite and two clock-enabled
 progress campaigns in **100 and 102 seconds**, both with zero workload
