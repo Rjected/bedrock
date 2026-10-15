@@ -9,6 +9,15 @@ use crate::prelude::*;
 
 use super::traits::InstructionBatch;
 #[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_HOST_WRITE_CALLS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_EVENT_FRAME_BYTES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_PUSHF_BYTES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
 use crate::ept::NptWriteGuard;
 #[cfg(feature = "cargo")]
 use bedrock_ept::NptWriteGuard;
@@ -206,6 +215,16 @@ impl SvmGuardScratch {
     pub fn note_gate_host_write(&mut self, guest: u64, len: usize) {
         if len == 0 {
             return;
+        }
+        #[cfg(not(feature = "cargo"))]
+        {
+            use core::sync::atomic::Ordering::Relaxed;
+            let calls = SVM_DIAG_HOST_WRITE_CALLS.fetch_add(1, Relaxed) + 1;
+            if calls % 5_000_000 == 0 {
+                kernel::pr_info!("AMD HOST WRITES calls={} event_bytes={} pushf_bytes={}\n",
+                    calls, SVM_DIAG_EVENT_FRAME_BYTES.load(Relaxed),
+                    SVM_DIAG_PUSHF_BYTES.load(Relaxed));
+            }
         }
         let Some(last) = guest.checked_add(len as u64 - 1) else {
             self.gate_host_write_all = true;

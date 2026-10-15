@@ -51,6 +51,9 @@ fn write_frame<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
     }
+    #[cfg(not(feature = "cargo"))]
+    super::super::vm_state::SVM_DIAG_EVENT_FRAME_BYTES.fetch_add(
+        bytes.len() as u64, core::sync::atomic::Ordering::Relaxed);
     for (i, byte) in bytes.iter().enumerate() {
         ctx.write_guest_memory(addresses[i], core::slice::from_ref(byte))
             .map_err(|_| ExitError::Fatal("SVM event stack write failed"))?;

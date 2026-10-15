@@ -599,6 +599,9 @@ fn emulate<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
         let bytes = (flags & !((1 << 16) | (1 << 17))).to_le_bytes();
+        #[cfg(not(feature = "cargo"))]
+        super::super::vm_state::SVM_DIAG_PUSHF_BYTES.fetch_add(
+            width as u64, core::sync::atomic::Ordering::Relaxed);
         for i in 0..width {
             ctx.write_guest_memory(addresses[i], &bytes[i..i + 1])
                 .map_err(|_| ExitError::Fatal("SVM PUSHF stack write failed"))?;
