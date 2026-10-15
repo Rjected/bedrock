@@ -856,6 +856,14 @@ the level, guard, and upper-link checks and a linear fallback during rebuilds.
 Its local unit tests and in-box SVM suite passed, and the exact DST campaign
 passed in 201 host seconds, versus 198 seconds for the same-box unchanged
 control. The index trial was not merged because it showed no end-to-end gain.
+An isolated VMCB clean-bit trial reused only the stable intercept and I/O/MSR
+bitmap groups advertised by the AMD CPU, invalidating those groups when their
+fields changed and invalidating copied VMCBs. Local tests and the in-box SVM
+suite passed; the exact DST campaign passed in 201 host seconds, again within
+the unchanged branch's 193–202 second range. The counted-entry path updates
+interrupt and intercept fields on every entry and restores them on exit, so
+the intercept group is normally dirty before the next entry. The trial was
+not merged because it did not improve full-campaign time.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
