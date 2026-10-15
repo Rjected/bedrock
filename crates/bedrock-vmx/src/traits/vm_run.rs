@@ -819,7 +819,7 @@ where
             && matches!(ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(), Some(16 | 51))
             && !force_single_step && masked_retry_rip.is_none()
             && !has_scalar_next_execute;
-        if let Some(execute) = scalar_execute.take().filter(|_| !hold_clock_execute) {
+        if let Some(execute) = scalar_execute.take_if(|_| !hold_clock_execute) {
             execute.restore(&mut ctx.state_mut().ept, allocator);
             let replay = ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
                 .ok().is_some_and(|qual| qual
