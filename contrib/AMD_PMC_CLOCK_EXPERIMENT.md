@@ -1,5 +1,18 @@
 # AMD guest PMC clock experiment
 
+On the newer pushed AMD production baseline `fa4f9c1`, with SVM event-stack
+batching, the same patched guest and module passed two exact pinned one-seed
+Tempo campaigns with PMC clock disabled in **108 / 74** and **108 / 75**
+host/seed seconds. Interleaved enabled runs passed in **104 / 69** and
+**98 / 64** seconds, respectively. All four used `box-b47a5eea`, the same
+driver checksum `f0d4c4c16cd5a25549d83107b1b0161c4432769d0c42e26f2144c5994648f554`,
+same images, seed, initrd, and patched guest checksum documented below.
+These measurements suggest a roughly **7-second median total** and
+**8-second median seed** incremental gain against the patched-guest clock-off
+control, with substantial two-run variation. They should not be compared
+directly with the original-guest production timings because the guest kernel
+differs.
+
 This branch is an isolated performance probe, not a production-ready PMU
 interface. The `bedrock_pmc_clock` boot parameter asks the Tempo runner to
 enable a per-VM AMD PMC clock ioctl, then the patched Linux kernel reads PMC1
