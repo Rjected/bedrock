@@ -45,6 +45,25 @@ pub(super) fn physical<C: VmContext>(ctx: &C, linear: u64) -> Result<GuestPhysAd
         .map_err(|_| ExitError::Fatal("SVM emulation address is not mapped"))
 }
 
+/// A page-table translation fixes the physical 4 KiB frame for every byte in
+/// that linear page. Event frames translate all bytes before writing any of
+/// them, so the mapping cannot change between these lookups.
+pub(super) fn physical_for_frame_byte<C: VmContext>(
+    ctx: &C,
+    linear: u64,
+    cached_page: &mut Option<(u64, u64)>,
+) -> Result<GuestPhysAddr, ExitError> {
+    let linear_page = linear & !4095;
+    if let Some((cached_linear, physical_page)) = *cached_page {
+        if cached_linear == linear_page {
+            return Ok(GuestPhysAddr::new(physical_page | (linear & 4095)));
+        }
+    }
+    let address = physical(ctx, linear)?;
+    *cached_page = Some((linear_page, address.as_u64() & !4095));
+    Ok(address)
+}
+
 pub(crate) struct InstructionWindow {
     pub linear: u64,
     pub physical: GuestPhysAddr,
@@ -587,8 +606,10 @@ fn emulate<C: VmContext, A: CowAllocator<C::CowPage>>(
     };
     let flags = v.read_natural(VmcsFieldNatural::GuestRflags)?;
     let mut addresses = [GuestPhysAddr::new(0); 8];
+    let mut cached_page = None;
     for (i, address) in addresses[..width].iter_mut().enumerate() {
-        *address = physical(ctx, ss_base.wrapping_add((offset + i as u64) & stack_mask))?;
+        let linear = ss_base.wrapping_add((offset + i as u64) & stack_mask);
+        *address = physical_for_frame_byte(ctx, linear, &mut cached_page)?;
     }
     if push {
         // PUSHF writes only these translated stack bytes. Preserve guarded

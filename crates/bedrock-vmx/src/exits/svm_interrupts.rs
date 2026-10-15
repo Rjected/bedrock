@@ -5,7 +5,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::helpers::{ExitError, ExitHandlerResult};
-use super::svm::{physical, write_contiguous_guest_bytes};
+use super::svm::{physical, physical_for_frame_byte, write_contiguous_guest_bytes};
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
@@ -35,8 +35,9 @@ fn write_frame<C: VmContext, A: CowAllocator<C::CowPage>>(
     // Resolve and COW the whole frame before writing any byte. A failed
     // allocation leaves the pending event available for the next RUN.
     let mut addresses = [GuestPhysAddr::new(0); 48];
+    let mut cached_page = None;
     for (i, address) in addresses[..bytes.len()].iter_mut().enumerate() {
-        *address = physical(ctx, linear.wrapping_add(i as u64))?;
+        *address = physical_for_frame_byte(ctx, linear.wrapping_add(i as u64), &mut cached_page)?;
     }
     if ctx.is_forked() {
         for i in 0..bytes.len() {
