@@ -285,7 +285,23 @@ pub(super) fn pending_event<C: VmContext, A: CowAllocator<C::CowPage>>(
     };
     let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip)?;
     let fault = kind == 3 && !matches!(vector, 1 | 3 | 4);
+    #[cfg(not(feature = "cargo"))]
+    let delivery_start = rdtsc();
     let delivered = deliver(ctx, allocator, vector, rip, false, error, fault)?;
+    #[cfg(not(feature = "cargo"))]
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        use super::super::vm_state::*;
+        let elapsed = rdtsc().saturating_sub(delivery_start);
+        let cycles = if vector == 14 && kind == 3 {
+            &SVM_DIAG_PF_CYCLES
+        } else if kind == 0 {
+            &SVM_DIAG_EXT_CYCLES
+        } else {
+            &SVM_DIAG_OTHER_EVENT_CYCLES
+        };
+        cycles.fetch_add(elapsed, Relaxed);
+    }
     let v = &ctx.state().vmcs;
     if delivered {
         v.write32(VmcsField32::VmEntryInterruptionInfo, 0)?;

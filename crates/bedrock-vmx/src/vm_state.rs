@@ -30,6 +30,12 @@ pub(crate) static SVM_DIAG_EXCEPTION_OTHER: core::sync::atomic::AtomicU64 = core
 #[cfg(not(feature = "cargo"))]
 pub(crate) static SVM_DIAG_SOFTWARE_EVENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 #[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_PF_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_EXT_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_OTHER_EVENT_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
 use crate::ept::NptWriteGuard;
 #[cfg(feature = "cargo")]
 use bedrock_ept::NptWriteGuard;
@@ -239,6 +245,9 @@ impl SvmGuardScratch {
                     SVM_DIAG_EXT_OTHER.load(Relaxed), SVM_DIAG_EXCEPTION_DB.load(Relaxed),
                     SVM_DIAG_EXCEPTION_PF.load(Relaxed), SVM_DIAG_EXCEPTION_OTHER.load(Relaxed),
                     SVM_DIAG_SOFTWARE_EVENT.load(Relaxed));
+                kernel::pr_info!("AMD EVENT CYCLES pf={} ext={} other={}\n",
+                    SVM_DIAG_PF_CYCLES.load(Relaxed), SVM_DIAG_EXT_CYCLES.load(Relaxed),
+                    SVM_DIAG_OTHER_EVENT_CYCLES.load(Relaxed));
             }
         }
         let Some(last) = guest.checked_add(len as u64 - 1) else {
