@@ -669,10 +669,25 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
         use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
         static PROBES: AtomicU64 = AtomicU64::new(0);
         static HITS: AtomicU64 = AtomicU64::new(0);
+        static ABSENT: AtomicU64 = AtomicU64::new(0);
+        static STALE: AtomicU64 = AtomicU64::new(0);
+        static CODE_OVERLAP: AtomicU64 = AtomicU64::new(0);
         HITS.fetch_add(u64::from(cache_slot.is_some()), Relaxed);
+        if cache_slot.is_none() {
+            match scratch.root_tree_cache.iter().find(|cached| cached.valid && cached.root == root) {
+                None => { ABSENT.fetch_add(1, Relaxed); }
+                Some(cached) if cached.guard_epoch != scratch.root_tree_guard_epoch
+                    || cached.mapping_generation != mapping_generation => {
+                    STALE.fetch_add(1, Relaxed);
+                }
+                Some(_) => { CODE_OVERLAP.fetch_add(1, Relaxed); }
+            }
+        }
         let probes = PROBES.fetch_add(1, Relaxed) + 1;
         if probes % 50_000 == 0 {
-            kernel::pr_info!("AMD ROOT CACHE probes={} hits={}\n", probes, HITS.load(Relaxed));
+            kernel::pr_info!("AMD ROOT CACHE probes={} hits={} absent={} stale={} overlap={}\n",
+                probes, HITS.load(Relaxed), ABSENT.load(Relaxed), STALE.load(Relaxed),
+                CODE_OVERLAP.load(Relaxed));
         }
     }
     if let Some(slot) = cache_slot {
