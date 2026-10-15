@@ -2424,6 +2424,67 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     Some(())
 }
 
+#[cfg(not(feature = "cargo"))]
+pub(crate) fn classify_ci_fetch_target<C: VmContext>(
+    ctx: &C,
+    batch: &InstructionBatch,
+    target: u64,
+) -> u8 {
+    if !batch.global_execution { return 0; }
+    let v = &ctx.state().vmcs;
+    let Some(linear) = v.read_natural(VmcsFieldNatural::GuestRip).ok()
+        .and_then(|rip| v.read_natural(VmcsFieldNatural::GuestCsBase).ok()
+            .and_then(|base| rip.checked_add(base))) else { return 1; };
+    if !super::svm::physical(ctx, linear).ok()
+        .is_some_and(|physical| physical.as_u64() & !4095 == target) {
+        return 1;
+    }
+    let (_, Some(index)) = hazard_memo_lookup(ctx, target) else { return 2; };
+    let memo = &ctx.state().svm_guard.hazard_memos[index];
+    if !memo.valid || !memo.guarded || memo.rejected { return 3; }
+    let hazard = PageHazards {
+        boundary: memo.proof.boundary,
+        boundary_guarded: memo.proof.boundary_guarded,
+        edge: memo.proof.edge,
+        offsets: memo.proof.offsets,
+        count: memo.proof.count,
+    };
+    if hazard.count == 0 { return 4; }
+    let Some(root) = v.read_natural(VmcsFieldNatural::GuestCr3).ok()
+        .map(|root| root & 0x000f_ffff_ffff_f000) else { return 1; };
+    let Some(proof) = cached_single_page_alias_proof(ctx, root, target, &hazard) else {
+        return 5;
+    };
+    if proof.breakpoint_count == 0 { return 5; }
+    let mut slots = batch.page_breakpoint_count;
+    for index in 0..proof.breakpoint_count {
+        if !(0..batch.page_breakpoint_count).any(|existing| {
+            batch.page_breakpoints[existing] == proof.breakpoints[index]
+                && batch.page_breakpoint_masks[existing] == proof.breakpoint_masks[index]
+        }) {
+            slots += 1;
+        }
+    }
+    if slots > 4 { return 6; }
+    let current = batch.start.checked_add(v.read_natural(VmcsFieldNatural::GuestCsBase)
+        .unwrap_or(0)).unwrap_or(batch.start) & !4095;
+    let recent = ctx.state().svm_recent_pages;
+    let predicted = predicted_second_successor(
+        &ctx.state().svm_guard, root, recent[1], current,
+    ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current));
+    let target_linear = linear & !4095;
+    if predicted != Some(target_linear) && !recent[..4].contains(&target_linear) {
+        return if recent[4..].contains(&target_linear) { 7 } else { 9 };
+    }
+    if batch.code_page_count >= 4 { return 10; }
+    let raw_count = batch.pages[..batch.code_page_count].iter().map(|&page| {
+        let (_, index) = hazard_memo_lookup(ctx, page);
+        index.map_or(0, |index| ctx.state().svm_guard.hazard_memos[index].proof.count)
+    }).sum::<usize>();
+    if raw_count >= 4 || raw_count + hazard.count > 4 { return 11; }
+    8
+}
+
 /// A sole `0x0f` at the end of a guarded code page is conservatively a
 /// breakpoint: another virtual alias could append RDRAND. When the guarded
 /// page-table tree proves exactly one executable alias and its next page is

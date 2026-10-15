@@ -753,6 +753,39 @@ where
         };
         let post_guest_tsc = rdtsc();
         ctx.state_mut().exit_stats.guest_cycles += post_guest_tsc.saturating_sub(pre_guest_tsc);
+        #[cfg(not(feature = "cargo"))]
+        {
+            use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+            static FETCHES: AtomicU64 = AtomicU64::new(0);
+            static BINS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+            static DUMPED: AtomicBool = AtomicBool::new(false);
+            let tsc = ctx.state().vmx_ctx.svm_clock_base;
+            if tsc >= 300_000_000_000 && !DUMPED.load(Relaxed) {
+                if run_result.is_ok()
+                    && ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok() == Some(48)
+                    && ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
+                        .ok().is_some_and(|qualification| qualification & 4 != 0)
+                {
+                    let event = FETCHES.fetch_add(1, Relaxed);
+                    if event & 255 == 0 {
+                        if let Some(target) = ctx.state().vmcs.read64(VmcsField64::GuestPhysicalAddr)
+                            .ok().map(|gpa| gpa & !4095)
+                        {
+                            let kind = batch.as_ref().map_or(0, |plan|
+                                super::super::exits::classify_ci_fetch_target(ctx, plan, target));
+                            BINS[usize::from(kind)].fetch_add(1, Relaxed);
+                        }
+                    }
+                }
+                if tsc >= 600_000_000_000 && !DUMPED.swap(true, Relaxed) {
+                    kernel::pr_info!("SVM CI FIT fetches={}\n", FETCHES.load(Relaxed));
+                    for (index, bin) in BINS.iter().enumerate() {
+                        kernel::pr_info!("SVM CI FIT category={} sampled={}\n",
+                            index, bin.load(Relaxed));
+                    }
+                }
+            }
+        }
         if arm_masked_retry {
             let flags = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags)
                 .map_err(|_| VmRunError::ExitHandler(

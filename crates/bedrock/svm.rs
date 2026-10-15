@@ -11,6 +11,90 @@ use super::svm_core::{
 use super::vmx::{InstructionBatch, VmEntryError, VmxContext};
 use core::arch::asm;
 
+// Diagnostic-only: classify current CI instruction-fetch faults by the
+// breakpoint capacity of the global plan that preceded them.
+mod slot_profile {
+    use super::InstructionBatch;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+
+    const START: u64 = 300_000_000_000;
+    const STOP: u64 = 600_000_000_000;
+    const SLOTS: usize = 4096;
+    static EVENTS: AtomicU64 = AtomicU64::new(0);
+    static SAMPLED: AtomicU64 = AtomicU64::new(0);
+    static NON_GLOBAL: AtomicU64 = AtomicU64::new(0);
+    static TARGET_ADMITTED: AtomicU64 = AtomicU64::new(0);
+    static BREAKPOINTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+    static CODE_PAGES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+    static KEYS: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+    static COUNTS: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+    static COLLISIONS: AtomicU64 = AtomicU64::new(0);
+    static DUMPED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn observe(tsc: u64, code: u64, info1: u64, gpa: u64,
+        batch: Option<&InstructionBatch>) {
+        if tsc < START || DUMPED.load(Relaxed) { return; }
+        if code == 0x400 && info1 & 0x11 == 0x11 {
+            let event = EVENTS.fetch_add(1, Relaxed);
+            if event & 255 == 0 {
+                SAMPLED.fetch_add(1, Relaxed);
+                if let Some(plan) = batch.filter(|plan| plan.global_execution) {
+                    BREAKPOINTS[plan.page_breakpoint_count.min(4)].fetch_add(1, Relaxed);
+                    CODE_PAGES[plan.code_page_count.saturating_sub(1).min(4)]
+                        .fetch_add(1, Relaxed);
+                    if plan.pages[..plan.code_page_count].contains(&(gpa & !4095)) {
+                        TARGET_ADMITTED.fetch_add(1, Relaxed);
+                    }
+                } else {
+                    NON_GLOBAL.fetch_add(1, Relaxed);
+                }
+                let key = (gpa & !4095).wrapping_add(1);
+                let hash = (key >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                let slot = (hash >> 52) as usize;
+                let mut placed = false;
+                for attempt in 0..8 {
+                    let index = (slot + attempt) & (SLOTS - 1);
+                    let found = KEYS[index].load(Relaxed);
+                    if found == key || (found == 0
+                        && KEYS[index].compare_exchange(0, key, Relaxed, Relaxed).is_ok()) {
+                        COUNTS[index].fetch_add(1, Relaxed);
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed { COLLISIONS.fetch_add(1, Relaxed); }
+            }
+        }
+        if tsc >= STOP && !DUMPED.swap(true, Relaxed) {
+            kernel::pr_info!("SVM CI SLOT fetch={} sampled={} non_global={} target_admitted={} collisions={}\n",
+                EVENTS.load(Relaxed), SAMPLED.load(Relaxed), NON_GLOBAL.load(Relaxed),
+                TARGET_ADMITTED.load(Relaxed), COLLISIONS.load(Relaxed));
+            for slots in 0..5 {
+                kernel::pr_info!("SVM CI SLOT breakpoints={} sampled={} code_extra_pages={} sampled_pages={}\n",
+                    slots, BREAKPOINTS[slots].load(Relaxed), slots,
+                    CODE_PAGES[slots].load(Relaxed));
+            }
+            let mut top = [(0u64, 0u64); 12];
+            for index in 0..SLOTS {
+                let count = COUNTS[index].load(Relaxed);
+                if count <= top[11].0 { continue; }
+                let page = KEYS[index].load(Relaxed).wrapping_sub(1);
+                for rank in 0..12 {
+                    if count > top[rank].0 {
+                        for shifted in (rank + 1..12).rev() { top[shifted] = top[shifted - 1]; }
+                        top[rank] = (count, page);
+                        break;
+                    }
+                }
+            }
+            for (rank, &(count, page)) in top.iter().enumerate() {
+                kernel::pr_info!("SVM CI SLOT page_rank={} sampled={} gpa={:#x}\n",
+                    rank + 1, count, page);
+            }
+        }
+    }
+}
+
 pub(crate) struct Counters;
 impl Counters {
     pub(crate) fn new() -> Result<Self, kernel::error::Error> {
@@ -317,6 +401,8 @@ pub(crate) unsafe fn run(
     ctx.guest_rax = v.read(o::RAX, 8);
     ctx.guest_cr2 = v.read(o::CR2, 8);
     let code = v.read(o::EXIT_CODE, 8);
+    slot_profile::observe(ctx.svm_clock_base, code, v.read(o::EXIT_INFO1, 8),
+        v.read(o::EXIT_INFO2, 8), batch);
     // The XSETBV handler changes the XSAVE mask. Persist registers using
     // the old mask first, while the run loop still has IRQs disabled.
     if code == 0x08d && ctx.svm_guest_fpu_dirty != 0 {
