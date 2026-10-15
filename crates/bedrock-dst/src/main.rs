@@ -581,6 +581,9 @@ fn warmup_cmd(args: &CampaignArgs) -> Result<String> {
 fn boot(args: &CampaignArgs, sink: Arc<ConsoleSink>, probe_preempt: bool) -> Result<Checkpoint> {
     let started = Instant::now();
     let mut vm = VmBuilder::new().memory_mb(args.memory_mb).build()?;
+    if args.cmdline.split_whitespace().any(|word| word == "bedrock_pmc_clock") {
+        vm.enable_svm_pmc_clock()?;
+    }
     if probe_preempt {
         // Probe for the ioctl before the long boot. Disabled is a fresh VM's
         // state, so this leaves the guest untouched.

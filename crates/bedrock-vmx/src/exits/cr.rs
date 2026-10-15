@@ -59,6 +59,11 @@ pub fn handle_cr_access<C: VmContext>(
                     write_result
                 }
                 4 => {
+                    if ctx.state().svm_pmc_clock_enabled && gpr_value & (1 << 8) != 0 {
+                        return ExitHandlerResult::Error(ExitError::Fatal(
+                            "Guest CR4.PCE would expose the SVM deadline counter",
+                        ));
+                    }
                     // Same fixed-bit handling as CR0.
                     let ones_mask = caps.cr4_fixed0 & caps.cr4_fixed1;
                     let zeros_mask = !caps.cr4_fixed0 & !caps.cr4_fixed1;

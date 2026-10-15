@@ -82,6 +82,10 @@ pub struct VmxContext {
 
     // Diagnostic guest-readable retired-instruction clock base.
     pub svm_clock_base: u64,
+    /// Per-VM opt-in; zero preserves the normal RDPMC intercept.
+    pub svm_pmc_clock_enabled: u64,
+    /// The SVM intercepts have been configured for this VM's one-way opt-in.
+    pub svm_pmc_clock_access_configured: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
@@ -140,6 +144,8 @@ impl VmxContext {
             svm_guest_fpu_dirty: 0,
             svm_entry_repeat: 0,
             svm_clock_base: 0,
+            svm_pmc_clock_enabled: 0,
+            svm_pmc_clock_access_configured: 0,
         }
     }
 }
