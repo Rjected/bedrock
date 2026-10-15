@@ -2199,22 +2199,26 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
 ) -> Option<()> {
     let page = window.physical.as_u64() & !4095;
     let trusted = ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page));
-    if !can_count
-        // A REP that restarts and a completed REP followed by a loop can
-        // both leave RIP at the entry address. Use the bounded executor.
-        || repeat_len(&window.bytes).is_some()
-        || !ctx.state().svm_guard.gate_ready
-        || ctx.state().svm_guard.gate_dirty
-        || gate_table_contains(&ctx.state().svm_guard, page)
-        || ctx.state().mtf_enabled
-        || ctx.state().vmcs.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
-        || ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0
-        || ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
-    {
+    // Diagnostic branch: label the first global-plan rejection. The fallback
+    // planner still runs, so only sample this label when the final entry is
+    // scalar and exits with #DB.
+    let reject = if !can_count { 1 }
+        else if repeat_len(&window.bytes).is_some() { 2 }
+        else if !ctx.state().svm_guard.gate_ready { 3 }
+        else if ctx.state().svm_guard.gate_dirty { 4 }
+        else if gate_table_contains(&ctx.state().svm_guard, page) { 5 }
+        else if ctx.state().mtf_enabled { 6 }
+        else if ctx.state().vmcs.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0 { 7 }
+        else if ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0 { 8 }
+        else if ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0 { 9 }
+        else { 0 };
+    if reject != 0 {
+        ctx.state_mut().vmx_ctx.svm_diag_global_failure = reject;
         return None;
     }
     let budget = instruction_budget(ctx);
     if budget <= InstructionBatch::COUNTER_DEADLINE_MARGIN {
+        ctx.state_mut().vmx_ctx.svm_diag_global_failure = 10;
         return None;
     }
     *output = Some(InstructionBatch {
@@ -2246,7 +2250,10 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     let batch = output.as_mut().unwrap();
     batch.pages[0] = page;
     if !trusted {
-        let mut hazard = cached_page_hazards(ctx, page)?;
+        let Some(mut hazard) = cached_page_hazards(ctx, page) else {
+            ctx.state_mut().vmx_ctx.svm_diag_global_failure = 11;
+            return None;
+        };
         if hazard.count == 0 {
             // A page first fetched while the translation gate was dirty can
             // remain on the scalar path after the gate becomes usable. The
@@ -2266,11 +2273,13 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             {
                 return Some(());
             }
+            ctx.state_mut().vmx_ctx.svm_diag_global_failure = 12;
             return None;
         }
         if !hazard.boundary_guarded
             || hazard.offsets[..hazard.count].contains(&((window.physical.as_u64() & 4095) as u16))
         {
+            ctx.state_mut().vmx_ctx.svm_diag_global_failure = 13;
             return None;
         }
         // A five-hazard page needs a masked DR range to fit the four slots.
@@ -2284,7 +2293,10 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         {
             return Some(());
         }
-        collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
+        if collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard)).is_none() {
+            ctx.state_mut().vmx_ctx.svm_diag_global_failure = 14;
+            return None;
+        }
         let boundary_proven = suppress_safe_single_alias_boundary(
             ctx, allocator, batch, &hazard, window.linear,
         );
@@ -2292,6 +2304,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             hazard.count = 0;
         }
         if batch.page_breakpoint_count == 0 && !boundary_proven {
+            ctx.state_mut().vmx_ctx.svm_diag_global_failure = 15;
             return None;
         }
         // A counted global interval can cross several recently visited

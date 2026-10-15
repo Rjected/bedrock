@@ -96,17 +96,25 @@ mod hot_exit_diag {
         }
     }
 
-    static MTF: Histogram = Histogram::new();
+    static SCALAR_BY_REASON: [Histogram; 6] = [const { Histogram::new() }; 6];
     static NPT_FETCH: Histogram = Histogram::new();
     static NPT_DATA: Histogram = Histogram::new();
+    static NO_PLAN_CAUSES: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
     static DUMPED: AtomicBool = AtomicBool::new(false);
 
-    pub(super) fn observe(virtual_tsc: u64, code: u64, info1: u64, entry_rip: u64, exit_rip: u64) {
+    pub(super) fn observe(virtual_tsc: u64, code: u64, info1: u64, entry_rip: u64, exit_rip: u64, scalar_reason: u64, global_failure: u64) {
         if virtual_tsc < START_TSC || DUMPED.load(Relaxed) {
             return;
         }
         if code == 0x41 {
-            MTF.record(entry_rip);
+            if let Some(histogram) = SCALAR_BY_REASON.get(scalar_reason as usize) {
+                histogram.record(entry_rip);
+            }
+            if scalar_reason == 5 {
+                if let Some(counter) = NO_PLAN_CAUSES.get(global_failure as usize) {
+                    counter.fetch_add(1, Relaxed);
+                }
+            }
         } else if code == 0x400 {
             if info1 & 0x11 == 0x11 {
                 NPT_FETCH.record(exit_rip);
@@ -115,7 +123,19 @@ mod hot_exit_diag {
             }
         }
         if virtual_tsc >= DUMP_TSC && !DUMPED.swap(true, Relaxed) {
-            MTF.dump("mtf");
+            for (reason, histogram) in SCALAR_BY_REASON.iter().enumerate() {
+                histogram.dump(match reason {
+                    1 => "scalar-write-replay",
+                    2 => "scalar-forced",
+                    3 => "scalar-trusted-page",
+                    4 => "scalar-untrusted-page",
+                    5 => "scalar-no-plan",
+                    _ => "scalar-other",
+                });
+            }
+            for (cause, counter) in NO_PLAN_CAUSES.iter().enumerate() {
+                kernel::pr_info!("SVM HOT no_plan_cause={} count={}\n", cause, counter.load(Relaxed));
+            }
             NPT_FETCH.dump("fetch");
             NPT_DATA.dump("data");
         }
@@ -414,6 +434,8 @@ pub(crate) unsafe fn run(
             v.read(o::EXIT_INFO1, 8),
             entry_rip,
             v.read(o::RIP, 8),
+            ctx.svm_diag_scalar_reason,
+            ctx.svm_diag_global_failure,
         );
     }
     // The XSETBV handler changes the XSAVE mask. Persist registers using

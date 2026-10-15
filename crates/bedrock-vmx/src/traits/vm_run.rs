@@ -429,6 +429,7 @@ where
 
         // Split borrow: vmx_ctx mutably, vmcs immutably.
         let mut instruction_window = None;
+        ctx.state_mut().vmx_ctx.svm_diag_global_failure = 0;
         let software_exit = Ctx::V::uses_nested_paging()
             && super::super::exits::prepare_instruction_exit(
                 ctx,
@@ -557,6 +558,7 @@ where
                 }
             }
         }
+        let forced_scalar_entry = force_single_step;
         force_single_step = false;
         let mut arm_masked_retry = masked_retry_rip.is_some_and(|rip| {
             batch.as_ref().is_some_and(|batch| batch.global_execution)
@@ -688,7 +690,23 @@ where
         let pre_guest_tsc = rdtsc();
         ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
             pre_guest_tsc.saturating_sub(pre_entry_tsc);
+        let scalar_reason = if batch.is_some() || software_exit {
+            0
+        } else if replay_single_step {
+            1 // guarded write replay
+        } else if forced_scalar_entry {
+            2 // prior boundary requested one scalar instruction
+        } else if scalar_page.is_some_and(|page| {
+            ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page))
+        }) {
+            3 // scalar page is trusted
+        } else if scalar_page.is_some() {
+            4 // remain on an untrusted scalar page
+        } else {
+            5 // no safe batch was available
+        };
         let state = ctx.state_mut();
+        state.vmx_ctx.svm_diag_scalar_reason = scalar_reason;
         state.vmx_ctx.svm_diag_virtual_base =
             state.last_instruction_count.wrapping_add(state.tsc_offset);
         state.vmx_ctx.svm_entry_repeat = u64::from(

@@ -82,6 +82,10 @@ pub struct VmxContext {
 
     /// Diagnostic only: virtual instruction time at SVM entry.
     pub svm_diag_virtual_base: u64,
+    /// Diagnostic only: why this SVM entry fell back to scalar stepping.
+    pub svm_diag_scalar_reason: u64,
+    /// Diagnostic only: rejection stage of the global page plan.
+    pub svm_diag_global_failure: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
@@ -140,6 +144,8 @@ impl VmxContext {
             svm_guest_fpu_dirty: 0,
             svm_entry_repeat: 0,
             svm_diag_virtual_base: 0,
+            svm_diag_scalar_reason: 0,
+            svm_diag_global_failure: 0,
         }
     }
 }
