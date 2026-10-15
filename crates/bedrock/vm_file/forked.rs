@@ -385,6 +385,7 @@ unsafe extern "C" fn bedrock_forked_vm_ioctl(
         BEDROCK_VM_SET_SINGLE_STEP => handlers::handle_set_single_step(vm_file, arg),
         BEDROCK_VM_GET_EXIT_STATS => handlers::handle_get_exit_stats(vm_file, arg),
         BEDROCK_VM_SET_STOP_TSC => handlers::handle_set_stop_tsc(vm_file, arg),
+        BEDROCK_VM_ENABLE_SVM_PMC_CLOCK => handlers::handle_enable_svm_pmc_clock(vm_file, arg),
         BEDROCK_VM_GET_VM_ID => handlers::handle_get_vm_id(vm_file, arg),
         BEDROCK_VM_GET_FEEDBACK_BUFFER_INFO => {
             handlers::handle_get_feedback_buffer_info(vm_file, arg)
