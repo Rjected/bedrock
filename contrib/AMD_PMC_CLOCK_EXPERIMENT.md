@@ -1,5 +1,15 @@
 # AMD guest PMC clock experiment
 
+**Performance correction (2026-10-15):** The 95–106-second comparisons below
+used a module whose NPT execute guard token was dropped on the clock-retention
+path, leaving execute permission open without a revocation handle. The opt-in
+clock mechanism remains experimental; those timings are not a safe AMD
+baseline. After commit `393d002` corrected the token lifetime, the same pinned
+seed and patched guest passed with the PMC clock on in **189 host seconds** on
+`box-82c8e123`. An adjacent pre-fix control on that box passed in **101
+seconds**. A corrected clock-off control has not yet been measured, so the
+clock's incremental gain on the corrected path is unverified.
+
 The per-VM clock is available only through an explicit ioctl and the patched
 guest's `bedrock_pmc_clock` boot parameter. It is off for every new VM. On
 2026-10-15, the final accounting fix and stack-batching baseline passed a
