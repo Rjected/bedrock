@@ -2381,10 +2381,10 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         }
     } else {
         // A globally trusted current page uses no debug-register slots. A
-        // predicted hazardous successor can share its counted interval when
-        // its independently cached alias proof fits those free slots. The
-        // trusted-page proof excludes unsafe suffixes; the successor's
-        // guarded boundary covers the reverse join.
+        // predicted and recent hazardous successors can share its counted
+        // interval when their independent alias proofs fit those free slots.
+        // The trusted-page proof excludes unsafe suffixes; pairwise boundary
+        // checks cover joins between guarded pages.
         let current_linear = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
         let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
@@ -2392,33 +2392,60 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let predicted = predicted_second_successor(
             &ctx.state().svm_guard, root, recent[1], current_linear,
         ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
-        if let Some(linear) = predicted.filter(|&linear| linear != current_linear) {
-            if let Some(physical) = cached_code_translation(ctx, linear) {
-                if physical != page
-                    && !gate_table_contains(&ctx.state().svm_guard, physical)
-                    && !ctx.state().ept.npt_trusted_code_4k(
-                        allocator, GuestPhysAddr::new(physical))
-                {
-                    if let Some(hazard) = cached_page_hazards(ctx, physical) {
-                        if hazard.count != 0 && hazard.boundary_guarded {
-                            if let Some(proof) =
-                                cached_single_page_alias_proof(ctx, root, physical, &hazard)
-                            {
-                                if proof.breakpoint_count != 0
-                                    && proof.breakpoint_count <= batch.page_breakpoints.len()
-                                {
-                                    batch.pages[1] = physical;
-                                    batch.code_page_count = 2;
-                                    batch.page_count = 2;
-                                    batch.page_breakpoints = proof.breakpoints;
-                                    batch.page_breakpoint_masks = proof.breakpoint_masks;
-                                    batch.page_breakpoint_count = proof.breakpoint_count;
-                                }
-                            }
-                        }
-                    }
-                }
+        let mut hazards: [Option<PageHazards>; 4] = [None; 4];
+        for linear in predicted.into_iter().chain(recent.into_iter().take(4)) {
+            if linear == u64::MAX || linear == current_linear
+                || batch.code_page_count == batch.pages.len()
+                // vm_run has three paired execute-grant slots in addition
+                // to the current page's scalar grant.
+                || batch.code_page_count == hazards.len()
+            {
+                continue;
             }
+            let Some(physical) = cached_code_translation(ctx, linear) else { continue; };
+            if physical == page || batch.pages[..batch.code_page_count].contains(&physical)
+                || gate_table_contains(&ctx.state().svm_guard, physical)
+                || ctx.state().ept.npt_trusted_code_4k(
+                    allocator, GuestPhysAddr::new(physical))
+            {
+                continue;
+            }
+            let Some(hazard) = cached_page_hazards(ctx, physical) else { continue; };
+            if hazard.count == 0 || !hazard.boundary_guarded
+                || hazards[..batch.code_page_count - 1].iter().flatten().any(|existing| {
+                    !hazard_boundary_safe(existing, &hazard)
+                        || !hazard_boundary_safe(&hazard, existing)
+                })
+            {
+                continue;
+            }
+            let Some(proof) = cached_single_page_alias_proof(ctx, root, physical, &hazard) else {
+                continue;
+            };
+            if proof.breakpoint_count == 0 { continue; }
+            let mut breakpoints = batch.page_breakpoints;
+            let mut masks = batch.page_breakpoint_masks;
+            let mut count = batch.page_breakpoint_count;
+            let mut fits = true;
+            for index in 0..proof.breakpoint_count {
+                let address = proof.breakpoints[index];
+                let mask = proof.breakpoint_masks[index];
+                if (0..count).any(|slot| breakpoints[slot] == address && masks[slot] == mask) {
+                    continue;
+                }
+                if count == breakpoints.len() { fits = false; break; }
+                breakpoints[count] = address;
+                masks[count] = mask;
+                count += 1;
+            }
+            if !fits || count == batch.page_breakpoint_count { continue; }
+            batch.page_breakpoints = breakpoints;
+            batch.page_breakpoint_masks = masks;
+            batch.page_breakpoint_count = count;
+            batch.pages[batch.code_page_count] = physical;
+            hazards[batch.code_page_count - 1] = Some(hazard);
+            batch.code_page_count += 1;
+            batch.page_count += 1;
         }
     }
     Some(())
@@ -4877,6 +4904,57 @@ mod tests {
         }
         assert_eq!(prepare_global(&mut ctx, &allocator, true, false, &window)
             .unwrap().code_page_count, 1);
+    }
+
+    #[test]
+    fn trusted_global_page_guards_at_most_three_hazardous_successors() {
+        let mut ctx = paged_context(&[0x90]);
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000usize, 0x2000, 0x9000, 0xa000, 0xb000] {
+            ctx.memory[page..page + 4096].fill(0x90);
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page as u64),
+                HostPhysAddr::new(page as u64 + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        for page in [0x2000usize, 0x9000, 0xa000, 0xb000] {
+            ctx.memory[page + 0x100..page + 0x103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        for page in [0x2000u64, 0x9000, 0xa000, 0xb000] {
+            ctx.set_guest_rip(page);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
+                .unwrap().page_breakpoint_count, 1);
+        }
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)).unwrap();
+        ctx.state_mut().svm_recent_pages[..4]
+            .copy_from_slice(&[0x1000, 0x9000, 0xa000, 0xb000]);
+        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
+            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000, valid: true };
+        ctx.set_guest_rip(0x1000);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
+        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000, 0x9000, 0xa000]);
+        assert_eq!(batch.page_breakpoint_count, 3);
+        assert!(breakpoint_matches(&batch, 0x2100));
+        assert!(breakpoint_matches(&batch, 0x9100));
+        assert!(breakpoint_matches(&batch, 0xa100));
+        assert!(!batch.pages[..batch.code_page_count].contains(&0xb000));
+        let guard = protect(&mut ctx, &allocator, &batch).unwrap();
+        for page in [0x2000, 0x9000, 0xa000] {
+            assert_eq!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(page))
+                .unwrap().1.bits() & 2, 0);
+        }
+        guard.restore(&mut ctx, &allocator);
     }
 
     #[test]

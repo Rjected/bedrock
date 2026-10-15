@@ -589,6 +589,13 @@ where
             }
         }
         force_single_step = false;
+        // The current page has one execute grant and paired_execute below
+        // holds only three more. Reject an invalid plan before indexing it.
+        if batch.as_ref().is_some_and(|plan| plan.global_execution && plan.code_page_count > 4) {
+            return Err(VmRunError::ExitHandler(
+                super::super::exits::ExitError::Fatal("SVM global plan exceeds execute grants"),
+            ));
+        }
         let mut arm_masked_retry = masked_retry_rip.is_some_and(|rip| {
             batch.as_ref().is_some_and(|batch| batch.global_execution)
                 && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(rip)
