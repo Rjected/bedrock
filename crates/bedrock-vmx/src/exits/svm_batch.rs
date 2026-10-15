@@ -872,9 +872,13 @@ fn can_refresh_leaf_only(
 
 fn invalidate_alias_proofs(guard: &mut super::super::vm_state::SvmGuardScratch) {
     guard.alias_proof.valid = false;
+    if !guard.alias_proofs_nonempty {
+        return;
+    }
     for proof in &mut guard.alias_proofs {
         proof.valid = false;
     }
+    guard.alias_proofs_nonempty = false;
 }
 
 /// A changed leaf PTE can create an executable alias only for the physical
@@ -2722,6 +2726,7 @@ fn remember_alias_proof<C: VmContext>(
         .find(|&slot| !cache.alias_proofs[slot].valid)
         .unwrap_or(set + cache.alias_cursor % SVM_ALIAS_PROOF_WAYS);
     cache.alias_proofs[cursor] = cache.alias_proof;
+    cache.alias_proofs_nonempty = true;
     cache.alias_last_hit = cursor;
     let lookup = ((key_hash >> 32) as usize) & (SVM_ALIAS_PROOF_LOOKUP_CAPACITY - 1);
     cache.alias_lookup[lookup] = (cursor + 1) as u16;
@@ -6235,9 +6240,11 @@ mod tests {
         guard.gate_dirty = true;
         guard.gate_root = 0x9000;
         guard.alias_proofs[0].valid = true;
+        guard.alias_proofs_nonempty = true;
         guard.alias_proofs[0].root = 0x9000;
         refresh_global_tree(&mut ctx, &allocator, true);
         assert!(!ctx.state().svm_guard.alias_proofs[0].valid);
+        assert!(!ctx.state().svm_guard.alias_proofs_nonempty);
     }
 
     #[test]

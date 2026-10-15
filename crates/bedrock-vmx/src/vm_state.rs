@@ -99,6 +99,9 @@ pub(crate) struct SvmGuardScratch {
     pub aliases: [SvmAliasWalk; SVM_ALIAS_WALK_CAPACITY],
     pub alias_proof: SvmAliasProof,
     pub alias_proofs: [SvmAliasProof; SVM_ALIAS_PROOF_CAPACITY],
+    /// Set whenever a valid entry may exist since the last full clear.
+    /// Selective invalidation may leave this true after the last entry dies.
+    pub alias_proofs_nonempty: bool,
     /// One-based hint into `alias_proofs`; every hit rechecks the proof key,
     /// guarded root, and exact hazardous offsets after cache replacement.
     pub alias_lookup: [u16; SVM_ALIAS_PROOF_LOOKUP_CAPACITY],
