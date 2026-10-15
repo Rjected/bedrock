@@ -143,6 +143,8 @@ impl Vmcb {
         ] {
             self.intercept(bit, true);
         }
+        // Diagnostic: allow the guest to read virtual PMC1 directly.
+        self.intercept(111, false);
         // #DB for hypervisor single-stepping; #MC for host error reporting.
         self.write(offset::INTERCEPT_EXCEPTIONS, 4, u32::MAX as u64);
         // Guest debug-register access must not change host breakpoint state.
