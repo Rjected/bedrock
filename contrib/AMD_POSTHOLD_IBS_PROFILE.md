@@ -47,3 +47,10 @@ run also took 117 seconds. Extending the direct validation to multi-page
 proofs passed the shortened run in 120 seconds. Neither trial showed a speed
 gain. The direct-validation code remains in an isolated, uncommitted
 worktree; it was not merged. All module builds and loads were inside boxes.
+
+An isolated reduction of the alias-proof cache from 2,048 to 512 entries
+passed all 276 VMX unit tests and the in-box SVM suite. Same-box
+60-virtual-second campaigns both passed: **118 host seconds** for the
+unchanged cache and **118 seconds** for the smaller cache. This short
+diagnostic does not justify changing the production cache size or predict
+the full pinned campaign. The cache-size trial was not merged.
