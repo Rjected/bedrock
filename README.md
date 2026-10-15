@@ -829,6 +829,12 @@ other kernel and userspace pages. This points to a spread of code-page
 transitions and table writes rather than a single REP page. The shortened
 sample run ended with a workload-level `E4/graceful-stop` failure, so its
 counts are diagnostic only and do not establish a CI workload pass.
+A follow-up probe of four sampled hot fetch pages found only one, two, one,
+and three page-local hazard offsets respectively. The scheduler page's single
+offset was outside its hottest sampled RIPs. Thus the immediate problem on
+those pages is repeated fetch exclusion at page transitions, not an excess of
+hazards on one page. The follow-up shortened workload passed; no diagnostic
+instrumentation was merged.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
