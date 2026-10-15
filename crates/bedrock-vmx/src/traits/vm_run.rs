@@ -759,6 +759,7 @@ where
             static FETCHES: AtomicU64 = AtomicU64::new(0);
             static BINS: [AtomicU64; 50] = [const { AtomicU64::new(0) }; 50];
             static DUMPED: AtomicBool = AtomicBool::new(false);
+            static PAGE_DUMPED: [AtomicBool; 3] = [const { AtomicBool::new(false) }; 3];
             let tsc = ctx.state().vmx_ctx.svm_clock_base;
             if tsc >= 300_000_000_000 && !DUMPED.load(Relaxed) {
                 if run_result.is_ok()
@@ -776,6 +777,47 @@ where
                                     ctx, allocator, plan, target, reused_clock_plan,
                                     arm_masked_retry));
                             BINS[usize::from(kind)].fetch_add(1, Relaxed);
+                            if kind == 6 && event & 8191 == 0 {
+                                if let Some(plan) = batch.as_ref() {
+                                    let memos = &ctx.state().svm_guard.hazard_memos;
+                                    let count = |page: u64| memos.iter()
+                                        .find(|memo| memo.valid && memo.proof.page == page)
+                                        .map_or(0, |memo| memo.proof.count);
+                                    let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip)
+                                        .unwrap_or(0);
+                                    kernel::pr_info!(
+                                        "SVM CI CAP src={:#x} dst={:#x} off={:#x} src_h={} dst_h={} slots={} pages={} p1={:#x} p2={:#x} p3={:#x}\n",
+                                        plan.pages[0], target, rip & 4095,
+                                        count(plan.pages[0]), count(target),
+                                        plan.page_breakpoint_count, plan.code_page_count,
+                                        plan.pages[1], plan.pages[2], plan.pages[3],
+                                    );
+                                    for (index, page) in [0x1398a2000, 0xfd49000, 0xfd37000]
+                                        .into_iter().enumerate() {
+                                        if page != plan.pages[0] && page != target {
+                                            continue;
+                                        }
+                                        if PAGE_DUMPED[index].swap(true, Relaxed) {
+                                            continue;
+                                        }
+                                        if let Some(memo) = memos.iter()
+                                            .find(|memo| memo.valid && memo.proof.page == page) {
+                                            let hash = memo.bytes.iter().fold(
+                                                0xcbf2_9ce4_8422_2325u64,
+                                                |hash, &byte| (hash ^ u64::from(byte))
+                                                    .wrapping_mul(0x100_0000_01b3),
+                                            );
+                                            let offsets = memo.proof.offsets;
+                                            kernel::pr_info!(
+                                                "SVM CI PAGE page={:#x} count={} hash={:#x} offsets={:#x},{:#x},{:#x},{:#x},{:#x},{:#x}\n",
+                                                page, memo.proof.count, hash,
+                                                offsets[0], offsets[1], offsets[2],
+                                                offsets[3], offsets[4], offsets[5],
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
