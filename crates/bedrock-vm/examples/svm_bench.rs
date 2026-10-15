@@ -33,6 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "guest-rdpmc-fork-1" {
         return test_guest_rdpmc(false, 1, true, true);
     }
+    if args.len() == 2 && args[1] == "guest-rdpmc-spin-1" {
+        return test_guest_rdpmc_spin();
+    }
     if args.len() == 2 && args[1] == "native-branches" {
         return native_loop_comparison(true);
     }
@@ -244,6 +247,37 @@ fn test_guest_rdpmc(user: bool, counter: u32, cross: bool, fork: bool) -> Result
             regs.gprs.rbx & 0xffff_ffff);
         assert_eq!(exit.exit_reason, 258);
         assert!((32..=128).contains(&(regs.gprs.rsi & 0xffff_ffff)));
+        break;
+    }
+    Ok(())
+}
+
+fn test_guest_rdpmc_spin() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    // mov ecx,1; rdpmc; jmp -4. A direct guest clock read must not make a
+    // long-running region escape the exact PMC0 stop deadline.
+    vm.memory_mut()?[0x1000..0x1009]
+        .copy_from_slice(&[0xb9, 1, 0, 0, 0, 0x0f, 0x33, 0xeb, 0xfc]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.rflags = 0x203;
+    regs.gprs.rsp = 0x8000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(100_000))?;
+    vm.seal_memory()?;
+    let start = Instant::now();
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 259);
+        assert_eq!(exit.emulated_tsc, 100_000);
+        let regs = vm.get_regs()?;
+        println!("SVM_GUEST_RDPMC_SPIN_PASS rip={:#x} seconds={:.6}",
+            regs.rip, start.elapsed().as_secs_f64());
         break;
     }
     Ok(())
