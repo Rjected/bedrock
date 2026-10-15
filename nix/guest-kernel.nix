@@ -40,6 +40,7 @@ let
       # Avoid a REP descriptor copy on the hot syscall page.
       ../guest/patches/0009-x86-entry-avoid-rep-in-gp-handler.patch
       ../guest/patches/0010-x86-tsc-bedrock-pmc-clock.patch
+      ../guest/patches/0011-x86-tsc-bedrock-pmc-sched-clock.patch
     ];
   };
 
