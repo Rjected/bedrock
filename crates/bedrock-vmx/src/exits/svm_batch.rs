@@ -535,6 +535,33 @@ fn add_translation_child<C: VmContext>(
     Some(())
 }
 
+fn gate_table_slot(guard: &super::super::vm_state::SvmGuardScratch, page: u64) -> Option<usize> {
+    if !guard.gate_table_index_valid {
+        return guard.gate_tables[..guard.gate_count]
+            .iter()
+            .position(|&table| table == page);
+    }
+    let index = &guard.gate_table_index;
+    let mask = index.len() - 1;
+    let shift = 64 - index.len().trailing_zeros();
+    let mut slot = ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize;
+    for _ in 0..index.len() {
+        let entry = index[slot];
+        if entry == 0 {
+            return None;
+        }
+        let table = usize::from(entry - 1);
+        if guard.gate_tables[table] == page {
+            return Some(table);
+        }
+        slot = (slot + 1) & mask;
+    }
+    // Preserve the exact lookup if an unexpected full index is encountered.
+    guard.gate_tables[..guard.gate_count]
+        .iter()
+        .position(|&table| table == page)
+}
+
 pub(crate) fn gate_table_contains(guard: &super::super::vm_state::SvmGuardScratch, page: u64) -> bool {
     if !guard.gate_table_index_valid {
         return guard.gate_tables[..guard.gate_count].contains(&page);
@@ -672,16 +699,12 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
             // A guarded table cannot change behind the scanner. Its direct
             // child links remain valid even when CR3 points to another root;
             // newly reached or write-released tables still get read below.
-            let cached = ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
-                .iter()
-                .enumerate()
-                .find(|(index, &page)| {
-                    page == table
-                        && ctx.state().svm_guard.gate_guards[*index].valid
+            let cached = gate_table_slot(&ctx.state().svm_guard, table)
+                .filter(|&index| {
+                    ctx.state().svm_guard.gate_guards[index].valid
                         && !ctx.state().svm_guard.gate_links_untrusted
-                        && ctx.state().svm_guard.gate_levels[*index] == level
-                })
-                .map(|(index, _)| index);
+                        && ctx.state().svm_guard.gate_levels[index] == level
+                });
             if let Some(index) = cached {
                 let old_len = ctx.state().svm_guard.gate_upper_lengths[index];
                 let old_start = usize::from(ctx.state().svm_guard.gate_upper_starts[index]);
@@ -4609,14 +4632,18 @@ mod tests {
         guard.gate_count = 3;
         index_gate_tables(guard);
         assert!(guard.gate_table_index_valid);
-        for page in [first, collision, 0x3000] {
+        for (page, expected) in [(first, 0), (collision, 1), (0x3000, 2)] {
             assert!(gate_table_contains(guard, page));
+            assert_eq!(gate_table_slot(guard, page), Some(expected));
         }
         assert!(!gate_table_contains(guard, 0x4000));
+        assert_eq!(gate_table_slot(guard, 0x4000), None);
         guard.gate_table_index_valid = false;
         guard.gate_tables[1] = 0x5000;
         assert!(gate_table_contains(guard, 0x5000));
+        assert_eq!(gate_table_slot(guard, 0x5000), Some(1));
         assert!(!gate_table_contains(guard, collision));
+        assert_eq!(gate_table_slot(guard, collision), None);
     }
 
     #[test]
