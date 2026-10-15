@@ -877,7 +877,15 @@ modest gain within run variation; the candidate remains on separate branch
 execute grants across clock exits instead of only the first. Its 276 VMX unit
 tests and complete in-box SVM suite passed, but the full pinned campaign
 stopped progressing near virtual second 217. It was terminated after 337
-host seconds without a workload verdict. Multi-page retention is not merged.
+host seconds without a workload verdict. That first version was not merged.
+A corrected multi-page hold now reuses the validated clock plan when a stale
+scalar-page hint names one of its selected pages, and retains revocable NPT
+execute grants for every selected page. It passed 276 VMX unit tests, the
+full in-box SVM suite with a new two-page clock/code-write probe, and three
+exact pinned DST campaigns in 194, 197, and 197 host seconds. Unchanged
+same-box controls took 201, 202, and 207 seconds. This suggests a modest
+gain, not Intel timing parity; see
+[the experiment details](contrib/AMD_MULTIPAGE_CLOCK_HOLD_EXPERIMENT.md).
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
