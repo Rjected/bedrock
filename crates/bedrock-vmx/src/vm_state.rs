@@ -18,6 +18,18 @@ pub(crate) static SVM_DIAG_EVENT_FRAME_BYTES: core::sync::atomic::AtomicU64 =
 pub(crate) static SVM_DIAG_PUSHF_BYTES: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 #[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_EXT_TIMER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_EXT_OTHER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_EXCEPTION_DB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_EXCEPTION_PF: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_EXCEPTION_OTHER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_DIAG_SOFTWARE_EVENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
 use crate::ept::NptWriteGuard;
 #[cfg(feature = "cargo")]
 use bedrock_ept::NptWriteGuard;
@@ -221,9 +233,12 @@ impl SvmGuardScratch {
             use core::sync::atomic::Ordering::Relaxed;
             let calls = SVM_DIAG_HOST_WRITE_CALLS.fetch_add(1, Relaxed) + 1;
             if calls % 5_000_000 == 0 {
-                kernel::pr_info!("AMD HOST WRITES calls={} event_bytes={} pushf_bytes={}\n",
+                kernel::pr_info!("AMD HOST WRITES calls={} event_bytes={} pushf_bytes={} timer={} ext_other={} db={} pf={} exc_other={} soft={}\n",
                     calls, SVM_DIAG_EVENT_FRAME_BYTES.load(Relaxed),
-                    SVM_DIAG_PUSHF_BYTES.load(Relaxed));
+                    SVM_DIAG_PUSHF_BYTES.load(Relaxed), SVM_DIAG_EXT_TIMER.load(Relaxed),
+                    SVM_DIAG_EXT_OTHER.load(Relaxed), SVM_DIAG_EXCEPTION_DB.load(Relaxed),
+                    SVM_DIAG_EXCEPTION_PF.load(Relaxed), SVM_DIAG_EXCEPTION_OTHER.load(Relaxed),
+                    SVM_DIAG_SOFTWARE_EVENT.load(Relaxed));
             }
         }
         let Some(last) = guest.checked_add(len as u64 - 1) else {

@@ -259,6 +259,21 @@ pub(super) fn pending_event<C: VmContext, A: CowAllocator<C::CowPage>>(
         return Err(ExitError::Fatal("Unsupported SVM event type"));
     }
     let vector = info as u8;
+    #[cfg(not(feature = "cargo"))]
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        use super::super::vm_state::*;
+        let counter = if kind == 0 {
+            if vector == 0x20 { &SVM_DIAG_EXT_TIMER } else { &SVM_DIAG_EXT_OTHER }
+        } else {
+            match vector {
+                1 => &SVM_DIAG_EXCEPTION_DB,
+                14 => &SVM_DIAG_EXCEPTION_PF,
+                _ => &SVM_DIAG_EXCEPTION_OTHER,
+            }
+        };
+        counter.fetch_add(1, Relaxed);
+    }
     let error = if info & (1 << 11) != 0 {
         Some(
             ctx.state()
@@ -332,6 +347,9 @@ pub(super) fn software_interrupt<C: VmContext, A: CowAllocator<C::CowPage>>(
             None,
             false,
         )? {
+            #[cfg(not(feature = "cargo"))]
+            super::super::vm_state::SVM_DIAG_SOFTWARE_EVENT.fetch_add(
+                1, core::sync::atomic::Ordering::Relaxed);
             Ok(ExitHandlerResult::Continue)
         } else {
             Ok(ExitHandlerResult::ExitToUserspace(
