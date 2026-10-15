@@ -718,6 +718,29 @@ mod tests {
     }
 
     #[test]
+    fn frame_translation_reuses_a_page_but_rewalks_at_a_noncontiguous_boundary() {
+        let mut ctx = context();
+        let v = ctx.vmcs_setup();
+        v.set_field_natural(VmcsFieldNatural::GuestCr0, 1 << 31);
+        v.set_field_natural(VmcsFieldNatural::GuestCr3, 0x3000);
+        v.write64(VmcsField64::GuestIa32Efer, 1 << 10).unwrap();
+        for (address, entry) in [
+            (0x3000, 0x4007u64),
+            (0x4000, 0x5007),
+            (0x5000, 0x6007),
+            (0x6008, 0x9007),
+            (0x6010, 0xb007),
+        ] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        let mut cached = None;
+        assert_eq!(physical_for_frame_byte(&ctx, 0x1ffe, &mut cached).unwrap().as_u64(), 0x9ffe);
+        assert_eq!(physical_for_frame_byte(&ctx, 0x1fff, &mut cached).unwrap().as_u64(), 0x9fff);
+        assert_eq!(physical_for_frame_byte(&ctx, 0x2000, &mut cached).unwrap().as_u64(), 0xb000);
+        assert_eq!(physical_for_frame_byte(&ctx, 0x2001, &mut cached).unwrap().as_u64(), 0xb001);
+    }
+
+    #[test]
     fn short_instruction_window_fills_only_the_current_page() {
         let mut ctx = context();
         ctx.vmcs_setup()
