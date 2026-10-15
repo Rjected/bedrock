@@ -757,7 +757,7 @@ where
         {
             use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
             static FETCHES: AtomicU64 = AtomicU64::new(0);
-            static BINS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+            static BINS: [AtomicU64; 50] = [const { AtomicU64::new(0) }; 50];
             static DUMPED: AtomicBool = AtomicBool::new(false);
             let tsc = ctx.state().vmx_ctx.svm_clock_base;
             if tsc >= 300_000_000_000 && !DUMPED.load(Relaxed) {
@@ -772,7 +772,9 @@ where
                             .ok().map(|gpa| gpa & !4095)
                         {
                             let kind = batch.as_ref().map_or(0, |plan|
-                                super::super::exits::classify_ci_fetch_target(ctx, plan, target));
+                                super::super::exits::classify_ci_fetch_target(
+                                    ctx, allocator, plan, target, reused_clock_plan,
+                                    arm_masked_retry));
                             BINS[usize::from(kind)].fetch_add(1, Relaxed);
                         }
                     }

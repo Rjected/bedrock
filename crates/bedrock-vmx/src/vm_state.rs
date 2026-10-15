@@ -94,6 +94,12 @@ pub(crate) struct SvmGuardScratch {
     /// Predictions only affect page selection; alias and byte proofs still gate execution.
     pub successors: [SvmPageSuccessor; SVM_SUCCESSOR_CAPACITY],
     pub second_successors: [SvmSecondSuccessor; SVM_SECOND_SUCCESSOR_CAPACITY],
+    // Diagnostic-only candidate decisions for the most recent global plan.
+    // This experimental worktree is never merged into the production module.
+    pub ci_plan_source: u64,
+    pub ci_plan_linears: [u64; 5],
+    pub ci_plan_reasons: [u8; 5],
+    pub ci_plan_stopped_for_capacity: bool,
     // Code pages, up to four entry-walk tables, and the guarded tree.
     pub saved: [SvmGuardSaved; SVM_TABLE_CAPACITY + SVM_CODE_PAGE_CAPACITY + 4],
     pub aliases: [SvmAliasWalk; SVM_ALIAS_WALK_CAPACITY],

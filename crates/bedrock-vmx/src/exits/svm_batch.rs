@@ -2245,6 +2245,11 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     });
     let batch = output.as_mut().unwrap();
     batch.pages[0] = page;
+    let current_linear = window.linear & !4095;
+    ctx.state_mut().svm_guard.ci_plan_source = current_linear;
+    ctx.state_mut().svm_guard.ci_plan_linears = [u64::MAX; 5];
+    ctx.state_mut().svm_guard.ci_plan_reasons = [0; 5];
+    ctx.state_mut().svm_guard.ci_plan_stopped_for_capacity = false;
     if !trusted {
         let mut hazard = cached_page_hazards(ctx, page)?;
         if hazard.count == 0 {
@@ -2298,7 +2303,6 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // hazardous pages without an execute fault when all executable
         // aliases fit the four hardware breakpoints. Each admitted page must
         // also be safe at a boundary with every other admitted page.
-        let current_linear = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
         let mut hazards = [hazard; 4];
         let mut hazard_count = hazard.count;
@@ -2309,25 +2313,33 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
         // Older code pages rarely earn their repeated screening cost. An
         // omitted page remains NX and traps before it can execute.
-        for previous_linear in predicted.into_iter().chain(recent.into_iter().take(4)) {
+        for (candidate_index, previous_linear) in predicted.into_iter()
+            .chain(recent.into_iter().take(4)).enumerate() {
+            ctx.state_mut().svm_guard.ci_plan_linears[candidate_index] = previous_linear;
             if hazard_count >= batch.page_breakpoints.len()
                 || batch.code_page_count == hazards.len()
             {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 10;
+                ctx.state_mut().svm_guard.ci_plan_stopped_for_capacity = true;
                 break;
             }
             if previous_linear == u64::MAX || previous_linear == current_linear {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 2;
                 continue;
             }
             let Some(previous) = cached_code_translation(ctx, previous_linear) else {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 3;
                 continue;
             };
             if batch.pages[..batch.code_page_count].contains(&previous)
                 || gate_table_contains(&ctx.state().svm_guard, previous)
                 || ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(previous))
             {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 4;
                 continue;
             }
             let Some(other) = cached_page_hazards(ctx, previous) else {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 5;
                 continue;
             };
             if other.count == 0 || hazard_count + other.count > batch.page_breakpoints.len()
@@ -2337,12 +2349,14 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
                         || !hazard_boundary_safe(&other, existing)
                 })
             {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 6;
                 continue;
             }
             // Only widen a guard when this page has an independently cached
             // proof under the same guarded tree. A fresh multi-page alias
             // walk on every entry costs more than the faults it removes.
             let Some(proof) = cached_single_page_alias_proof(ctx, root, previous, &other) else {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 7;
                 continue;
             };
             let mut breakpoints = batch.page_breakpoints;
@@ -2368,8 +2382,10 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
                 breakpoint_count += 1;
             }
             if !fits || breakpoint_count == batch.page_breakpoint_count {
+                ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 8;
                 continue;
             }
+            ctx.state_mut().svm_guard.ci_plan_reasons[candidate_index] = 9;
             batch.page_breakpoints = breakpoints;
             batch.page_breakpoint_masks = masks;
             batch.page_breakpoint_count = breakpoint_count;
@@ -2425,10 +2441,13 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
 }
 
 #[cfg(not(feature = "cargo"))]
-pub(crate) fn classify_ci_fetch_target<C: VmContext>(
+pub(crate) fn classify_ci_fetch_target<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &C,
+    allocator: &A,
     batch: &InstructionBatch,
     target: u64,
+    reused_clock_plan: bool,
+    masked_retry: bool,
 ) -> u8 {
     if !batch.global_execution { return 0; }
     let v = &ctx.state().vmcs;
@@ -2482,7 +2501,64 @@ pub(crate) fn classify_ci_fetch_target<C: VmContext>(
         index.map_or(0, |index| ctx.state().svm_guard.hazard_memos[index].proof.count)
     }).sum::<usize>();
     if raw_count >= 4 || raw_count + hazard.count > 4 { return 11; }
-    8
+    if !hazard.boundary_guarded { return 12; }
+    if ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(target)) {
+        return if batch.page_breakpoint_count == 0 { 18 } else { 19 };
+    }
+    if reused_clock_plan {
+        return if batch.page_breakpoint_count == 0 { 20 } else { 21 };
+    }
+    if masked_retry {
+        return if batch.page_breakpoint_count == 0 { 22 } else { 23 };
+    }
+    let source_trusted = ctx.state().ept.npt_trusted_code_4k(
+        allocator, GuestPhysAddr::new(batch.pages[0]));
+    if batch.page_breakpoint_count == 0 {
+        return if predicted == Some(target_linear) { 13 }
+            else if source_trusted {
+                40 + recent[..4].iter().position(|&page| page == target_linear).unwrap_or(4) as u8
+            } else { 14 };
+    }
+    for &existing_page in &batch.pages[..batch.code_page_count] {
+        let (_, Some(existing_index)) = hazard_memo_lookup(ctx, existing_page) else {
+            continue;
+        };
+        let existing = &ctx.state().svm_guard.hazard_memos[existing_index].proof;
+        if !existing.boundary_guarded {
+            let existing_hazard = PageHazards {
+                boundary: existing.boundary,
+                boundary_guarded: existing.boundary_guarded,
+                edge: existing.edge,
+                offsets: existing.offsets,
+                count: existing.count,
+            };
+            if !hazard_boundary_safe(&existing_hazard, &hazard)
+                || !hazard_boundary_safe(&hazard, &existing_hazard) {
+                return 15;
+            }
+        }
+    }
+    if predicted == Some(target_linear) { return 16; }
+    let guard = &ctx.state().svm_guard;
+    if guard.ci_plan_source != current { return 35; }
+    let Some(index) = guard.ci_plan_linears.iter().position(|&page| page == target_linear) else {
+        return if guard.ci_plan_stopped_for_capacity { 24 }
+            else if source_trusted {
+                45 + recent[..4].iter().position(|&page| page == target_linear).unwrap_or(4) as u8
+            } else { 37 };
+    };
+    match guard.ci_plan_reasons[index] {
+        2 => 26,
+        3 => 27,
+        4 => 28,
+        5 => 29,
+        6 => 30,
+        7 => 31,
+        8 => 32,
+        9 => 33,
+        10 => 34,
+        _ => 17,
+    }
 }
 
 /// A sole `0x0f` at the end of a guarded code page is conservatively a
