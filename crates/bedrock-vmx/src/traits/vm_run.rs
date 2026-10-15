@@ -2,15 +2,6 @@
 
 //! VM run loop and GPR synchronization.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
-static PENDING_MATCH_RIP: AtomicU64 = AtomicU64::new(0);
-static PENDING_REPLAY: AtomicU64 = AtomicU64::new(0);
-static PENDING_SOFTWARE: AtomicU64 = AtomicU64::new(0);
-static PENDING_FINISHED: AtomicU64 = AtomicU64::new(0);
-static PENDING_REARM_AFTER_EXIT: AtomicU64 = AtomicU64::new(0);
-static SCALAR_LEFT: AtomicU64 = AtomicU64::new(0);
-
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 #[cfg(feature = "cargo")]
@@ -416,7 +407,6 @@ where
                         .is_some_and(|next| next.as_u64() & !4095 == page);
                 if !split_fetch {
                     ctx.state_mut().svm_gate_scalar_page = None;
-                    SCALAR_LEFT.fetch_add(1, Ordering::Relaxed);
                     scalar_page = None;
                 }
             }
@@ -424,17 +414,10 @@ where
         let replay_rip_matches = ctx.state().svm_gate_replay_start.is_some_and(|start| {
                 ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(start)
             });
-        if ctx.state().svm_gate_pending_write && replay_rip_matches {
-            PENDING_MATCH_RIP.fetch_add(1, Ordering::Relaxed);
-        }
         let replay_pending = ctx.state().svm_gate_pending_write
             && replay_rip_matches
             && ctx.state().vmcs.read32(VmcsField32::VmEntryInterruptionInfo)
                 .ok().is_some_and(|info| info & (1 << 31) == 0);
-        if replay_pending {
-            PENDING_REPLAY.fetch_add(1, Ordering::Relaxed);
-            if software_exit { PENDING_SOFTWARE.fetch_add(1, Ordering::Relaxed); }
-        }
         let replay_expected = ctx.state().svm_gate_replay_rip;
         let replay_single_step = replay_pending && !software_exit;
         if replay_single_step {
@@ -656,7 +639,6 @@ where
                 ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(rip)
             })
         {
-            PENDING_FINISHED.fetch_add(1, Ordering::Relaxed);
             ctx.state_mut().svm_gate_pending_write = false;
             ctx.state_mut().svm_gate_replay_start = None;
             ctx.state_mut().svm_gate_replay_rip = None;
@@ -666,7 +648,6 @@ where
         // is safe: a later retry will fault on the guard again. REP stores may
         // fault on subsequent iterations, which remains conservative.
         if !software_exit && run_result.is_ok() && ctx.state().svm_gate_pending_write {
-            PENDING_REARM_AFTER_EXIT.fetch_add(1, Ordering::Relaxed);
             ctx.state_mut().svm_gate_pending_write = false;
             ctx.state_mut().svm_gate_replay_start = None;
             ctx.state_mut().svm_gate_replay_rip = None;
