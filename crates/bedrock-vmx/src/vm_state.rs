@@ -45,6 +45,7 @@ pub(crate) const SVM_RETAINED_GUARD_CAPACITY: usize = 4096;
 pub(crate) const SVM_REBUILD_GUARD_INDEX_CAPACITY: usize = 8192;
 pub(crate) const SVM_TABLE_WORDS: usize = SVM_TABLE_CAPACITY / 64;
 pub(crate) const SVM_TABLE_INDEX_CAPACITY: usize = SVM_TABLE_CAPACITY * 2;
+pub(crate) const SVM_ROOT_TREE_BLOOM_WORDS: usize = 128;
 
 #[derive(Clone, Copy)]
 pub(crate) struct SvmAliasEdge {
@@ -68,6 +69,24 @@ pub(crate) struct SvmRootTreeSnapshot {
     pub upper_edges: [SvmAliasEdge; SVM_ALIAS_EDGE_CAPACITY],
     pub upper_starts: [u16; SVM_TABLE_CAPACITY],
     pub upper_lengths: [u16; SVM_TABLE_CAPACITY],
+    pub table_bloom: [u64; SVM_ROOT_TREE_BLOOM_WORDS],
+}
+
+impl SvmRootTreeSnapshot {
+    fn bloom_index(page: u64) -> usize {
+        ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+            & (SVM_ROOT_TREE_BLOOM_WORDS * 64 - 1)
+    }
+
+    pub fn note_table(&mut self, page: u64) {
+        let bit = Self::bloom_index(page);
+        self.table_bloom[bit / 64] |= 1u64 << (bit % 64);
+    }
+
+    pub fn may_contain_table(&self, page: u64) -> bool {
+        let bit = Self::bloom_index(page);
+        self.table_bloom[bit / 64] & (1u64 << (bit % 64)) != 0
+    }
 }
 
 /// Preallocated AMD guard workspace. Planning and permission restoration run
@@ -235,13 +254,10 @@ impl SvmGuardScratch {
         }
         #[cfg(not(feature = "cargo"))]
         SVM_ROOT_CACHE_HOST_WRITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        // Host writes bypass NPT, so an inactive-root child-link snapshot
-        // cannot remain proven even when the current tree is unaffected.
-        self.root_tree_guard_epoch = self.root_tree_guard_epoch.wrapping_add(1);
-        if self.root_tree_guard_epoch == 0 {
-            for entry in &mut self.root_tree_cache { entry.valid = false; }
-        }
+        // Host writes bypass NPT. Revoke only snapshots that might contain
+        // the written table page; false positives are safe.
         let Some(last) = guest.checked_add(len as u64 - 1) else {
+            for entry in &mut self.root_tree_cache { entry.valid = false; }
             self.gate_host_write_all = true;
             self.leaf_filter_cache_pages.fill(0);
             let mut changed = false;
@@ -259,6 +275,9 @@ impl SvmGuardScratch {
         };
         let mut page = guest & !4095;
         while page <= last {
+            for entry in &mut self.root_tree_cache {
+                if entry.valid && entry.may_contain_table(page) { entry.valid = false; }
+            }
             self.invalidate_leaf_filter(page);
             let mut changed = false;
             for memo in &mut self.hazard_memos {
@@ -273,6 +292,7 @@ impl SvmGuardScratch {
             }
             if !self.gate_host_writes[..self.gate_host_write_count].contains(&page) {
                 if self.gate_host_write_count == self.gate_host_writes.len() {
+                    for entry in &mut self.root_tree_cache { entry.valid = false; }
                     self.gate_host_write_all = true;
                     self.leaf_filter_cache_pages.fill(0);
                     let mut changed = false;

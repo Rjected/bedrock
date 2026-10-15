@@ -960,6 +960,10 @@ fn cache_guarded_root_tree<C: VmContext>(ctx: &mut C, incoming_root: u64,
     snapshot.upper_lengths[..guard.gate_count].copy_from_slice(&guard.gate_upper_lengths[..guard.gate_count]);
     snapshot.upper_edges[..guard.gate_upper_count]
         .copy_from_slice(&guard.gate_upper_edges[..guard.gate_upper_count]);
+    snapshot.table_bloom.fill(0);
+    for index in 0..guard.gate_count {
+        snapshot.note_table(guard.gate_tables[index]);
+    }
     snapshot.valid = true;
 }
 
@@ -1195,7 +1199,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
             SVM_ROOT_CACHE_UNTRUSTED_REFRESHES.fetch_add(1, Ordering::Relaxed);
         }
     }
-    if ctx.state().svm_guard.gate_dirty || ctx.state().svm_guard.gate_links_untrusted {
+    if ctx.state().svm_guard.gate_links_untrusted {
         let guard = &mut ctx.state_mut().svm_guard;
         guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
         if guard.root_tree_guard_epoch == 0 {
@@ -1372,6 +1376,9 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
                 ctx.state_mut().svm_guard.gate_guards[index] = saved;
                 continue;
             }
+            for entry in &mut ctx.state_mut().svm_guard.root_tree_cache {
+                if entry.valid && entry.may_contain_table(page) { entry.valid = false; }
+            }
             ctx.state_mut().svm_guard.retained_guards[retained_index].valid = false;
             invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
             retained = None;
@@ -1450,10 +1457,10 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
     };
     #[cfg(not(feature = "cargo"))]
     SVM_ROOT_CACHE_RELEASES.fetch_add(1, Ordering::Relaxed);
-    let guard = &mut ctx.state_mut().svm_guard;
-    guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
-    if guard.root_tree_guard_epoch == 0 {
-        for entry in &mut guard.root_tree_cache { entry.valid = false; }
+    // The released page is the only table page that may now change without
+    // trapping. Revoke snapshots containing it, including bloom collisions.
+    for entry in &mut ctx.state_mut().svm_guard.root_tree_cache {
+        if entry.valid && entry.may_contain_table(page) { entry.valid = false; }
     }
     let saved = ctx.state().svm_guard.retained_guards[index];
     ctx.state_mut().svm_guard.invalidate_leaf_filter(page);
@@ -6353,6 +6360,11 @@ mod tests {
         guard.gate_root = root + 4096;
         collect_translation_tree_pages(&mut ctx, &[]).unwrap();
         assert_eq!(ctx.state().svm_guard.children[0][0], 0xdead_beef);
+
+        let epoch = ctx.state().svm_guard.root_tree_guard_epoch;
+        ctx.state_mut().svm_guard.note_gate_host_write(root + 0x10000, 8);
+        assert_eq!(ctx.state().svm_guard.root_tree_guard_epoch, epoch);
+        assert!(ctx.state().svm_guard.root_tree_cache[0].valid);
 
         let guard = &mut ctx.state_mut().svm_guard;
         guard.valid = false;
