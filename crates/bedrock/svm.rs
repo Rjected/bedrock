@@ -300,6 +300,28 @@ pub(crate) unsafe fn run(
         .filter(|batch| batch.counter_bounded && batch.repeat.is_none()
             && !batch.page_execution && v.read(o::RIP, 8) == batch.endpoint())
         .map(|batch| batch.count as u64);
+    if let Some(batch) = batch.filter(|_| counter.is_some()) {
+        if v.read(o::EXIT_CODE, 8) == 0x41 {
+            let raw = v.read(o::INSTR_RETIRED_CTR, 8);
+            let start = 0u64.wrapping_sub(batch.counter_period()) & ((1 << 48) - 1);
+            let elapsed = v.read(o::PERF_CTR0, 8).wrapping_sub(start) & ((1 << 48) - 1);
+            if elapsed == raw.saturating_add(1)
+                && v.read(o::PERF_GLOBAL_STATUS, 8) & 1 == 0
+            {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static DIFFERENCES: AtomicU64 = AtomicU64::new(0);
+                static MATCHES: AtomicU64 = AtomicU64::new(0);
+                let n = DIFFERENCES.fetch_add(1, Ordering::Relaxed) + 1;
+                let exact = decoded_debug_endpoint
+                    .is_some_and(|count| raw.checked_sub(1) == Some(count));
+                let matched = if exact { MATCHES.fetch_add(1, Ordering::Relaxed) + 1 } else { 0 };
+                if n <= 8 || n % 10_000 == 0 || (exact && matched <= 8) {
+                    kernel::pr_warn!("SVM DEBUG TICK DIAG n={} matched={} start={:#x} rip={:#x} raw={} pmc={} expected={:?}\n",
+                        n, matched, batch.start, v.read(o::RIP, 8), raw, elapsed, decoded_debug_endpoint);
+                }
+            }
+        }
+    }
     let retired = counter.and_then(|counter| counter.finish(v, decoded_debug_endpoint));
     if !pmu_ready {
         kernel::pr_err!("SVM PMU read failed: rip={:#x} code={:#x}\n", entry_rip, v.read(o::EXIT_CODE, 8));
