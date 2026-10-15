@@ -55,6 +55,17 @@ pub trait VmContext {
 
     fn write_guest_memory(&mut self, gpa: GuestPhysAddr, buf: &[u8]) -> Result<(), MemoryError>;
 
+    /// Apply a guest instruction's own write after an NPT trap. The caller
+    /// handles the corresponding table/code proof invalidation; unlike a host
+    /// write, this must not enqueue a second host-write invalidation.
+    fn write_guest_memory_from_guest(
+        &mut self,
+        gpa: GuestPhysAddr,
+        buf: &[u8],
+    ) -> Result<(), MemoryError> {
+        self.write_guest_memory(gpa, buf)
+    }
+
     /// Fill in the pending log entry's memory_hash by hashing dirty pages found
     /// via the EPT. No-op without a pending entry.
     fn finalize_exit_record<K: Kernel>(&mut self, kernel: &K);

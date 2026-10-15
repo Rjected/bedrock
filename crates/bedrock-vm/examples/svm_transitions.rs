@@ -36,6 +36,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("SVM_CASE").as_deref() == Ok("clock-paired-guard-write") {
         return test_clock_paired_guard_write();
     }
+    if std::env::var("SVM_CASE").as_deref() == Ok("table-mov-emulation") {
+        return test_table_mov_emulation();
+    }
     test_mov_ss_random_interception()?;
     test_mov_ss_deadline()?;
     test_syscall(false)?;
@@ -53,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_masked_breakpoints()?;
     test_clock_guard_write()?;
     test_clock_paired_guard_write()?;
+    test_table_mov_emulation()?;
     test_fpu_reservation()?;
     Ok(())
 }
@@ -207,6 +211,57 @@ fn test_clock_paired_guard_write() -> Result<(), Box<dyn std::error::Error>> {
             stats.ept_violation.count, stats.total_exit_count());
         return Ok(());
     }
+}
+
+fn test_table_mov_emulation() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(4 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    // Store a present huge-page entry into the active page-directory page.
+    // The guarded NPT write faults before MOV [RDI],RAX retires.
+    vm.memory_mut()?[0x1000..0x1008].copy_from_slice(&[
+        0x48, 0x89, 0x07, // MOV [RDI],RAX
+        0x31, 0xc0, // XOR EAX,EAX
+        0x0f, 0x01, 0xd9, // VMMCALL shutdown
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x9000;
+    regs.gprs.rdi = 0x5008;
+    regs.gprs.rax = 0x200087;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(2))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 259, "page-table store missed exact deadline");
+        assert_eq!(exit.emulated_tsc, 2);
+        assert_eq!(vm.get_regs()?.rip, 0x1005);
+        assert_eq!(&vm.memory()?[0x5008..0x5010], &0x200087u64.to_le_bytes());
+        break;
+    }
+    vm.set_stop_at_tsc(None)?;
+    for _ in 0..2 {
+        let child = vm.fork()?;
+        let mut child_regs = child.get_regs()?;
+        child_regs.rip = 0x1000;
+        child_regs.gprs.rax = 0x200087;
+        child.set_regs(&child_regs)?;
+        loop {
+            let exit = child.run()?;
+            if exit.exit_reason == 256 { continue; }
+            assert_eq!(exit.exit_reason, 258);
+            assert_eq!(exit.emulated_tsc, 4);
+            assert_eq!(child.get_regs()?.gprs.rax, 0);
+            break;
+        }
+    }
+    let stats = vm.get_exit_stats()?;
+    println!("SVM_TABLE_MOV_EMULATION_PASS mtf={} npt={}",
+        stats.mtf.count, stats.ept_violation.count);
+    Ok(())
 }
 
 fn test_sysret_restores_guest_tf() -> Result<(), Box<dyn std::error::Error>> {

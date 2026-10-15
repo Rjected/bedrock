@@ -138,6 +138,9 @@ pub struct EptViolationQualification {
     pub executable: bool,
     /// Guest linear-address field is valid.
     pub guest_linear_valid: bool,
+    /// AMD NPF occurred during final-GPA translation, after guest permission
+    /// checks; false for guest page-table walks and Intel EPT violations.
+    pub guest_final_translation: bool,
     /// Access was asynchronous to instruction execution (Intel PT output,
     /// EPT-friendly PEBS, or user-interrupt delivery).
     pub asynchronous: bool,
@@ -153,6 +156,7 @@ impl From<u64> for EptViolationQualification {
             writable: qual & (1 << 4) != 0,
             executable: qual & (1 << 5) != 0,
             guest_linear_valid: qual & (1 << 7) != 0,
+            guest_final_translation: qual & (1 << 17) != 0,
             asynchronous: qual & (1 << 16) != 0,
         }
     }

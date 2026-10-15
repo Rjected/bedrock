@@ -196,7 +196,11 @@ pub fn decode(
                 | (u64::from(execute) << 2)
                 | (u64::from(present) << 3)
                 | (u64::from(present && !write) << 4)
-                | (u64::from(present && !execute) << 5);
+                | (u64::from(present && !execute) << 5)
+                // Keep AMD's final-GPA marker separate from faults incurred
+                // while walking guest page tables. Only the former proves
+                // that guest permissions were checked before this NPF.
+                | (u64::from(info1 & (1 << 32) != 0 && info1 & (1 << 33) == 0) << 17);
             0
         }
         u64::MAX => {
@@ -283,6 +287,13 @@ mod tests {
         assert_eq!(e.qualification & 16, 0);
         assert_eq!(e.guest_physical_address, 0x123000);
         assert_eq!(e.instruction_len, 0); // retry faulting instruction
+    }
+    #[test]
+    fn npf_keeps_final_translation_distinct_from_guest_table_walk() {
+        let final_access = decode(0x400, (1 << 32) | 3, 0x5008, 0x1000, 0, false).unwrap();
+        let table_walk = decode(0x400, (1 << 33) | 3, 0x5008, 0x1000, 0, false).unwrap();
+        assert_ne!(final_access.qualification & (1 << 17), 0);
+        assert_eq!(table_walk.qualification & (1 << 17), 0);
     }
     #[test]
     fn guest_debug_exception_is_distinct_from_hypervisor_step() {

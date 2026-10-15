@@ -348,6 +348,29 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         }
     }
 
+    fn write_guest_memory_from_guest(
+        &mut self,
+        gpa: GuestPhysAddr,
+        buf: &[u8],
+    ) -> Result<(), MemoryError> {
+        let page_gpa = GuestPhysAddr::new(gpa.as_u64() & !0xfff);
+        let offset = (gpa.as_u64() & 0xfff) as usize;
+        if buf.len() > PAGE_SIZE - offset {
+            return Err(MemoryError::OutOfRange);
+        }
+        let page = self.cow_pages.get_mut(page_gpa).ok_or(MemoryError::PermissionDenied)?;
+        // The NPT table guard is already dirty and will be rebuilt before
+        // guest re-entry; avoid treating this guest store as a host RAM edit.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                (page.virtual_address().as_u64() as *mut u8).add(offset),
+                buf.len(),
+            );
+        }
+        Ok(())
+    }
+
     fn handle_cow_fault<A: CowAllocator<Self::CowPage>>(
         &mut self,
         gpa: GuestPhysAddr,

@@ -787,6 +787,7 @@ mod tests {
             writable: false,
             executable: true,
             guest_linear_valid: false,
+            guest_final_translation: false,
             asynchronous,
         }
     }

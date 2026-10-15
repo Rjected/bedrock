@@ -188,6 +188,24 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> V
         Ok(())
     }
 
+    fn write_guest_memory_from_guest(
+        &mut self,
+        gpa: GuestPhysAddr,
+        buf: &[u8],
+    ) -> Result<(), MemoryError> {
+        let offset = gpa.as_u64() as usize;
+        let end = offset.checked_add(buf.len()).ok_or(MemoryError::OutOfRange)?;
+        if end > self.memory.size() {
+            return Err(MemoryError::OutOfRange);
+        }
+        // The trapped guest store is already covered by the NPT guard's
+        // invalidation. The range check above keeps this copy in guest RAM.
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), self.memory.as_mut_ptr().add(offset), buf.len());
+        }
+        Ok(())
+    }
+
     fn finalize_exit_record<K: Kernel>(&mut self, _kernel: &K) {
         // Nothing to do unless an `Exit` event awaits its deferred memory hash.
         if self.state.pending_exit_loc.is_none() {

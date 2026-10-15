@@ -15,6 +15,74 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+// A guarded guest page-table write usually takes an NPT exit followed by a
+// one-instruction TF replay. For the simple MOV r64 -> [base] form, the NPT
+// exit already supplies the resolved destination, so retire the store here.
+// Every other instruction keeps the hardware replay path.
+fn emulate_guarded_table_mov<C: VmContext>(
+    ctx: &mut C,
+    qual: EptViolationQualification,
+    guest_phys: u64,
+) -> Result<bool, ExitError> {
+    let candidate = (|| -> Option<(u64, u64)> {
+        if !qual.write || !qual.guest_final_translation || guest_phys & 7 != 0
+            || guest_phys & 4095 > 4096 - 8
+            || super::svm_batch::instruction_budget(ctx) <= 1
+            || ctx.state().mtf_enabled
+        {
+            return None;
+        }
+        let vmcs = &ctx.state().vmcs;
+        if vmcs.read32(VmcsField32::GuestCsAccessRights).ok()? & (1 << 13) == 0
+            || vmcs.read_natural(VmcsFieldNatural::GuestRflags).ok()? & ((1 << 8) | (1 << 16)) != 0
+            || vmcs.read_natural(VmcsFieldNatural::GuestDr7).ok()? & 0x20ff != 0
+            || vmcs.read32(VmcsField32::VmEntryInterruptionInfo).ok()? & (1 << 31) != 0
+        {
+            return None;
+        }
+        let rip = vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?;
+        let rsp = vmcs.read_natural(VmcsFieldNatural::GuestRsp).ok()?;
+        let window = super::svm::InstructionWindow::read_cached(ctx).ok()?;
+        let [rex, opcode, modrm] = window.bytes[..3] else { return None; };
+        if rex & 0xf8 != 0x48 || opcode != 0x89 || modrm >> 6 != 0
+            || matches!(modrm & 7, 4 | 5)
+        {
+            return None;
+        }
+        let source = ((modrm >> 3) & 7) | ((rex & 4) << 1);
+        let base = (modrm & 7) | ((rex & 1) << 3);
+        let g = &ctx.state().gprs;
+        let regs = [g.rax, g.rcx, g.rdx, g.rbx, rsp, g.rbp, g.rsi, g.rdi,
+            g.r8, g.r9, g.r10, g.r11, g.r12, g.r13, g.r14, g.r15];
+        let address = regs[base as usize];
+        // The cached window reads only the current code page. Never decode
+        // its zero-filled tail as bytes from the next page.
+        if window.linear != rip || rip & 4095 > 4096 - 3
+            || super::svm::physical(ctx, address).ok()?.as_u64() != guest_phys
+        {
+            return None;
+        }
+        Some((rip.checked_add(3)?, regs[source as usize]))
+    })();
+    let Some((next_rip, value)) = candidate else { return Ok(false); };
+    if ctx.write_guest_memory_from_guest(GuestPhysAddr::new(guest_phys), &value.to_le_bytes()).is_err() {
+        return Ok(false);
+    }
+    // Once the store is visible, replay would execute it twice. Treat a
+    // failed RIP update as fatal rather than falling back to hardware replay.
+    ctx.state().vmcs.write_natural(VmcsFieldNatural::GuestRip, next_rip)?;
+    ctx.state_mut().instruction_counter.record_instructions(1);
+    let count = ctx.state().instruction_counter.read();
+    let offset = ctx.state().tsc_offset;
+    ctx.state_mut().last_instruction_count = count;
+    ctx.state_mut().emulated_tsc = count.wrapping_add(offset);
+    ctx.state_mut().svm_gate_scalar_page = None;
+    ctx.state_mut().svm_gate_pending_write = false;
+    ctx.state_mut().svm_gate_replay_start = None;
+    ctx.state_mut().svm_gate_replay_rip = None;
+    Ok(true)
+}
+
 /// Handle EPT violation exit.
 pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
@@ -78,6 +146,11 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
         if qual.write && super::svm_batch::release_global_table_write(ctx, allocator, page) {
+            match emulate_guarded_table_mov(ctx, qual, guest_phys) {
+                Ok(true) => return ExitHandlerResult::Continue,
+                Err(error) => return ExitHandlerResult::Error(error),
+                Ok(false) => {}
+            }
             let window = super::svm::InstructionWindow::read(ctx).ok();
             let scalar_page = window.as_ref().map(|window| window.physical.as_u64() & !4095);
             let replay_rip = window.as_ref()
