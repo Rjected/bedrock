@@ -3081,8 +3081,7 @@ fn collect_page_breakpoints<C: VmContext>(
                 let slot = super::super::vm_state::SvmGuardScratch::leaf_filter_cache_slot(walk.table);
                 let guard = &ctx.state().svm_guard;
                 if guard.leaf_filter_cache_pages[slot] == walk.table.wrapping_add(1)
-                    && guard.leaf_filter_cache_generations[slot]
-                        == ctx.state().ept.mapping_generation()
+                    && guard.leaf_filter_cache_epochs[slot] == guard.leaf_filter_cache_epoch
                 {
                     let filter = guard.leaf_filter_cache_values[slot];
                     let guard = &mut ctx.state_mut().svm_guard;
@@ -3141,12 +3140,11 @@ fn collect_page_breakpoints<C: VmContext>(
         }
         if let Some(index) = leaf_slot {
             let slot = super::super::vm_state::SvmGuardScratch::leaf_filter_cache_slot(walk.table);
-            let generation = ctx.state().ept.mapping_generation();
             let guard = &mut ctx.state_mut().svm_guard;
             guard.gate_leaf_filters[index] = leaf_filter;
             guard.gate_leaf_filter_valid[index] = true;
             guard.leaf_filter_cache_pages[slot] = walk.table.wrapping_add(1);
-            guard.leaf_filter_cache_generations[slot] = generation;
+            guard.leaf_filter_cache_epochs[slot] = guard.leaf_filter_cache_epoch;
             guard.leaf_filter_cache_values[slot] = leaf_filter;
         }
         cursor += 1;

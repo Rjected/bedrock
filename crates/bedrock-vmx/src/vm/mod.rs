@@ -471,6 +471,10 @@ mod tests {
         guard.retained_guard_count = 1;
         guard.retained_guards[0].guest = 0x2000;
         guard.retained_guards[0].valid = true;
+        let cached_leaf = 0x2000;
+        let cache_slot = super::super::vm_state::SvmGuardScratch::leaf_filter_cache_slot(cached_leaf);
+        guard.leaf_filter_cache_pages[cache_slot] = cached_leaf + 1;
+        guard.leaf_filter_cache_epochs[cache_slot] = guard.leaf_filter_cache_epoch;
 
         forked.handle_cow_fault(GuestPhysAddr::new(0x1000), &mut allocator).unwrap();
         let after = forked.state.ept.mapping_generation();
@@ -479,10 +483,22 @@ mod tests {
         assert_eq!(forked.state.svm_guard.retained_mapping_generation, after);
         assert!(forked.state.svm_guard.gate_dirty);
         assert!(forked.state.svm_guard.retained_guards[0].valid);
+        assert!(forked.state.svm_guard.has_cached_leaf_filter(cached_leaf));
 
         forked.handle_cow_fault(GuestPhysAddr::new(0x2000), &mut allocator).unwrap();
         assert_ne!(forked.state.svm_guard.retained_mapping_generation,
             forked.state.ept.mapping_generation());
+        assert!(!forked.state.svm_guard.has_cached_leaf_filter(cached_leaf));
+
+        // A cached table from another root may be absent from the active
+        // guard registry. Remapping it must still revoke the cached filter.
+        let dormant_leaf = 0x4000;
+        let cache_slot = super::super::vm_state::SvmGuardScratch::leaf_filter_cache_slot(dormant_leaf);
+        let guard = &mut forked.state.svm_guard;
+        guard.leaf_filter_cache_pages[cache_slot] = dormant_leaf + 1;
+        guard.leaf_filter_cache_epochs[cache_slot] = guard.leaf_filter_cache_epoch;
+        forked.handle_cow_fault(GuestPhysAddr::new(dormant_leaf), &mut allocator).unwrap();
+        assert!(!forked.state.svm_guard.has_cached_leaf_filter(dormant_leaf));
 
         forked.state.svm_guard.mark_possible_code_page(0x3000);
         let before_code = forked.state.svm_guard.gate_mapping_generation;

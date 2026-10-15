@@ -139,10 +139,12 @@ pub(crate) struct SvmGuardScratch {
     /// A cleared bit proves a page cannot have an alias through that table.
     pub gate_leaf_filters: [[u64; SVM_LEAF_FILTER_WORDS]; SVM_TABLE_CAPACITY],
     pub gate_leaf_filter_valid: [bool; SVM_TABLE_CAPACITY],
-    /// Filters survive guarded CR3 switches; writes and mapping changes revoke them.
+    /// Filters survive guarded CR3 switches and unrelated data COW remaps.
+    /// Writes to a leaf revoke that page; relevant remaps advance the epoch.
     pub leaf_filter_cache_pages: [u64; SVM_LEAF_FILTER_CACHE_CAPACITY],
-    pub leaf_filter_cache_generations: [u64; SVM_LEAF_FILTER_CACHE_CAPACITY],
+    pub leaf_filter_cache_epochs: [u64; SVM_LEAF_FILTER_CACHE_CAPACITY],
     pub leaf_filter_cache_values: [[u64; SVM_LEAF_FILTER_WORDS]; SVM_LEAF_FILTER_CACHE_CAPACITY],
+    pub leaf_filter_cache_epoch: u64,
     pub gate_count: usize,
     pub gate_root: u64,
     /// Leaf-only refresh is valid only while all guarded NPT mappings persist.
@@ -180,6 +182,21 @@ impl SvmGuardScratch {
         let slot = Self::leaf_filter_cache_slot(page);
         if self.leaf_filter_cache_pages[slot] == page.wrapping_add(1) {
             self.leaf_filter_cache_pages[slot] = 0;
+        }
+    }
+
+    pub fn has_cached_leaf_filter(&self, page: u64) -> bool {
+        let slot = Self::leaf_filter_cache_slot(page);
+        self.leaf_filter_cache_pages[slot] == page.wrapping_add(1)
+            && self.leaf_filter_cache_epochs[slot] == self.leaf_filter_cache_epoch
+    }
+
+    pub fn invalidate_leaf_filters_for_remap(&mut self) {
+        self.leaf_filter_cache_epoch = self.leaf_filter_cache_epoch.wrapping_add(1);
+        self.gate_leaf_filter_valid.fill(false);
+        // A wrapped epoch must not match filters from its previous cycle.
+        if self.leaf_filter_cache_epoch == 0 {
+            self.leaf_filter_cache_pages.fill(0);
         }
     }
 

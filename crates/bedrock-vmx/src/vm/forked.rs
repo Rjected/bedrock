@@ -411,7 +411,8 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             let table = super::super::exits::gate_table_contains(guard, page)
                 || guard.tables[..guard.count].contains(&page)
                 || guard.retained_guards[..guard.retained_guard_count]
-                    .iter().any(|saved| saved.valid && saved.guest == page);
+                    .iter().any(|saved| saved.valid && saved.guest == page)
+                || guard.has_cached_leaf_filter(page);
             let code = guard.may_have_code_proof(page);
             !table && !code
         };
@@ -443,6 +444,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             }
         } else {
             self.state.svm_guard.gate_dirty = true;
+            self.state.svm_guard.invalidate_leaf_filters_for_remap();
         }
 
         // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a leaf's
@@ -534,6 +536,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             }
 
             self.state.svm_guard.gate_dirty = true;
+            self.state.svm_guard.invalidate_leaf_filters_for_remap();
 
             // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a
             // leaf's HPA. See the matching comment in handle_cow_fault.
@@ -609,6 +612,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         }
 
         self.state.svm_guard.gate_dirty = true;
+        self.state.svm_guard.invalidate_leaf_filters_for_remap();
 
         // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a leaf's
         // HPA. See the matching comment in handle_cow_fault.
