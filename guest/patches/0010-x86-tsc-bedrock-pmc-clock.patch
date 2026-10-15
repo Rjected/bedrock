@@ -1,6 +1,6 @@
 --- a/arch/x86/kernel/tsc.c
 +++ b/arch/x86/kernel/tsc.c
-@@ -54,6 +54,16 @@
+@@ -54,6 +54,24 @@
  
  static int __read_mostly tsc_force_recalibrate;
  
@@ -14,23 +14,37 @@
 +}
 +early_param("bedrock_pmc_clock", bedrock_pmc_clock_setup);
 +
++static __always_inline u64 bedrock_read_pmc_clock(void)
++{
++	u32 low, high;
++
++	asm volatile("rdpmc" : "=a" (low), "=d" (high) : "c" (1));
++	return ((u64)(high & 0xffff) << 32) | low;
++}
++
  static struct clocksource_base art_base_clk = {
  	.id    = CSID_X86_ART,
  };
-@@ -1131,6 +1141,12 @@
+@@ -236,7 +254,7 @@
+ noinstr u64 native_sched_clock(void)
+ {
+ 	if (static_branch_likely(&__use_tsc)) {
+-		u64 tsc_now = rdtsc();
++		u64 tsc_now = bedrock_pmc_clock ? bedrock_read_pmc_clock() : rdtsc();
+ 
+ 		/* return the value in ns */
+ 		return __cycles_2_ns(tsc_now);
+@@ -1131,6 +1149,9 @@
   */
  static u64 read_tsc(struct clocksource *cs)
  {
 +	if (unlikely(bedrock_pmc_clock)) {
-+		u32 low, high;
-+
-+		asm volatile("rdpmc" : "=a" (low), "=d" (high) : "c" (1));
-+		return ((u64)(high & 0xffff) << 32) | low;
++		return bedrock_read_pmc_clock();
 +	}
  	return (u64)rdtsc_ordered();
  }
  
-@@ -1157,7 +1173,8 @@
+@@ -1157,7 +1178,8 @@
  
  static int tsc_cs_enable(struct clocksource *cs)
  {
@@ -40,7 +54,7 @@
  	return 0;
  }
  
-@@ -1565,6 +1582,15 @@
+@@ -1565,6 +1587,15 @@
  	if (tsc_clocksource_reliable || no_tsc_watchdog)
  		tsc_disable_clocksource_watchdog();
  
