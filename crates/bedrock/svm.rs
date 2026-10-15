@@ -248,6 +248,14 @@ pub(crate) unsafe fn run(
     // PMC virtualization loads the guest controls from the VMCB. Keep it
     // enabled with guest counting disabled on entries without a batch.
     let uncounted_virt_ext = (pmu_mask != 0 && !counting).then(|| PmcEntry::disarm(v));
+    // Diagnostic: PMC1 tracks virtual instruction time across counted and
+    // scalar entries while PMC0 continues to control exact deadlines.
+    if pmu_mask != 0 {
+        v.write(o::VIRT_EXT, 8, v.read(o::VIRT_EXT, 8) | (1 << 3));
+        v.write(o::PERF_CTL0 + 16, 8, 0x4300c0);
+        v.write(o::PERF_CTR0 + 16, 8, ctx.svm_clock_base & ((1 << 48) - 1));
+        v.write(o::PERF_GLOBAL_CONTROL, 8, v.read(o::PERF_GLOBAL_CONTROL, 8) | 2);
+    }
     if batch.is_some_and(|batch| batch.page_execution) {
         if let Some(counter) = counter.as_ref() {
             // TF is clear for guarded native execution. NPT catches PUSHF
