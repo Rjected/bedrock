@@ -11,6 +11,117 @@ use super::svm_core::{
 use super::vmx::{InstructionBatch, VmEntryError, VmxContext};
 use core::arch::asm;
 
+// Diagnostic-only, bounded RIP histograms. This branch is never used for
+// timing comparisons: atomics on exit intentionally perturb the hot path.
+mod hot_exit_diag {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+
+    const SLOTS: usize = 4096;
+    const TOP: usize = 12;
+    const START_TSC: u64 = 150_000_000_000;
+    const DUMP_TSC: u64 = 600_000_000_000;
+
+    struct Histogram {
+        keys: [AtomicU64; SLOTS],
+        counts: [AtomicU64; SLOTS],
+        events: AtomicU64,
+        collisions: AtomicU64,
+    }
+
+    impl Histogram {
+        const fn new() -> Self {
+            Self {
+                keys: [const { AtomicU64::new(0) }; SLOTS],
+                counts: [const { AtomicU64::new(0) }; SLOTS],
+                events: AtomicU64::new(0),
+                collisions: AtomicU64::new(0),
+            }
+        }
+
+        fn record(&self, rip: u64) {
+            let event = self.events.fetch_add(1, Relaxed);
+            if event & 255 != 0 {
+                return;
+            }
+            let key = rip.wrapping_add(1);
+            let hash = (rip >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let slot = (hash >> 52) as usize;
+            for attempt in 0..8 {
+                let index = (slot + attempt) & (SLOTS - 1);
+                let found = self.keys[index].load(Relaxed);
+                if found == key
+                    || (found == 0
+                        && self.keys[index]
+                            .compare_exchange(0, key, Relaxed, Relaxed)
+                            .is_ok())
+                {
+                    self.counts[index].fetch_add(1, Relaxed);
+                    return;
+                }
+            }
+            self.collisions.fetch_add(1, Relaxed);
+        }
+
+        fn dump(&self, kind: &str) {
+            let mut top = [(0u64, 0u64); TOP];
+            for index in 0..SLOTS {
+                let count = self.counts[index].load(Relaxed);
+                if count == 0 || count <= top[TOP - 1].0 {
+                    continue;
+                }
+                let rip = self.keys[index].load(Relaxed).wrapping_sub(1);
+                for position in 0..TOP {
+                    if count > top[position].0 {
+                        for shifted in (position + 1..TOP).rev() {
+                            top[shifted] = top[shifted - 1];
+                        }
+                        top[position] = (count, rip);
+                        break;
+                    }
+                }
+            }
+            kernel::pr_info!(
+                "SVM HOT {} events={} sampled={} collisions={}\n",
+                kind,
+                self.events.load(Relaxed),
+                (self.events.load(Relaxed) + 255) / 256,
+                self.collisions.load(Relaxed)
+            );
+            for (rank, &(count, rip)) in top.iter().enumerate() {
+                if count == 0 {
+                    break;
+                }
+                kernel::pr_info!("SVM HOT {} rank={} count={} rip={:#x}\n", kind, rank + 1, count, rip);
+            }
+        }
+    }
+
+    static MTF: Histogram = Histogram::new();
+    static NPT_FETCH: Histogram = Histogram::new();
+    static NPT_DATA: Histogram = Histogram::new();
+    static DUMPED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn observe(virtual_tsc: u64, code: u64, info1: u64, entry_rip: u64, exit_rip: u64) {
+        if virtual_tsc < START_TSC || DUMPED.load(Relaxed) {
+            return;
+        }
+        if code == 0x41 {
+            MTF.record(entry_rip);
+        } else if code == 0x400 {
+            if info1 & 0x11 == 0x11 {
+                NPT_FETCH.record(exit_rip);
+            } else {
+                NPT_DATA.record(exit_rip);
+            }
+        }
+        if virtual_tsc >= DUMP_TSC && !DUMPED.swap(true, Relaxed) {
+            MTF.dump("mtf");
+            NPT_FETCH.dump("fetch");
+            NPT_DATA.dump("data");
+        }
+    }
+}
+
 pub(crate) struct Counters;
 impl Counters {
     pub(crate) fn new() -> Result<Self, kernel::error::Error> {
@@ -317,6 +428,15 @@ pub(crate) unsafe fn run(
     ctx.guest_rax = v.read(o::RAX, 8);
     ctx.guest_cr2 = v.read(o::CR2, 8);
     let code = v.read(o::EXIT_CODE, 8);
+    if batch.is_none() || code == 0x400 {
+        hot_exit_diag::observe(
+            ctx.svm_diag_virtual_base,
+            code,
+            v.read(o::EXIT_INFO1, 8),
+            entry_rip,
+            v.read(o::RIP, 8),
+        );
+    }
     // The XSETBV handler changes the XSAVE mask. Persist registers using
     // the old mask first, while the run loop still has IRQs disabled.
     if code == 0x08d && ctx.svm_guest_fpu_dirty != 0 {

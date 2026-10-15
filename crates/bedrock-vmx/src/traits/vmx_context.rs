@@ -86,6 +86,8 @@ pub struct VmxContext {
     pub svm_pmc_clock_enabled: u64,
     /// The SVM intercepts have been configured for this VM's one-way opt-in.
     pub svm_pmc_clock_access_configured: u64,
+    /// Diagnostic only: virtual instruction time at SVM entry.
+    pub svm_diag_virtual_base: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
@@ -146,6 +148,7 @@ impl VmxContext {
             svm_clock_base: 0,
             svm_pmc_clock_enabled: 0,
             svm_pmc_clock_access_configured: 0,
+            svm_diag_virtual_base: 0,
         }
     }
 }
