@@ -803,6 +803,21 @@ Kernel-mode false hits retain scalar replay: applying the RF retry there
 stalled an early Linux boot in its idle path. The measured DST gain is modest,
 and the larger gap to the recorded Intel workload remains.
 
+For the exact pinned one-seed Tempo CI campaign (180 virtual seconds), a later
+EPYC 4245P box running HWE `7.0.0-38` passed in 202 and 195 host seconds on the
+unchanged branch. A guarded global-plan reuse experiment after RDTSC/RDTSCP
+passed in 198 and 197 seconds between those controls. A diagnostic run took
+that reuse path on 2,995,661 of 3 million eligible clock continuations, but
+the alternating full-campaign runs show no repeatable wall-time gain, so the
+experiment was not merged. A separate box-only phase probe over four million
+clock exits measured 7.61 billion cycles in plan selection, 1.85 billion in
+instruction preparation, 0.72 billion in pre-entry setup, and 0.40 billion in
+NPT guard setup. The probe adds its own timing and counters and was run at a
+shortened diagnostic duration, so these are bottleneck proportions rather than
+production wall-time estimates. The remaining work is to lower that planning
+cost without paying comparable validation cost, and to reduce the much larger
+number of NPT faults in the full campaign.
+
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
 
