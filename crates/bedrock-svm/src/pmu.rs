@@ -107,7 +107,11 @@ impl PmcEntry {
         // cannot independently establish the number of guest retirements.
         let pmc_start = 0u64.wrapping_sub(self.period) & ((1 << 48) - 1);
         let pmc_elapsed = v.read(o::PERF_CTR0, 8).wrapping_sub(pmc_start) & ((1 << 48) - 1);
-        let raw = if v.read(o::PERF_GLOBAL_STATUS, 8) & 1 == 0
+        // A debug exit can add one programmable retired-event tick for the
+        // exception itself. The observed IRPERF value excludes that extra
+        // event, so apply the one-tick cross-check only to ordinary exits.
+        let raw = if code != 0x41
+            && v.read(o::PERF_GLOBAL_STATUS, 8) & 1 == 0
             && pmc_elapsed < self.period
             && pmc_elapsed == raw.saturating_add(1)
         {
@@ -308,5 +312,33 @@ mod tests {
             v.write(o::EXIT_CODE, 8, 0x72);
             assert_eq!(entry.finish(&mut v), expected);
         }
+    }
+
+    #[test]
+    fn debug_breakpoint_does_not_promote_a_programmable_counter_tick() {
+        let mut v = Vmcb::new();
+        v.initialize();
+        let entry = PmcEntry::prepare(&mut v, 1 << 30).unwrap();
+        let start = v.read(o::PERF_CTR0, 8);
+        v.write(o::PERF_CTR0, 8, start + 7);
+        v.write(o::INSTR_RETIRED_CTR, 8, 6);
+        v.write(o::EXIT_CODE, 8, 0x41);
+        v.write(o::RIP, 8, 0x1012);
+        assert_eq!(entry.finish(&mut v), Some(5));
+    }
+
+    #[test]
+    fn immediate_debug_breakpoint_does_not_become_a_guest_instruction() {
+        let mut v = Vmcb::new();
+        v.initialize();
+        v.write(o::RIP, 8, 0x1000);
+        let entry = PmcEntry::prepare(&mut v, 1 << 30).unwrap();
+        let start = v.read(o::PERF_CTR0, 8);
+        v.write(o::PERF_CTR0, 8, start + 2);
+        v.write(o::INSTR_RETIRED_CTR, 8, 1);
+        v.write(o::EXIT_CODE, 8, 0x41);
+        v.write(o::RIP, 8, 0x1000);
+        v.write(o::DR6, 8, 1);
+        assert_eq!(entry.finish(&mut v), Some(0));
     }
 }
