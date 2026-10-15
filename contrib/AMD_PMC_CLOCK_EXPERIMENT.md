@@ -25,6 +25,16 @@ The matching pre-feature production runs on other boxes were 103–108 seconds;
 this is a regression check, not a same-box code-version comparison. The
 matched clock comparison above uses the patched guest in both arms.
 
+Host `perf record -F 199 -g` using a hardware cycle counter coincided with
+one clock-enabled progress run stopping at virtual second 173.755. It was
+terminated after 250 host seconds. A repeat using software `cpu-clock`
+sampling passed in **98 seconds**, and two runs under an isolated IBS-pause
+diagnostic module passed in **100 and 102 seconds**. This points to possible
+interaction with host hardware-PMU profiling; it does not establish the root
+cause. The opt-in stays off by default. The diagnostic and 9,264-sample
+per-process IBS profile are pushed on `dan/amd-pmc-ibs-profile-1015`
+(`1897a2c`).
+
 This is an experimental opt-in PMU interface. The `bedrock_pmc_clock` boot parameter asks the Tempo runner to
 enable a per-VM AMD PMC clock ioctl, then the patched Linux kernel reads PMC1
 as retired-instruction time in its TSC clocksource. Userspace vDSO clock
