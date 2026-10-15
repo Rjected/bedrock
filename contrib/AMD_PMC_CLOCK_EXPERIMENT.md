@@ -13,19 +13,36 @@ control, with substantial two-run variation. They should not be compared
 directly with the original-guest production timings because the guest kernel
 differs.
 
-A subsequent progress-driver campaign with the PMC clock enabled and a host
-`perf record -F 199 -g` sample **failed** near virtual second 180 with a VM
-`RUN` I/O error. The box kernel log identified `SVM PMU exceeded budget:
-count=6 budget=85 batch_count=5 bounded=true`, at `_copy_to_user` after a
-debug exit, and then rejected VM entry. The perf capture recorded 5,880
-samples with none lost, but sampling perturbed execution; this failure does
-not prove the PMC clock caused the overrun. It does show that this path needs
-more robustness work before merging. The original-guest production progress
-campaign, sampled earlier on the same box, passed in 109 seconds. Both perf
-reports and the failure log are under ignored
-`target/boxctl-evidence/box-b47a5eea/`. Profiler percentages are diagnostic
-only. The next step is to reproduce the bounded-batch overrun with a targeted
-interrupt-at-entry probe and fix its accounting.
+A subsequent progress-driver campaign with the PMC clock enabled and host
+`perf record -F 199 -g` sampling **failed** near virtual second 180. At a
+debug breakpoint in `_copy_to_user`, VMCB IRPERF held 6 including the VMRUN
+entry tick, matching the decoded 5 guest instructions; programmable PMC0
+held 7. The common AMD path incorrectly promoted that extra tick and rejected
+the bounded batch. The shared fix now skips PMC0's one-tick promotion at
+debug exits while retaining it at ordinary exits. On a fresh EPYC 4245P box,
+a diagnostic sampled PMC-on campaign logged 8 debug-exit disagreements,
+including immediate breakpoints with IRPERF=1 and PMC0=2. A narrow rule for
+decoded endpoints missed these cases and was rejected.
+
+The broader fix passed 25 SVM and 276 VMX unit tests, the box SVM suite,
+original-guest full Tempo campaigns both unsampled and sampled, and a
+patched-guest PMC-on full campaign under 40 seconds of host sampling. The
+same patched guest and module passed a clock-off pinned control in **111 / 77**
+total/seed seconds and a clock-on run in **96 / 63** seconds on that box.
+These paired timings used the narrowed accounting variant. The prior broader
+variant passed clock-on in **97 seconds** unsampled and **105 seconds** with
+sampling. There was one intermittent sampled original-guest stall under the
+narrowed variant, so wider replay tests are still needed. Logs are preserved
+under ignored `target/boxctl-evidence/box-b47a5eea/` and
+`target/boxctl-evidence/box-0598ea76/`. This opt-in still assumes a trusted
+patched guest kernel and is not enabled by default.
+
+After cherry-picking the final common debug-exit fix into this opt-in branch,
+its full box SVM suite and exact pinned one-seed Tempo campaign passed again
+on `box-0598ea76` with the patched guest and PMC clock enabled in **98 / 63**
+host/seed seconds. The guest RDPMC fork, deadline, spin, and CR4.PCE rejection
+probes had passed on the same hardware before the cherry-pick; the cherry-pick
+changes only the shared PMU count correction and its unit tests.
 
 This branch is an isolated performance probe, not a production-ready PMU
 interface. The `bedrock_pmc_clock` boot parameter asks the Tempo runner to
