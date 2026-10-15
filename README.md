@@ -864,6 +864,11 @@ the unchanged branch's 193–202 second range. The counted-entry path updates
 interrupt and intercept fields on every entry and restores them on exit, so
 the intercept group is normally dirty before the next entry. The trial was
 not merged because it did not improve full-campaign time.
+An isolated increase of the recurrent hazardous-code write-guard cap from 192
+to 224 pages, leaving 24 of 256 memo slots replaceable, also passed local and
+in-box SVM tests and the exact DST campaign. It took 205 host seconds against
+the unchanged branch's 193–202 second range on the same box. The higher cap
+was not merged.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
