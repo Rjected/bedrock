@@ -887,6 +887,11 @@ same-box controls took 201, 202, and 207 seconds. This suggests a modest
 gain, not Intel timing parity. A two-seed exact campaign also passed both
 seeds, including one without preemption, in 344 host seconds; see
 [the experiment details](contrib/AMD_MULTIPAGE_CLOCK_HOLD_EXPERIMENT.md).
+A post-change 60-virtual-second diagnostic recorded 15.08 million exits:
+49.7% NPT violations, 17.6% monitor-trap steps, and 29.2% clock reads.
+The [exit-mix profile](contrib/AMD_POSTHOLD_EXIT_PROFILE.md) is a shorter
+diagnostic, not an Intel comparison. It directs the next work toward guarded
+code fetches and scalar replay rather than further clock-only tuning.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
