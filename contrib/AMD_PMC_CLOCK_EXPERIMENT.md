@@ -1,7 +1,31 @@
 # AMD guest PMC clock experiment
 
-This branch is an isolated performance probe, not a production-ready PMU
-interface. The `bedrock_pmc_clock` boot parameter asks the Tempo runner to
+The per-VM clock is available only through an explicit ioctl and the patched
+guest's `bedrock_pmc_clock` boot parameter. It is off for every new VM. On
+2026-10-15, the final accounting fix and stack-batching baseline passed a
+matched one-seed Tempo DST pair on a fresh EPYC 4245P box: **95 host seconds
+with the clock on** and **106 seconds with it off**. Both runs used the same
+patched guest (`vmlinux` SHA-256
+`86bdd21555fb8323b52d74ffa736c0e744107be3f9c55b9c44a27cf68c5cb891`),
+module, driver (`f0d4c4c16cd5a25549d83107b1b0161c4432769d0c42e26f2144c5994648f554`),
+images, initrd, and pinned seed; both had `failed=0`. The box's full SVM
+hardware suite, 26 SVM unit tests, and 276 VMX unit tests passed. PMC1 fork
+replay, exact PMC0 deadline during a guest RDPMC spin, and CR4.PCE rejection
+probes passed on the same module. A two-seed clock-on campaign passed both
+seeds in **183 host seconds**, including a second seed with a different
+preemption setting. This is evidence for the opt-in path, not a claim that all
+guest workloads are covered. The AMD counter remains accessible to trusted
+guest CPL0 code, so callers must pair the ioctl with a compatible guest
+kernel.
+
+With the clock disabled and the original guest image (`vmlinux` SHA-256
+`3feabfd845b13320fc499b008747dac1c7f9991a87029879cb10ba0f940b2336`),
+the same module and driver passed the pinned campaign in **103 host seconds**.
+The matching pre-feature production runs on other boxes were 103–108 seconds;
+this is a regression check, not a same-box code-version comparison. The
+matched clock comparison above uses the patched guest in both arms.
+
+This is an experimental opt-in PMU interface. The `bedrock_pmc_clock` boot parameter asks the Tempo runner to
 enable a per-VM AMD PMC clock ioctl, then the patched Linux kernel reads PMC1
 as retired-instruction time in its TSC clocksource. Userspace vDSO clock
 calls enter the kernel. PMC0 still controls Bedrock's exact instruction
@@ -37,8 +61,8 @@ the opt-in assumes the patched guest kernel, which reads PMC1 only. The
 `bedrock_pmc_clock` option is required for the guest to use PMC1. An
 attempt to use PMC1 in `native_sched_clock()` as well reduced RDTSC exits but
 stopped the full campaign at virtual second 113; that change is deliberately
-absent here. The current probe still exposes other PMCs to the opted-in guest
-kernel and needs broader replay and interrupt tests before it can be merged.
+absent here. The opt-in still exposes other PMCs to the guest kernel; keep it
+off by default pending broader guest and replay coverage.
 
 Only build and load the kernel module in a disposable `boxctl` box with
 `--disable-job-agent`. Do not build or load it on the workstation. The box

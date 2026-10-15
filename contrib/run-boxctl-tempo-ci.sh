@@ -22,6 +22,8 @@ box_target="ubuntu@${box_name}"
 ssh_opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 pmc_clock=${BEDROCK_PMC_CLOCK:-0}
 [[ $pmc_clock == 0 || $pmc_clock == 1 ]] || exit 2
+seeds=${BEDROCK_CI_SEEDS:-1}
+[[ $seeds =~ ^[1-9][0-9]*$ ]] || exit 2
 
 # Always stage the current userspace driver. A previously staged executable
 # can silently predate changes in this branch even while the box module is
@@ -34,13 +36,14 @@ rsync -az -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' \
     "$box_target:/home/ubuntu/ci-dst/$remote_binary"
 
 ssh "${ssh_opts[@]}" "$box_target" bash -s -- \
-    "$run_name" "$driver" "$run_secs" "$images_tar" "$pmc_clock" <<'REMOTE'
+    "$run_name" "$driver" "$run_secs" "$images_tar" "$pmc_clock" "$seeds" <<'REMOTE'
 set -uo pipefail
 run_name=$1
 driver=$2
 run_secs=$3
 images_tar=$4
 pmc_clock=$5
+seeds=$6
 guest_cmdline='console=hvc0 nopti nokaslr mitigations=off break audit=0 bedrock_ncpus=5 bedrock_loop_delay lpj=1000000'
 if [[ $pmc_clock == 1 ]]; then guest_cmdline+=' bedrock_pmc_clock'; fi
 cd /home/ubuntu/ci-dst || exit 1
@@ -62,7 +65,7 @@ test ! -e "$output" && test ! -e "$status_file" || {
 args=(campaign --vmlinux ./vmlinux --initrd ./initrd.gz
     --compose ./compose-run.yaml --images "./$images_tar"
     --cmdline "$guest_cmdline"
-    --memory-mb 5120 --seed-start 14373434789495652599 --seeds 1
+    --memory-mb 5120 --seed-start 14373434789495652599 --seeds "$seeds"
     --workload-cmd 'podman exec tempo-dst /usr/local/bin/tempo-dst'
     --workload-planner ./tempo-dst --workload-config ./workload-args.json
     --out "./$output")
@@ -71,8 +74,8 @@ if [[ $run_secs != 180 ]]; then
     echo 'Diagnostic duration changes the workload verdict; do not compare it to Intel CI.' >&2
 fi
 start=$(date +%s)
-printf 'started_utc=%s\ndriver=%s\nrun_secs=%s\nimages_tar=%s\n' \
-    "$(date -u +%FT%TZ)" "$driver" "$run_secs" "$images_tar" >"$status_file"
+printf 'started_utc=%s\ndriver=%s\nrun_secs=%s\nimages_tar=%s\nseeds=%s\n' \
+    "$(date -u +%FT%TZ)" "$driver" "$run_secs" "$images_tar" "$seeds" >"$status_file"
 printf 'driver_sha256=%s\n' "$(sha256sum "$binary" | cut -d' ' -f1)" >>"$status_file"
 timeout 1250 "$binary" "${args[@]}" >"$log" 2>&1
 process_status=$?
