@@ -869,6 +869,15 @@ to 224 pages, leaving 24 of 256 memo slots replaceable, also passed local and
 in-box SVM tests and the exact DST campaign. It took 205 host seconds against
 the unchanged branch's 193–202 second range on the same box. The higher cap
 was not merged.
+On EPYC 4245P box `box-266a001a`, two exact pinned campaigns with an
+isolated ASID-reuse candidate passed in 195 and 199 host seconds. Unchanged
+same-box controls passed in 207 and 201 seconds. This suggests at most a
+modest gain within run variation; the candidate remains on separate branch
+`dan/amd-clock-asid-reuse-1015`. A separate trial retained all selected NPT
+execute grants across clock exits instead of only the first. Its 276 VMX unit
+tests and complete in-box SVM suite passed, but the full pinned campaign
+stopped progressing near virtual second 217. It was terminated after 337
+host seconds without a workload verdict. Multi-page retention is not merged.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
