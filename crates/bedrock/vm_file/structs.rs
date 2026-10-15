@@ -45,6 +45,8 @@ pub(crate) const BEDROCK_VM_GET_EXIT_STATS: u32 = _IOR::<BedrockExitStats>(BEDRO
 
 /// Ioctl number for SET_STOP_TSC command - stop VM when TSC reaches this value.
 pub(crate) const BEDROCK_VM_SET_STOP_TSC: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 8);
+/// Enable the AMD guest PMC1 clock for a VM using the patched guest kernel.
+pub(crate) const BEDROCK_VM_ENABLE_SVM_PMC_CLOCK: u32 = _IOW::<u64>(BEDROCK_IOC_MAGIC, 18);
 
 /// Ioctl number for GET_VM_ID command - get the VM's unique identifier.
 pub(crate) const BEDROCK_VM_GET_VM_ID: u32 = _IOR::<u64>(BEDROCK_IOC_MAGIC, 9);

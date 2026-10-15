@@ -68,6 +68,7 @@ pub(crate) const BEDROCK_VM_SET_SINGLE_STEP: u64 =
 pub(crate) const BEDROCK_VM_GET_EXIT_STATS: u64 =
     ioctl_ior(BEDROCK_IOC_MAGIC, 7, size_of::<ExitStats>());
 pub(crate) const BEDROCK_VM_SET_STOP_TSC: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 8, size_of::<u64>());
+pub(crate) const BEDROCK_VM_ENABLE_SVM_PMC_CLOCK: u64 = ioctl_iow(BEDROCK_IOC_MAGIC, 18, size_of::<u64>());
 pub(crate) const BEDROCK_VM_GET_VM_ID: u64 = ioctl_ior(BEDROCK_IOC_MAGIC, 9, size_of::<u64>());
 pub(crate) const BEDROCK_VM_SET_EVENT_CONFIG: u64 =
     ioctl_iow(BEDROCK_IOC_MAGIC, 13, size_of::<EventConfig>());

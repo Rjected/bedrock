@@ -36,6 +36,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "guest-rdpmc-spin-1" {
         return test_guest_rdpmc_spin();
     }
+    if args.len() == 2 && args[1] == "guest-rdpmc-cr4-pce" {
+        return test_guest_pce_write();
+    }
     if args.len() == 2 && args[1] == "native-branches" {
         return native_loop_comparison(true);
     }
@@ -185,6 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn test_guest_rdpmc(user: bool, counter: u32, cross: bool, fork: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.enable_svm_pmc_clock()?;
     for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
         vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
     }
@@ -210,6 +214,13 @@ fn test_guest_rdpmc(user: bool, counter: u32, cross: bool, fork: bool) -> Result
     vm.set_regs(&regs)?;
     vm.set_stop_at_tsc(Some(if fork { 20 } else { 1000 }))?;
     vm.seal_memory()?;
+    if user {
+        // CR4.PCE would let CPL3 read the private deadline PMC0 as well as
+        // the clock. The opt-in VM must reject entry with PCE set.
+        assert!(vm.run().is_err());
+        println!("SVM_GUEST_RDPMC_USER_PCE_REJECTED_PASS");
+        return Ok(());
+    }
     if fork {
         loop {
             let exit = vm.run()?;
@@ -254,6 +265,7 @@ fn test_guest_rdpmc(user: bool, counter: u32, cross: bool, fork: bool) -> Result
 
 fn test_guest_rdpmc_spin() -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.enable_svm_pmc_clock()?;
     for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
         vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
     }
@@ -280,6 +292,27 @@ fn test_guest_rdpmc_spin() -> Result<(), Box<dyn std::error::Error>> {
             regs.rip, start.elapsed().as_secs_f64());
         break;
     }
+    Ok(())
+}
+
+fn test_guest_pce_write() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.enable_svm_pmc_clock()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    // mov rax,cr4; or eax,0x100; mov cr4,rax; vmmcall.
+    let code = [0x0f, 0x20, 0xe0, 0x0d, 0, 1, 0, 0, 0x0f, 0x22, 0xe0, 0x0f, 0x01, 0xd9];
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.rflags = 0x2;
+    regs.gprs.rsp = 0x8000;
+    vm.set_regs(&regs)?;
+    vm.seal_memory()?;
+    assert!(vm.run().is_err(), "guest CR4.PCE write was accepted");
+    println!("SVM_GUEST_CR4_PCE_REJECTED_PASS");
     Ok(())
 }
 

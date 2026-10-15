@@ -597,6 +597,7 @@ where
             pre_guest_tsc.saturating_sub(pre_entry_tsc);
         let state = ctx.state_mut();
         state.vmx_ctx.svm_clock_base = state.last_instruction_count.wrapping_add(state.tsc_offset);
+        state.vmx_ctx.svm_pmc_clock_enabled = u64::from(state.svm_pmc_clock_enabled);
         state.vmx_ctx.svm_entry_repeat = u64::from(
             batch.is_none()
                 && instruction_window.as_ref().is_some_and(|window| {

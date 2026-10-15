@@ -1186,6 +1186,8 @@ pub struct VmState<V: VirtualMachineControlStructure, I: InstructionCounter> {
     /// The root caller has made its shared guest-RAM mapping read-only before
     /// this RUN. Guest writes and kernel-mediated host writes remain tracked.
     pub svm_host_memory_stable: bool,
+    /// Allow the patched AMD guest kernel to read virtual PMC1 as its clock.
+    pub svm_pmc_clock_enabled: bool,
     pub svm_gate_replay_start: Option<u64>,
     /// Decoded next RIP for a store that can be verified by one scalar step.
     pub svm_gate_replay_rip: Option<u64>,
@@ -1445,6 +1447,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_gate_scalar_page: None,
             svm_gate_pending_write: false,
             svm_host_memory_stable: false,
+            svm_pmc_clock_enabled: false,
             svm_gate_replay_start: None,
             svm_gate_replay_rip: None,
             svm_guard: box_svm_guard(),
@@ -2227,6 +2230,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_gate_scalar_page: None,
             svm_gate_pending_write: false,
             svm_host_memory_stable: false,
+            svm_pmc_clock_enabled: false,
             svm_gate_replay_start: None,
             svm_gate_replay_rip: None,
             svm_guard: box_svm_guard(),
@@ -2449,6 +2453,7 @@ impl<V: VirtualMachineControlStructure, I: InstructionCounter> VmState<V, I> {
             svm_gate_scalar_page: None,
             svm_gate_pending_write: false,
             svm_host_memory_stable: false,
+            svm_pmc_clock_enabled: parent_state.svm_pmc_clock_enabled,
             svm_gate_replay_start: None,
             svm_gate_replay_rip: None,
             svm_guard: box_svm_guard(),

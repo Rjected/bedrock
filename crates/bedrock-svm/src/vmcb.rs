@@ -143,8 +143,6 @@ impl Vmcb {
         ] {
             self.intercept(bit, true);
         }
-        // Diagnostic: allow the guest to read virtual PMC1 directly.
-        self.intercept(111, false);
         // #DB for hypervisor single-stepping; #MC for host error reporting.
         self.write(offset::INTERCEPT_EXCEPTIONS, 4, u32::MAX as u64);
         // Guest debug-register access must not change host breakpoint state.
@@ -159,6 +157,23 @@ impl Vmcb {
         self.write(offset::INT_CONTROL, 4, 1 << 24);
         self.write(offset::DR6, 8, 0xffff0ff0);
         self.write(offset::DR7, 8, 0x400);
+    }
+
+    /// RDPMC runs directly only in a VM that opted into the patched PMC clock.
+    /// Intercept CR4 writes there so the common handler can prevent PCE from
+    /// exposing the deadline counter to guest userspace.
+    pub fn configure_pmc_clock_access(&mut self, enabled: bool) {
+        self.intercept(111, !enabled);
+        let cr_writes = self.read(offset::INTERCEPT_CR_WRITE, 2);
+        self.write(
+            offset::INTERCEPT_CR_WRITE,
+            2,
+            if enabled {
+                cr_writes | (1 << 4)
+            } else {
+                cr_writes & !(1 << 4)
+            },
+        );
     }
 
     /// AMD APM 15.25.5: ROGPT avoids treating every guest page-table walk as
@@ -211,6 +226,20 @@ mod tests {
         v.write(offset::RIP, 8, 0xffff_ffff_8100_0000);
         assert_eq!(v.read(0x578, 8), 0xffff_ffff_8100_0000);
         assert_eq!(v.read(0x570, 8), 0); // no adjacent register corruption
+    }
+
+    #[test]
+    fn pmc_clock_access_is_opt_in_and_cr4_writes_are_guarded() {
+        let mut v = Vmcb::new();
+        v.initialize();
+        assert_ne!(v.read(111 / 8, 1) & (1 << (111 % 8)), 0);
+        assert_eq!(v.read(offset::INTERCEPT_CR_WRITE, 2) & (1 << 4), 0);
+        v.configure_pmc_clock_access(true);
+        assert_eq!(v.read(111 / 8, 1) & (1 << (111 % 8)), 0);
+        assert_ne!(v.read(offset::INTERCEPT_CR_WRITE, 2) & (1 << 4), 0);
+        v.configure_pmc_clock_access(false);
+        assert_ne!(v.read(111 / 8, 1) & (1 << (111 % 8)), 0);
+        assert_eq!(v.read(offset::INTERCEPT_CR_WRITE, 2) & (1 << 4), 0);
     }
 
     #[test]

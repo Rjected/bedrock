@@ -586,6 +586,36 @@ pub(crate) fn handle_get_exit_stats<F: VmFileOps>(vm_file: &F, arg: usize) -> is
     0
 }
 
+/// Enable a guest-readable PMC1 clock only when the AMD PMU is available.
+pub(crate) fn handle_enable_svm_pmc_clock<F: VmFileOps>(vm_file: &mut F, arg: usize) -> isize {
+    let mut value = core::mem::MaybeUninit::<u64>::uninit();
+    // SAFETY: Bounded copy from the caller's u64 into local storage.
+    let not_copied = unsafe {
+        bedrock_copy_from_user(
+            value.as_mut_ptr().cast::<core::ffi::c_void>(),
+            arg as *const core::ffi::c_void,
+            size_of::<u64>() as core::ffi::c_ulong,
+        )
+    };
+    if not_copied != 0 {
+        return -(bindings::EFAULT as isize);
+    }
+    // SAFETY: The copy initialized the entire u64.
+    if unsafe { value.assume_init() } != 1 {
+        return -(bindings::EINVAL as isize);
+    }
+    if vm_file.running().load(Ordering::Acquire) {
+        return -(bindings::EBUSY as isize);
+    }
+    if !super::super::svm::supported()
+        || unsafe { super::super::c_helpers::bedrock_svm_pmu_mask() } == 0
+    {
+        return -(bindings::EOPNOTSUPP as isize);
+    }
+    vm_file.vm_mut().state_mut().svm_pmc_clock_enabled = true;
+    0
+}
+
 /// Handle SET_STOP_TSC ioctl - set TSC value at which VM should stop.
 pub(crate) fn handle_set_stop_tsc<F: VmFileOps>(vm_file: &mut F, arg: usize) -> isize {
     let mut value = core::mem::MaybeUninit::<u64>::uninit();
