@@ -7,8 +7,10 @@ clock mechanism remains experimental; those timings are not a safe AMD
 baseline. After commit `393d002` corrected the token lifetime, the same pinned
 seed and patched guest passed with the PMC clock on in **189 host seconds** on
 `box-82c8e123`. An adjacent pre-fix control on that box passed in **101
-seconds**. A corrected clock-off control has not yet been measured, so the
-clock's incremental gain on the corrected path is unverified.
+seconds**. A same-box corrected clock-off control then passed in **192
+seconds** with the same guest, driver, images, initrd, and seed. This one
+matched pair shows no large clock-only gain; three seconds is within ordinary
+run variation.
 
 The per-VM clock is available only through an explicit ioctl and the patched
 guest's `bedrock_pmc_clock` boot parameter. It is off for every new VM. On

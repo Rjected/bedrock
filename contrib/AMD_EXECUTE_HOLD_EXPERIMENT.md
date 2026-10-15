@@ -7,10 +7,12 @@ The apparent speedup below depended on a permission with no revocation token;
 it is not a valid safe-performance result. Commit `393d002` uses `take_if` to
 retain the token. On the same EPYC 4245P box, patched guest, driver, and exact
 pinned seed, the old module passed in 101 host seconds and the corrected module
-passed in 189 seconds. The corrected module passed 276 VMX unit tests and the
+passed in 189 seconds with the PMC clock on. The corrected module also passed
+in 192 seconds with that clock off. It passed 276 VMX unit tests and the
 full in-box SVM hardware suite, including `clock-guard-write`. The workload
 comparison to Intel must use the corrected 189-second result until a new safe
-optimization is verified.
+optimization is verified. The one paired corrected clock comparison does not
+show a large clock-only speedup.
 
 The SVM global gate temporarily grants NPT execute to a proven code page and
 reverses that grant after every VM exit. The exact Tempo DST workload generated
