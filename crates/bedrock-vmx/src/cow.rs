@@ -7,6 +7,38 @@
 #[derive(Debug, Clone, Copy)]
 pub struct CowInsertError;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+const NEGATIVE_CACHE_CAPACITY: usize = 256;
+
+/// A missed private COW lookup stays a miss until this VM inserts that page.
+/// Exact page keys make collisions an efficiency loss only.
+struct NegativeCache {
+    pages: [AtomicU64; NEGATIVE_CACHE_CAPACITY],
+}
+
+impl NegativeCache {
+    fn new() -> Self {
+        Self { pages: [const { AtomicU64::new(0) }; NEGATIVE_CACHE_CAPACITY] }
+    }
+
+    fn slot(page: u64) -> usize {
+        ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56) as usize
+    }
+
+    fn contains(&self, page: u64) -> bool {
+        self.pages[Self::slot(page)].load(Ordering::Relaxed) == page.wrapping_add(1)
+    }
+
+    fn remember(&self, page: u64) {
+        self.pages[Self::slot(page)].store(page.wrapping_add(1), Ordering::Relaxed);
+    }
+
+    fn invalidate(&self, page: u64) {
+        self.pages[Self::slot(page)].store(0, Ordering::Relaxed);
+    }
+}
+
 // Cargo build: Use alloc::collections::BTreeMap
 
 #[cfg(feature = "cargo")]
@@ -26,6 +58,7 @@ mod cargo_impl {
         /// Maps page-aligned GPAs to owned pages.
         pages: BTreeMap<u64, P>,
         count: usize,
+        negative_cache: super::NegativeCache,
     }
 
     impl<P: Page> CowPageMap<P> {
@@ -33,13 +66,21 @@ mod cargo_impl {
             Self {
                 pages: BTreeMap::new(),
                 count: 0,
+                negative_cache: super::NegativeCache::new(),
             }
         }
 
         /// COW page containing `gpa`, if this VM has copied it.
         pub fn get(&self, gpa: GuestPhysAddr) -> Option<&P> {
             let page_aligned = gpa.as_u64() & !0xFFF;
-            self.pages.get(&page_aligned)
+            if self.negative_cache.contains(page_aligned) {
+                return None;
+            }
+            let page = self.pages.get(&page_aligned);
+            if page.is_none() {
+                self.negative_cache.remember(page_aligned);
+            }
+            page
         }
 
         pub fn get_mut(&mut self, gpa: GuestPhysAddr) -> Option<&mut P> {
@@ -53,12 +94,12 @@ mod cargo_impl {
             if self.pages.insert(page_aligned, page).is_none() {
                 self.count += 1;
             }
+            self.negative_cache.invalidate(page_aligned);
             Ok(())
         }
 
         pub fn contains(&self, gpa: GuestPhysAddr) -> bool {
-            let page_aligned = gpa.as_u64() & !0xFFF;
-            self.pages.contains_key(&page_aligned)
+            self.get(gpa).is_some()
         }
 
         pub fn len(&self) -> usize {
@@ -102,6 +143,7 @@ mod kernel_impl {
         /// Maps page-aligned GPAs to owned pages.
         pages: RBTree<u64, P>,
         count: usize,
+        negative_cache: super::NegativeCache,
     }
 
     impl<P: Page> CowPageMap<P> {
@@ -109,13 +151,21 @@ mod kernel_impl {
             Self {
                 pages: RBTree::new(),
                 count: 0,
+                negative_cache: super::NegativeCache::new(),
             }
         }
 
         /// COW page containing `gpa`, if this VM has copied it.
         pub fn get(&self, gpa: GuestPhysAddr) -> Option<&P> {
             let page_aligned = gpa.as_u64() & !0xFFF;
-            self.pages.get(&page_aligned)
+            if self.negative_cache.contains(page_aligned) {
+                return None;
+            }
+            let page = self.pages.get(&page_aligned);
+            if page.is_none() {
+                self.negative_cache.remember(page_aligned);
+            }
+            page
         }
 
         pub fn get_mut(&mut self, gpa: GuestPhysAddr) -> Option<&mut P> {
@@ -132,6 +182,7 @@ mod kernel_impl {
             {
                 Ok(_) => {
                     self.count += 1;
+                    self.negative_cache.invalidate(page_aligned);
                     Ok(())
                 }
                 Err(_) => Err(super::CowInsertError),
@@ -139,8 +190,7 @@ mod kernel_impl {
         }
 
         pub fn contains(&self, gpa: GuestPhysAddr) -> bool {
-            let page_aligned = gpa.as_u64() & !0xFFF;
-            self.pages.get(&page_aligned).is_some()
+            self.get(gpa).is_some()
         }
 
         pub fn len(&self) -> usize {
@@ -168,3 +218,29 @@ mod kernel_impl {
 
 #[cfg(not(feature = "cargo"))]
 pub use kernel_impl::CowPageMap;
+
+#[cfg(all(test, feature = "cargo"))]
+mod tests {
+    use super::{CowPageMap, NegativeCache};
+    use crate::test_mocks::MockPage;
+    use memory::GuestPhysAddr;
+
+    #[test]
+    fn negative_lookup_is_revoked_by_insert_and_collision_is_exact() {
+        let mut map = CowPageMap::<MockPage>::new();
+        let present = GuestPhysAddr::new(0x3000);
+        assert!(map.get(present).is_none());
+        assert!(map.get(present).is_none());
+
+        let colliding_page = (4..10_000)
+            .map(|page| page << 12)
+            .find(|&page| NegativeCache::slot(page) == NegativeCache::slot(0x3000))
+            .unwrap();
+        map.insert(present, MockPage::new()).unwrap();
+        assert!(map.get(present).is_some());
+
+        // A colliding miss may evict the hint, but cannot hide an owned page.
+        assert!(map.get(GuestPhysAddr::new(colliding_page)).is_none());
+        assert!(map.get(present).is_some());
+    }
+}
