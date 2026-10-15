@@ -8,6 +8,30 @@ use crate::prelude::*;
 
 use super::helpers::{advance_rip, ExitError, ExitHandlerResult};
 
+/// Keep the bytewise translation and COW checks, but submit each physically
+/// contiguous span as one host write. This preserves segmented stack wrapping
+/// and page aliases while avoiding a guard invalidation for every byte.
+pub(super) fn write_contiguous_guest_bytes<C: VmContext>(
+    ctx: &mut C,
+    addresses: &[GuestPhysAddr],
+    bytes: &[u8],
+) -> Result<(), MemoryError> {
+    debug_assert_eq!(addresses.len(), bytes.len());
+    let mut start = 0;
+    while start < bytes.len() {
+        let mut end = start + 1;
+        while end < bytes.len()
+            && addresses[end - 1].as_u64().checked_add(1) == Some(addresses[end].as_u64())
+            && addresses[end].as_u64() & !4095 == addresses[start].as_u64() & !4095
+        {
+            end += 1;
+        }
+        ctx.write_guest_memory(addresses[start], &bytes[start..end])?;
+        start = end;
+    }
+    Ok(())
+}
+
 pub(super) fn physical<C: VmContext>(ctx: &C, linear: u64) -> Result<GuestPhysAddr, ExitError> {
     let cr0 = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr0)?;
     if cr0 & (1 << 31) == 0 {
@@ -19,6 +43,25 @@ pub(super) fn physical<C: VmContext>(ctx: &C, linear: u64) -> Result<GuestPhysAd
     }
     super::ept::translate_gva_to_gpa(ctx, linear)
         .map_err(|_| ExitError::Fatal("SVM emulation address is not mapped"))
+}
+
+/// A page-table translation fixes the physical 4 KiB frame for every byte in
+/// that linear page. Event frames translate all bytes before writing any of
+/// them, so the mapping cannot change between these lookups.
+pub(super) fn physical_for_frame_byte<C: VmContext>(
+    ctx: &C,
+    linear: u64,
+    cached_page: &mut Option<(u64, u64)>,
+) -> Result<GuestPhysAddr, ExitError> {
+    let linear_page = linear & !4095;
+    if let Some((cached_linear, physical_page)) = *cached_page {
+        if cached_linear == linear_page {
+            return Ok(GuestPhysAddr::new(physical_page | (linear & 4095)));
+        }
+    }
+    let address = physical(ctx, linear)?;
+    *cached_page = Some((linear_page, address.as_u64() & !4095));
+    Ok(address)
 }
 
 pub(crate) struct InstructionWindow {
@@ -563,8 +606,10 @@ fn emulate<C: VmContext, A: CowAllocator<C::CowPage>>(
     };
     let flags = v.read_natural(VmcsFieldNatural::GuestRflags)?;
     let mut addresses = [GuestPhysAddr::new(0); 8];
+    let mut cached_page = None;
     for (i, address) in addresses[..width].iter_mut().enumerate() {
-        *address = physical(ctx, ss_base.wrapping_add((offset + i as u64) & stack_mask))?;
+        let linear = ss_base.wrapping_add((offset + i as u64) & stack_mask);
+        *address = physical_for_frame_byte(ctx, linear, &mut cached_page)?;
     }
     if push {
         // PUSHF writes only these translated stack bytes. Preserve guarded
@@ -599,10 +644,8 @@ fn emulate<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
         let bytes = (flags & !((1 << 16) | (1 << 17))).to_le_bytes();
-        for i in 0..width {
-            ctx.write_guest_memory(addresses[i], &bytes[i..i + 1])
-                .map_err(|_| ExitError::Fatal("SVM PUSHF stack write failed"))?;
-        }
+        write_contiguous_guest_bytes(ctx, &addresses[..width], &bytes[..width])
+            .map_err(|_| ExitError::Fatal("SVM PUSHF stack write failed"))?;
     } else {
         let mut bytes = [0u8; 8];
         for i in 0..width {
@@ -672,6 +715,29 @@ mod tests {
         ctx.vmcs_setup()
             .set_field32(VmcsField32::GuestSsAccessRights, 0x93);
         ctx
+    }
+
+    #[test]
+    fn frame_translation_reuses_a_page_but_rewalks_at_a_noncontiguous_boundary() {
+        let mut ctx = context();
+        let v = ctx.vmcs_setup();
+        v.set_field_natural(VmcsFieldNatural::GuestCr0, 1 << 31);
+        v.set_field_natural(VmcsFieldNatural::GuestCr3, 0x3000);
+        v.write64(VmcsField64::GuestIa32Efer, 1 << 10).unwrap();
+        for (address, entry) in [
+            (0x3000, 0x4007u64),
+            (0x4000, 0x5007),
+            (0x5000, 0x6007),
+            (0x6008, 0x9007),
+            (0x6010, 0xb007),
+        ] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        let mut cached = None;
+        assert_eq!(physical_for_frame_byte(&ctx, 0x1ffe, &mut cached).unwrap().as_u64(), 0x9ffe);
+        assert_eq!(physical_for_frame_byte(&ctx, 0x1fff, &mut cached).unwrap().as_u64(), 0x9fff);
+        assert_eq!(physical_for_frame_byte(&ctx, 0x2000, &mut cached).unwrap().as_u64(), 0xb000);
+        assert_eq!(physical_for_frame_byte(&ctx, 0x2001, &mut cached).unwrap().as_u64(), 0xb001);
     }
 
     #[test]
