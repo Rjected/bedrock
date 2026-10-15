@@ -291,6 +291,11 @@ where
     // local so synthetic RF can never survive a return to userspace.
     let mut masked_retry_rip = None;
     let mut masked_retry_plan: Option<(super::InstructionBatch, u64, u64)> = None;
+    // A clock read does not change guest memory or translations. Reuse its
+    // global proof on the next entry. The code write guard is rearmed for
+    // every entry; a single-page execute grant may stay live between them.
+    let mut clock_retry_plan: Option<(super::InstructionBatch, u64, u64)> = None;
+    let mut held_clock_execute: Option<NptExecuteGuard> = None;
     if Ctx::V::uses_nested_paging() && !ctx.state().svm_host_memory_stable {
         // Userspace may have changed RAM between RUN calls.
         ctx.state_mut().svm_guard.valid = false;
@@ -316,10 +321,39 @@ where
         ctx.state_mut().svm_guard.gate_host_write_count = 0;
         ctx.state_mut().svm_guard.gate_host_write_all = false;
     }
-    let loop_result = loop {
+    let loop_result = (|| loop {
         let loop_start_tsc = rdtsc();
 
-        if Ctx::V::uses_nested_paging() {
+        // Host RAM writes can revoke a trusted page without changing the
+        // guarded hazard memo's code epoch. Never reuse an old page plan after
+        // consuming those writes, including plans with no retained grant.
+        if ctx.state().svm_guard.gate_host_write_all
+            || ctx.state().svm_guard.gate_host_write_count != 0
+        {
+            clock_retry_plan = None;
+        }
+
+        // An execute grant can span only consecutive clock exits on the same
+        // guarded page. Revoke it before any EPT/table refresh or host write
+        // can replace the leaf referenced by NptExecuteGuard.
+        if held_clock_execute.is_some() {
+            let still_guarded = clock_retry_plan.as_ref().is_some_and(|(_, epoch, generation)| {
+                ctx.state().svm_guard.gate_ready && !ctx.state().svm_guard.gate_dirty
+                    && !ctx.state().svm_guard.gate_host_write_all
+                    && ctx.state().svm_guard.gate_host_write_count == 0
+                    && ctx.state().svm_guard.code_epoch == *epoch
+                    && ctx.state().ept.mapping_generation() == *generation
+                    && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()
+                        .is_some_and(|root| root & 0x000f_ffff_ffff_f000
+                            == ctx.state().svm_guard.gate_root)
+            });
+            if !still_guarded {
+                held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
+                clock_retry_plan = None;
+            }
+        }
+
+        if Ctx::V::uses_nested_paging() && held_clock_execute.is_none() {
             if ctx.state().svm_guard.gate_host_write_all {
                 ctx.state_mut().ept.invalidate_all_npt_code(allocator);
                 ctx.state_mut().svm_guard.gate_dirty = true;
@@ -355,6 +389,16 @@ where
         ctx.sync_gprs_to_vmx_ctx();
 
         inject_pending_interrupt(ctx).map_err(VmRunError::ExitHandler)?;
+
+        // SVM software event delivery may write a COW stack frame. Release
+        // the old grant before prepare_instruction_exit can perform it.
+        if held_clock_execute.is_some()
+            && ctx.state().vmcs.read32(VmcsField32::VmEntryInterruptionInfo)
+                .ok().is_none_or(|info| info & (1 << 31) != 0)
+        {
+            held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
+            clock_retry_plan = None;
+        }
 
         // Interrupt preparation may stage an event in the full trace buffer.
         // Drain before entering the guest, or its next exit record is dropped.
@@ -424,6 +468,7 @@ where
             force_single_step = true;
         }
         let mut batch = None;
+        let mut reused_clock_plan = false;
         // A false address-mask hit retires no instruction at its RIP. The
         // guarded code and translation proofs remain valid, so reusing their
         // four-breakpoint plan avoids another alias walk before RF retry.
@@ -450,6 +495,41 @@ where
                 previous.instruction_budget = budget;
                 batch = Some(previous);
             }
+        }
+        if batch.is_none() {
+            if let (Some((mut previous, code_epoch, mapping_generation)), Some(window)) =
+                (clock_retry_plan.take(), instruction_window.as_ref())
+            {
+                let budget = super::super::exits::instruction_budget(ctx);
+                if !software_exit && !force_single_step && scalar_page.is_none()
+                    && previous.global_execution
+                    && budget > super::super::traits::InstructionBatch::COUNTER_DEADLINE_MARGIN
+                    && ctx.state().svm_guard.gate_ready && !ctx.state().svm_guard.gate_dirty
+                    && !ctx.state().svm_guard.gate_host_write_all
+                    && ctx.state().svm_guard.gate_host_write_count == 0
+                    && ctx.state().svm_guard.code_epoch == code_epoch
+                    && ctx.state().ept.mapping_generation() == mapping_generation
+                    && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()
+                        .is_some_and(|root| root & 0x000f_ffff_ffff_f000
+                            == ctx.state().svm_guard.gate_root)
+                    && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags).ok()
+                        .is_some_and(|flags| flags & ((1 << 8) | (1 << 16)) == 0)
+                    && !ctx.state().mtf_enabled && !ctx.state().svm_gate_pending_write
+                    && !super::super::exits::bounded_repeat_entry(&window.bytes)
+                    && previous.pages[..previous.code_page_count]
+                        .contains(&(window.physical.as_u64() & !4095))
+                {
+                    previous.instruction_budget = budget;
+                    if let Ok(start) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip) {
+                        previous.start = start;
+                        batch = Some(previous);
+                        reused_clock_plan = true;
+                    }
+                }
+            }
+        }
+        if held_clock_execute.is_some() && !reused_clock_plan {
+            held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
         }
         if Ctx::V::uses_nested_paging() && !software_exit && !force_single_step {
             let trusted_scalar = scalar_page.is_some_and(|page| {
@@ -495,6 +575,14 @@ where
             masked_retry_rip = None;
             masked_retry_plan = None;
         }
+        if held_clock_execute.is_some()
+            && !(reused_clock_plan
+                && batch.as_ref().is_some_and(|batch| {
+                    batch.global_execution && batch.code_page_count == 1
+                }))
+        {
+            held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
+        }
         let mut scalar_execute = if !software_exit {
             scalar_page
                 .map(|page| {
@@ -526,6 +614,9 @@ where
             super::super::exits::protect_instruction_batch(ctx, allocator, batch)
         });
         if batch.is_some() && guard.is_none() {
+            if let Some(execute) = held_clock_execute.take() {
+                execute.restore(&mut ctx.state_mut().ept, allocator);
+            }
             batch = None;
         }
         // A global batch has validated the current hazardous page's exact
@@ -538,9 +629,11 @@ where
                 .filter(|batch| batch.global_execution)
                 .map(|batch| batch.pages[0])
             {
-                let Some(execute) = ctx.state_mut().ept.allow_npt_execute_4k(
-                    allocator, GuestPhysAddr::new(page),
-                ) else {
+                let execute = held_clock_execute.take().or_else(||
+                    ctx.state_mut().ept.allow_npt_execute_4k(
+                        allocator, GuestPhysAddr::new(page),
+                    ));
+                let Some(execute) = execute else {
                     if let Some(guard) = guard {
                         guard.restore(ctx, allocator);
                     }
@@ -713,10 +806,18 @@ where
         for execute in paired_execute.into_iter().flatten() {
             execute.restore(&mut ctx.state_mut().ept, allocator);
         }
+        let has_scalar_next_execute = scalar_next_execute.is_some();
         if let Some(execute) = scalar_next_execute {
             execute.restore(&mut ctx.state_mut().ept, allocator);
         }
-        if let Some(execute) = scalar_execute {
+        let hold_clock_execute = run_result.is_ok()
+            && batch.as_ref().is_some_and(|batch| {
+                batch.global_execution && batch.code_page_count == 1
+            })
+            && matches!(ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(), Some(16 | 51))
+            && !force_single_step && masked_retry_rip.is_none()
+            && !has_scalar_next_execute;
+        if let Some(execute) = scalar_execute.take().filter(|_| !hold_clock_execute) {
             execute.restore(&mut ctx.state_mut().ept, allocator);
             let replay = ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
                 .ok().is_some_and(|qual| qual
@@ -845,7 +946,29 @@ where
         }
         match handle_exit(ctx, kernel, allocator) {
             ExitHandlerResult::Continue => {
+                clock_retry_plan = if matches!(
+                    ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(),
+                    Some(16 | 51)
+                ) && !force_single_step && masked_retry_rip.is_none()
+                {
+                    batch.filter(|batch| batch.global_execution).map(|batch| (
+                        batch,
+                        ctx.state().svm_guard.code_epoch,
+                        ctx.state().ept.mapping_generation(),
+                    ))
+                } else {
+                    None
+                };
                 ctx.finalize_exit_record(kernel);
+
+                let need_resched = kernel.need_resched();
+                if let Some(execute) = scalar_execute.take() {
+                    if clock_retry_plan.is_some() && !need_resched {
+                        held_clock_execute = Some(execute);
+                    } else {
+                        execute.restore(&mut ctx.state_mut().ept, allocator);
+                    }
+                }
 
                 let loop_end_tsc = rdtsc();
                 ctx.state_mut().exit_stats.total_run_cycles +=
@@ -853,12 +976,15 @@ where
 
                 // cond_resched() would need preemption (and could migrate the
                 // loaded VMCS); return to userspace to let the scheduler run.
-                if kernel.need_resched() {
+                if need_resched {
                     break Ok(ExitReason::NeedResched);
                 }
                 continue;
             }
             ExitHandlerResult::ExitToUserspace(reason) => {
+                if let Some(execute) = scalar_execute.take() {
+                    execute.restore(&mut ctx.state_mut().ept, allocator);
+                }
                 ctx.finalize_exit_record(machine.kernel());
 
                 let loop_end_tsc = rdtsc();
@@ -868,6 +994,9 @@ where
                 break Ok(reason);
             }
             ExitHandlerResult::Error(e) => {
+                if let Some(execute) = scalar_execute.take() {
+                    execute.restore(&mut ctx.state_mut().ept, allocator);
+                }
                 let loop_end_tsc = rdtsc();
                 ctx.state_mut().exit_stats.total_run_cycles +=
                     loop_end_tsc.saturating_sub(loop_start_tsc);
@@ -875,7 +1004,10 @@ where
                 break Err(VmRunError::ExitHandler(e));
             }
         }
-    };
+    })();
+    if let Some(execute) = held_clock_execute.take() {
+        execute.restore(&mut ctx.state_mut().ept, allocator);
+    }
 
     // Must run on the same CPU as `prepare`.
     let finish_result = ctx
