@@ -1491,6 +1491,8 @@ pub(crate) fn retain_translation_cache<C: VmContext>(
                     != 0;
                 long && (window.bytes.starts_with(&[0x0f, 0x31])
                     || window.bytes.starts_with(&[0x0f, 0x01, 0xf9])
+                    || (ctx.state().svm_pmc_clock_enabled
+                        && window.bytes.starts_with(&[0x0f, 0x33]))
                     || window.bytes.starts_with(&[0x0f, 0xa2])
                     || scalar_iret_preserves_guard(ctx, window)
                     || matches!(window.bytes[0], 0xc3 | 0x9d | 0xe4..=0xe7 | 0xec..=0xef)
@@ -6875,6 +6877,25 @@ mod tests {
         window.bytes[..3].copy_from_slice(&[0x0f, 0x22, 0xd8]);
         retain_translation_cache(&mut ctx, None, Some(&window), false);
         assert!(!ctx.state().svm_guard.valid);
+    }
+
+    #[test]
+    fn opted_in_rdpmc_retains_proofs_only_without_software_event_delivery() {
+        for enabled in [false, true] {
+            let mut ctx = paged_context(&[0x90]);
+            let mut window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            prepare(&mut ctx, true, true, &window).unwrap();
+            let code_count = ctx.state().svm_guard.code_count;
+            ctx.state_mut().svm_pmc_clock_enabled = enabled;
+            window.bytes[..2].copy_from_slice(&[0x0f, 0x33]);
+            retain_translation_cache(&mut ctx, None, Some(&window), false);
+            assert_eq!(ctx.state().svm_guard.valid, enabled);
+            if enabled {
+                assert_eq!(ctx.state().svm_guard.code_count, code_count);
+                retain_translation_cache(&mut ctx, None, Some(&window), true);
+                assert!(!ctx.state().svm_guard.valid);
+            }
+        }
     }
 
     #[test]
