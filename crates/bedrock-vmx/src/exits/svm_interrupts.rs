@@ -10,12 +10,14 @@ use super::svm::{physical, physical_for_frame_byte, write_contiguous_guest_bytes
 use crate::prelude::*;
 
 fn read<C: VmContext>(ctx: &C, linear: u64, bytes: &mut [u8]) -> Result<(), ExitError> {
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        ctx.read_guest_memory(
-            physical(ctx, linear.wrapping_add(i as u64))?,
-            core::slice::from_mut(byte),
-        )
-        .map_err(|_| ExitError::Fatal("SVM event state is not readable"))?;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let current = linear.wrapping_add(offset as u64);
+        let address = physical(ctx, current)?;
+        let span = (bytes.len() - offset).min(4096 - (current & 4095) as usize);
+        ctx.read_guest_memory(address, &mut bytes[offset..offset + span])
+            .map_err(|_| ExitError::Fatal("SVM event state is not readable"))?;
+        offset += span;
     }
     Ok(())
 }
@@ -343,6 +345,29 @@ mod tests {
     use super::*;
     use crate::test_mocks::MockFrameAllocator;
     use crate::tests::MockVmContext;
+
+    #[test]
+    fn event_read_crosses_noncontiguous_guest_pages() {
+        let mut ctx = MockVmContext::new();
+        let v = ctx.vmcs_setup();
+        v.set_field_natural(VmcsFieldNatural::GuestCr0, 1 << 31);
+        v.set_field_natural(VmcsFieldNatural::GuestCr3, 0x3000);
+        v.write64(VmcsField64::GuestIa32Efer, 1 << 10).unwrap();
+        for (address, entry) in [
+            (0x3000, 0x4007u64),
+            (0x4000, 0x5007),
+            (0x5000, 0x6007),
+            (0x6008, 0x9007),
+            (0x6010, 0xb007),
+        ] {
+            ctx.memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        ctx.memory[0x9ffe..0xa000].copy_from_slice(&[1, 2]);
+        ctx.memory[0xb000..0xb002].copy_from_slice(&[3, 4]);
+        let mut bytes = [0; 4];
+        read(&ctx, 0x1ffe, &mut bytes).unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4]);
+    }
 
     #[test]
     fn real_mode_irq_saves_logical_flags_without_retiring_an_instruction() {
