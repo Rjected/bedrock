@@ -182,6 +182,16 @@ pub(crate) unsafe fn run(
     }
     v.write(o::RAX, 8, ctx.guest_rax);
     v.write(o::CR2, 8, ctx.guest_cr2);
+    let pmc_clock = ctx.svm_pmc_clock_enabled != 0;
+    // CR4.PCE grants CPL3 access to *all* PMCs, including the deadline PMC0.
+    // Intercept every guest CR4 write and refuse entry if userspace set PCE.
+    if pmc_clock && v.read(o::CR4, 8) & (1 << 8) != 0 {
+        return Err(VmEntryError::VmEntryFailed);
+    }
+    if pmc_clock && ctx.svm_pmc_clock_access_configured == 0 {
+        v.configure_pmc_clock_access(true);
+        ctx.svm_pmc_clock_access_configured = 1;
+    }
     let entry_rip = v.read(o::RIP, 8);
     let original_tf = v.read(o::RFLAGS, 8) & (1 << 8);
     let original_dr7 = v.read(o::DR7, 8);
@@ -230,6 +240,9 @@ pub(crate) unsafe fn run(
     let host_pa = unsafe { c_helpers::bedrock_svm_host_vmcb() };
     let counting = batch.is_some_and(|b| b.uses_counter);
     let pmu_mask = unsafe { c_helpers::bedrock_svm_pmu_mask() };
+    if pmc_clock && pmu_mask == 0 {
+        return Err(VmEntryError::VmEntryFailed);
+    }
     let counter = if let Some(batch) = batch.filter(|b| b.uses_counter) {
         let mut host_count = 0;
         if pmu_mask == 0
@@ -250,7 +263,7 @@ pub(crate) unsafe fn run(
     let uncounted_virt_ext = (pmu_mask != 0 && !counting).then(|| PmcEntry::disarm(v));
     // Diagnostic: PMC1 tracks virtual instruction time across counted and
     // scalar entries while PMC0 continues to control exact deadlines.
-    if pmu_mask != 0 {
+    if pmc_clock && pmu_mask != 0 {
         v.write(o::VIRT_EXT, 8, v.read(o::VIRT_EXT, 8) | (1 << 3));
         v.write(o::PERF_CTL0 + 16, 8, 0x4300c0);
         v.write(o::PERF_CTR0 + 16, 8, ctx.svm_clock_base & ((1 << 48) - 1));

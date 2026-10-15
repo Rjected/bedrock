@@ -916,6 +916,23 @@ impl Vm {
 
     // --- Execution control ---
 
+    /// Enable the patched AMD guest kernel's PMC1 clock on this VM.
+    /// The guest must keep CR4.PCE clear so userspace cannot read PMC0.
+    pub fn enable_svm_pmc_clock(&self) -> io::Result<()> {
+        let value = 1u64;
+        let ret = unsafe {
+            libc::ioctl(
+                self.fd.as_raw_fd(),
+                BEDROCK_VM_ENABLE_SVM_PMC_CLOCK as libc::c_ulong,
+                &value as *const u64,
+            )
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Set the TSC value at which the VM should stop.
     pub fn set_stop_at_tsc(&self, tsc: Option<u64>) -> io::Result<()> {
         let value = tsc.unwrap_or(0);
