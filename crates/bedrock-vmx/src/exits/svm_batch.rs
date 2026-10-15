@@ -2217,6 +2217,62 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     if budget <= InstructionBatch::COUNTER_DEADLINE_MARGIN {
         return None;
     }
+    let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
+        & 0x000f_ffff_ffff_f000;
+    let recent = ctx.state().svm_recent_pages;
+    let current_linear = window.linear & !4095;
+    let predicted = predicted_second_successor(
+        &ctx.state().svm_guard, root, recent[1], current_linear,
+    ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
+    let mapping_generation = ctx.state().ept.mapping_generation();
+    let cache = &ctx.state().svm_guard;
+    if cache.global_plan.valid
+        && cache.global_plan_linear == window.linear
+        && cache.global_plan_root == root
+        && cache.global_plan_predicted == predicted.unwrap_or(u64::MAX)
+        && cache.global_plan.code_epoch == cache.code_epoch
+        && cache.global_plan.tree_generation == cache.tree_generation
+        && cache.global_plan_mapping_generation == mapping_generation
+        && cache.global_plan_trusted_code_generation
+            == ctx.state().ept.trusted_code_generation()
+        && cache.global_plan_recent == recent
+        && cache.gate_root == root
+        && !cache.gate_host_write_all && cache.gate_host_write_count == 0
+    {
+        // SAFETY: valid is published only after the complete batch is saved.
+        let cached = unsafe { cache.global_plan.batch.assume_init_ref() };
+        if cached.global_execution && cached.start
+            == ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?
+            && cached.pages[0] == page
+            && cached.pages[..cached.code_page_count].iter().all(|&physical| {
+                if ctx.state().ept.npt_trusted_code_4k(
+                    allocator, GuestPhysAddr::new(physical)) {
+                    return true;
+                }
+                let (_, Some(index)) = hazard_memo_lookup(ctx, physical) else {
+                    return false;
+                };
+                let memo = &ctx.state().svm_guard.hazard_memos[index];
+                if !memo.valid || !memo.guarded || memo.rejected
+                    || memo.guarded_mapping_generation != mapping_generation {
+                    return false;
+                }
+                let hazard = PageHazards {
+                    boundary: memo.proof.boundary,
+                    boundary_guarded: memo.proof.boundary_guarded,
+                    edge: memo.proof.edge,
+                    offsets: memo.proof.offsets,
+                    count: memo.proof.count,
+                };
+                cached_single_page_alias_proof(ctx, root, physical, &hazard).is_some()
+            })
+        {
+            let mut batch = *cached;
+            batch.instruction_budget = budget;
+            *output = Some(batch);
+            return Some(());
+        }
+    }
     *output = Some(InstructionBatch {
         start: ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?,
         offsets: [0; 65],
@@ -2298,15 +2354,8 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // hazardous pages without an execute fault when all executable
         // aliases fit the four hardware breakpoints. Each admitted page must
         // also be safe at a boundary with every other admitted page.
-        let current_linear = window.linear & !4095;
-        let recent = ctx.state().svm_recent_pages;
         let mut hazards = [hazard; 4];
         let mut hazard_count = hazard.count;
-        let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
-            & 0x000f_ffff_ffff_f000;
-        let predicted = predicted_second_successor(
-            &ctx.state().svm_guard, root, recent[1], current_linear,
-        ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
         // Older code pages rarely earn their repeated screening cost. An
         // omitted page remains NX and traps before it can execute.
         for previous_linear in predicted.into_iter().chain(recent.into_iter().take(4)) {
@@ -2385,13 +2434,6 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // its independently cached alias proof fits those free slots. The
         // trusted-page proof excludes unsafe suffixes; the successor's
         // guarded boundary covers the reverse join.
-        let current_linear = window.linear & !4095;
-        let recent = ctx.state().svm_recent_pages;
-        let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
-            & 0x000f_ffff_ffff_f000;
-        let predicted = predicted_second_successor(
-            &ctx.state().svm_guard, root, recent[1], current_linear,
-        ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
         if let Some(linear) = predicted.filter(|&linear| linear != current_linear) {
             if let Some(physical) = cached_code_translation(ctx, linear) {
                 if physical != page
@@ -2421,6 +2463,20 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
     }
+    let mapping_generation = ctx.state().ept.mapping_generation();
+    let trusted_code_generation = ctx.state().ept.trusted_code_generation();
+    let cache = &mut ctx.state_mut().svm_guard;
+    cache.global_plan.valid = false;
+    cache.global_plan_linear = window.linear;
+    cache.global_plan_root = root;
+    cache.global_plan_predicted = predicted.unwrap_or(u64::MAX);
+    cache.global_plan.code_epoch = cache.code_epoch;
+    cache.global_plan.tree_generation = cache.tree_generation;
+    cache.global_plan_mapping_generation = mapping_generation;
+    cache.global_plan_trusted_code_generation = trusted_code_generation;
+    cache.global_plan_recent = recent;
+    cache.global_plan.batch.write(*batch);
+    cache.global_plan.valid = true;
     Some(())
 }
 
