@@ -640,7 +640,9 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
             && guard.retained_mapping_generation == ctx.state().ept.mapping_generation()
             && guard.gate_guards[..guard.gate_count].iter().all(|saved| saved.valid)
     };
-    let scratch = &mut ctx.state_mut().svm_guard;
+    let mapping_generation = ctx.state().ept.mapping_generation();
+    let scratch: &mut super::super::vm_state::SvmGuardScratch =
+        &mut ctx.state_mut().svm_guard;
     scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
     scratch.gate_leaf_filter_valid.fill(false);
     if (!scratch.gate_ready || scratch.gate_dirty || scratch.gate_root != root)
@@ -652,6 +654,43 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     scratch.translation_count = 0;
     scratch.translation_cursor = 0;
     scratch.root = root;
+    // A guarded inactive root cannot change its child links without a
+    // trapped table write. A host write, remap, or guard release revokes the
+    // snapshot before this point. Keep the same proof invalidation above as
+    // a fresh tree walk would perform.
+    let cache_slot = scratch.root_tree_cache.iter().position(|cached| {
+        cached.valid && cached.root == root
+            && cached.guard_epoch == scratch.root_tree_guard_epoch
+            && cached.mapping_generation == mapping_generation
+            && !code_pages.iter().any(|page| cached.tables[..cached.count].contains(page))
+    });
+    #[cfg(not(feature = "cargo"))]
+    {
+        use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        static PROBES: AtomicU64 = AtomicU64::new(0);
+        static HITS: AtomicU64 = AtomicU64::new(0);
+        HITS.fetch_add(u64::from(cache_slot.is_some()), Relaxed);
+        let probes = PROBES.fetch_add(1, Relaxed) + 1;
+        if probes % 50_000 == 0 {
+            kernel::pr_info!("AMD ROOT CACHE probes={} hits={}\n", probes, HITS.load(Relaxed));
+        }
+    }
+    if let Some(slot) = cache_slot {
+        let cached = &scratch.root_tree_cache[slot];
+        let count = cached.count;
+        let upper_count = cached.upper_count;
+        scratch.tables[..count].copy_from_slice(&cached.tables[..count]);
+        scratch.levels[..count].copy_from_slice(&cached.levels[..count]);
+        scratch.table_index.copy_from_slice(&cached.table_index);
+        scratch.children[..count].copy_from_slice(&cached.children[..count]);
+        scratch.upper_starts[..count].copy_from_slice(&cached.upper_starts[..count]);
+        scratch.upper_lengths[..count].copy_from_slice(&cached.upper_lengths[..count]);
+        scratch.upper_edges[..upper_count].copy_from_slice(&cached.upper_edges[..upper_count]);
+        scratch.count = count;
+        scratch.upper_count = upper_count;
+        scratch.valid = true;
+        return Some(());
+    }
     scratch.tables[0] = root;
     scratch.levels[0] = 4;
     scratch.count = 1;
@@ -756,6 +795,11 @@ fn restore_global_table_guards<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &A,
 ) {
+    let guard = &mut ctx.state_mut().svm_guard;
+    guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
+    if guard.root_tree_guard_epoch == 0 {
+        for entry in &mut guard.root_tree_cache { entry.valid = false; }
+    }
     let count = ctx.state().svm_guard.gate_count;
     for index in 0..count {
         let saved = ctx.state().svm_guard.gate_guards[index];
@@ -851,6 +895,43 @@ fn forget_active_global_tree<C: VmContext>(ctx: &mut C) {
     guard.gate_dirty = false;
     guard.gate_links_untrusted = true;
     clear_leaf_snapshots(guard);
+}
+
+fn cache_guarded_root_tree<C: VmContext>(ctx: &mut C, incoming_root: u64,
+    mapping_generation: u64) {
+    let guard: &mut super::super::vm_state::SvmGuardScratch =
+        &mut ctx.state_mut().svm_guard;
+    if !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted
+        || !guard.gate_table_index_valid || guard.gate_count == 0
+        || guard.gate_mapping_generation != mapping_generation
+        || guard.gate_guards[..guard.gate_count].iter().any(|saved| !saved.valid)
+    {
+        return;
+    }
+    let slot = guard.root_tree_cache.iter().position(|entry| {
+        entry.valid && entry.root == guard.gate_root
+    }).or_else(|| guard.root_tree_cache.iter().position(|entry| !entry.valid))
+        .unwrap_or_else(|| {
+            let next = guard.root_tree_cache_next & 1;
+            if guard.root_tree_cache[next].root == incoming_root { next ^ 1 } else { next }
+        });
+    guard.root_tree_cache_next = (slot + 1) & 1;
+    let snapshot = &mut guard.root_tree_cache[slot];
+    snapshot.valid = false;
+    snapshot.root = guard.gate_root;
+    snapshot.mapping_generation = mapping_generation;
+    snapshot.guard_epoch = guard.root_tree_guard_epoch;
+    snapshot.count = guard.gate_count;
+    snapshot.upper_count = guard.gate_upper_count;
+    snapshot.tables[..guard.gate_count].copy_from_slice(&guard.gate_tables[..guard.gate_count]);
+    snapshot.levels[..guard.gate_count].copy_from_slice(&guard.gate_levels[..guard.gate_count]);
+    snapshot.table_index.copy_from_slice(&guard.gate_table_index);
+    snapshot.children[..guard.gate_count].copy_from_slice(&guard.gate_children[..guard.gate_count]);
+    snapshot.upper_starts[..guard.gate_count].copy_from_slice(&guard.gate_upper_starts[..guard.gate_count]);
+    snapshot.upper_lengths[..guard.gate_count].copy_from_slice(&guard.gate_upper_lengths[..guard.gate_count]);
+    snapshot.upper_edges[..guard.gate_upper_count]
+        .copy_from_slice(&guard.gate_upper_edges[..guard.gate_upper_count]);
+    snapshot.valid = true;
 }
 
 fn can_refresh_leaf_only(
@@ -1076,6 +1157,13 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     allocator: &A,
     can_guard_page_tables: bool,
 ) {
+    if ctx.state().svm_guard.gate_dirty || ctx.state().svm_guard.gate_links_untrusted {
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
+        if guard.root_tree_guard_epoch == 0 {
+            for entry in &mut guard.root_tree_cache { entry.valid = false; }
+        }
+    }
     if !can_guard_page_tables {
         ctx.state_mut().svm_guard.gate_disabled_no_rogpt = true;
         if !ctx.state().svm_guard.gate_ready
@@ -1196,6 +1284,10 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
     }
     ctx.state_mut().svm_guard.valid = false;
+    if ctx.state().svm_guard.gate_root != root {
+        let mapping_generation = ctx.state().ept.mapping_generation();
+        cache_guarded_root_tree(ctx, root, mapping_generation);
+    }
     let mut retained = alias_proofs_safe_across_rebuild(ctx, root);
     if retained.is_none() {
         // A released table in the old root is no longer write-protected.
@@ -1318,6 +1410,11 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
     let Some(index) = retained_guard_for(&ctx.state().svm_guard, page) else {
         return false;
     };
+    let guard = &mut ctx.state_mut().svm_guard;
+    guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
+    if guard.root_tree_guard_epoch == 0 {
+        for entry in &mut guard.root_tree_cache { entry.valid = false; }
+    }
     let saved = ctx.state().svm_guard.retained_guards[index];
     ctx.state_mut().svm_guard.invalidate_leaf_filter(page);
     saved.write_guard.restore(&mut ctx.state_mut().ept, allocator);
@@ -6186,6 +6283,42 @@ mod tests {
         ctx.state_mut().svm_guard.valid = false;
         collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
         assert_eq!(ctx.state().svm_guard.levels[0], 4); // Rewalked.
+    }
+
+    #[test]
+    fn guarded_root_snapshot_reuses_links_and_expires_on_write_epoch() {
+        let mut ctx = paged_context(&[0x90]);
+        let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).unwrap()
+            & 0x000f_ffff_ffff_f000;
+        let mapping_generation = ctx.state().ept.mapping_generation();
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.gate_root = root;
+        guard.gate_ready = true;
+        guard.gate_links_untrusted = false;
+        guard.gate_table_index_valid = true;
+        guard.gate_mapping_generation = mapping_generation;
+        guard.gate_count = 1;
+        guard.gate_tables[0] = root;
+        guard.gate_levels[0] = 4;
+        guard.gate_children[0][0] = 0xdead_beef;
+        guard.gate_guards[0].valid = true;
+        cache_guarded_root_tree(&mut ctx, root + 4096, mapping_generation);
+        assert!(ctx.state().svm_guard.root_tree_cache[0].valid);
+
+        // Simulate a switch away and back while the retained guard remains
+        // active. The marker is absent from guest memory, so it identifies a
+        // reused snapshot rather than a fresh table walk.
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.valid = false;
+        guard.gate_root = root + 4096;
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        assert_eq!(ctx.state().svm_guard.children[0][0], 0xdead_beef);
+
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.valid = false;
+        guard.note_gate_host_write(root, 8);
+        assert!(collect_translation_tree_pages(&mut ctx, &[]).is_none());
+        assert_eq!(ctx.state().svm_guard.children[0][0], 0);
     }
 
     #[test]

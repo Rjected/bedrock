@@ -49,6 +49,24 @@ pub(crate) struct SvmAliasEdge {
     pub entry: u64,
 }
 
+/// A guarded translation tree for a recently inactive guest CR3. Its child
+/// links are reusable only while every retained table guard remains live.
+pub(crate) struct SvmRootTreeSnapshot {
+    pub valid: bool,
+    pub root: u64,
+    pub mapping_generation: u64,
+    pub guard_epoch: u64,
+    pub count: usize,
+    pub upper_count: usize,
+    pub tables: [u64; SVM_TABLE_CAPACITY],
+    pub levels: [u8; SVM_TABLE_CAPACITY],
+    pub table_index: [u16; SVM_TABLE_INDEX_CAPACITY],
+    pub children: [[u64; SVM_TABLE_WORDS]; SVM_TABLE_CAPACITY],
+    pub upper_edges: [SvmAliasEdge; SVM_ALIAS_EDGE_CAPACITY],
+    pub upper_starts: [u16; SVM_TABLE_CAPACITY],
+    pub upper_lengths: [u16; SVM_TABLE_CAPACITY],
+}
+
 /// Preallocated AMD guard workspace. Planning and permission restoration run
 /// with IRQs disabled and must neither allocate nor grow the kernel stack.
 pub(crate) struct SvmGuardScratch {
@@ -121,6 +139,11 @@ pub(crate) struct SvmGuardScratch {
     pub gate_host_write_count: usize,
     pub gate_host_write_all: bool,
     pub gate_tables: [u64; SVM_TABLE_CAPACITY],
+    /// Two recent guarded roots avoid rewalking immutable page tables when
+    /// Linux switches back without any table write or host remap.
+    pub root_tree_cache: [SvmRootTreeSnapshot; 2],
+    pub root_tree_cache_next: usize,
+    pub root_tree_guard_epoch: u64,
     /// One-based indices into the active guarded tree. Built only after all
     /// table pages are installed; an invalid index falls back to a full scan.
     pub gate_table_index: [u16; SVM_TABLE_INDEX_CAPACITY],
@@ -206,6 +229,12 @@ impl SvmGuardScratch {
     pub fn note_gate_host_write(&mut self, guest: u64, len: usize) {
         if len == 0 {
             return;
+        }
+        // Host writes bypass NPT, so an inactive-root child-link snapshot
+        // cannot remain proven even when the current tree is unaffected.
+        self.root_tree_guard_epoch = self.root_tree_guard_epoch.wrapping_add(1);
+        if self.root_tree_guard_epoch == 0 {
+            for entry in &mut self.root_tree_cache { entry.valid = false; }
         }
         let Some(last) = guest.checked_add(len as u64 - 1) else {
             self.gate_host_write_all = true;
