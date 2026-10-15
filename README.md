@@ -835,6 +835,18 @@ offset was outside its hottest sampled RIPs. Thus the immediate problem on
 those pages is repeated fetch exclusion at page transitions, not an excess of
 hazards on one page. The follow-up shortened workload passed; no diagnostic
 instrumentation was merged.
+On another EPYC 4245P box, a shortened workload probe found that global
+entries selected one, two, three, or four code pages in roughly 38%, 40%,
+15%, and 7% of entries respectively. None of nine million measured fetch
+faults targeted a page in the active selection: the NPT grants worked, but
+the destination was outside the four-slot guard. One frequent transition
+needed two breakpoints on its source page and four on the destination. A
+general trial compressed nearby destination breakpoints into at most 128-byte
+masks so both pages could fit, with unit coverage for every original hazard.
+The in-box SVM suite and exact 180-virtual-second DST campaign passed, but
+the full run took 201 host seconds against 198 seconds for the unchanged
+branch on that box. The trial was not merged; fewer fetch faults did not
+produce a wall-time gain.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
