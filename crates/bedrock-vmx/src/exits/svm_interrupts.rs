@@ -5,7 +5,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::helpers::{ExitError, ExitHandlerResult};
-use super::svm::physical;
+use super::svm::{physical, write_contiguous_guest_bytes};
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
@@ -51,10 +51,8 @@ fn write_frame<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
     }
-    for (i, byte) in bytes.iter().enumerate() {
-        ctx.write_guest_memory(addresses[i], core::slice::from_ref(byte))
-            .map_err(|_| ExitError::Fatal("SVM event stack write failed"))?;
-    }
+    write_contiguous_guest_bytes(ctx, &addresses[..bytes.len()], bytes)
+        .map_err(|_| ExitError::Fatal("SVM event stack write failed"))?;
     Ok(true)
 }
 

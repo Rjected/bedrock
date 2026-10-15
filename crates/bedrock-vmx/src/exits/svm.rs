@@ -8,6 +8,30 @@ use crate::prelude::*;
 
 use super::helpers::{advance_rip, ExitError, ExitHandlerResult};
 
+/// Keep the bytewise translation and COW checks, but submit each physically
+/// contiguous span as one host write. This preserves segmented stack wrapping
+/// and page aliases while avoiding a guard invalidation for every byte.
+pub(super) fn write_contiguous_guest_bytes<C: VmContext>(
+    ctx: &mut C,
+    addresses: &[GuestPhysAddr],
+    bytes: &[u8],
+) -> Result<(), MemoryError> {
+    debug_assert_eq!(addresses.len(), bytes.len());
+    let mut start = 0;
+    while start < bytes.len() {
+        let mut end = start + 1;
+        while end < bytes.len()
+            && addresses[end - 1].as_u64().checked_add(1) == Some(addresses[end].as_u64())
+            && addresses[end].as_u64() & !4095 == addresses[start].as_u64() & !4095
+        {
+            end += 1;
+        }
+        ctx.write_guest_memory(addresses[start], &bytes[start..end])?;
+        start = end;
+    }
+    Ok(())
+}
+
 pub(super) fn physical<C: VmContext>(ctx: &C, linear: u64) -> Result<GuestPhysAddr, ExitError> {
     let cr0 = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr0)?;
     if cr0 & (1 << 31) == 0 {
@@ -599,10 +623,8 @@ fn emulate<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
         }
         let bytes = (flags & !((1 << 16) | (1 << 17))).to_le_bytes();
-        for i in 0..width {
-            ctx.write_guest_memory(addresses[i], &bytes[i..i + 1])
-                .map_err(|_| ExitError::Fatal("SVM PUSHF stack write failed"))?;
-        }
+        write_contiguous_guest_bytes(ctx, &addresses[..width], &bytes[..width])
+            .map_err(|_| ExitError::Fatal("SVM PUSHF stack write failed"))?;
     } else {
         let mut bytes = [0u8; 8];
         for i in 0..width {
