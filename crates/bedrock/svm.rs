@@ -276,9 +276,17 @@ pub(crate) unsafe fn run(
             counter.allow_native_pushf(v);
         }
     }
-    let asid = unsafe { c_helpers::bedrock_svm_next_asid() };
-    v.write(o::ASID, 4, asid as u32 as u64);
-    v.write(o::TLB_CONTROL, 1, asid >> 32);
+    // The run loop may rearm an unchanged one-page NPT guard after a clock
+    // exit without returning to userspace or changing CPUs. In that narrow
+    // case no guest-visible NPT permission changed, so its prior ASID still
+    // names valid translations. Every other entry gets a fresh ASID.
+    if ctx.svm_reuse_asid != 0 && v.read(o::ASID, 4) != 0 {
+        v.write(o::TLB_CONTROL, 1, 0);
+    } else {
+        let asid = unsafe { c_helpers::bedrock_svm_next_asid() };
+        v.write(o::ASID, 4, asid as u32 as u64);
+        v.write(o::TLB_CONTROL, 1, asid >> 32);
+    }
     unsafe {
         // Pass the virtual pointer as well as the physical address: VMRUN
         // modifies this allocation, which the compiler must see at the FFI

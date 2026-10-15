@@ -624,15 +624,20 @@ where
         // for this interval even without an earlier execute-fault marker.
         // Wait until protection succeeds so a rejected batch cannot grant
         // permission to an unvalidated scalar entry.
+        let mut reused_execute_grant = false;
         if scalar_execute.is_none() {
             if let Some(page) = batch.as_ref()
                 .filter(|batch| batch.global_execution)
                 .map(|batch| batch.pages[0])
             {
-                let execute = held_clock_execute.take().or_else(||
+                let execute = if let Some(held) = held_clock_execute.take() {
+                    reused_execute_grant = true;
+                    Some(held)
+                } else {
                     ctx.state_mut().ept.allow_npt_execute_4k(
                         allocator, GuestPhysAddr::new(page),
-                    ));
+                    )
+                };
                 let Some(execute) = execute else {
                     if let Some(guard) = guard {
                         guard.restore(ctx, allocator);
@@ -691,6 +696,8 @@ where
         let state = ctx.state_mut();
         state.vmx_ctx.svm_clock_base = state.last_instruction_count.wrapping_add(state.tsc_offset);
         state.vmx_ctx.svm_pmc_clock_enabled = u64::from(state.svm_pmc_clock_enabled);
+        state.vmx_ctx.svm_reuse_asid = u64::from(reused_execute_grant
+            && reused_clock_plan && !software_exit && !arm_masked_retry);
         state.vmx_ctx.svm_entry_repeat = u64::from(
             batch.is_none()
                 && instruction_window.as_ref().is_some_and(|window| {
