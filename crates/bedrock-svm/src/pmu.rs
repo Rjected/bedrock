@@ -86,9 +86,12 @@ impl PmcEntry {
         // Retired instructions, all guest privilege levels, enable + interrupt.
         v.write(o::PERF_CTL0, 8, 0x5300c0);
         v.write(o::PERF_CTR0, 8, 0u64.wrapping_sub(period) & ((1 << 48) - 1));
+        // Independent guest-readable virtual clock counter.
+        v.write(o::PERF_CTL0 + 16, 8, 0x4300c0);
+        v.write(o::PERF_CTR0 + 16, 8, 0);
         v.write(o::INSTR_RETIRED_CTR, 8, 0);
         v.write(o::PERF_GLOBAL_STATUS, 8, 0);
-        v.write(o::PERF_GLOBAL_CONTROL, 8, 1);
+        v.write(o::PERF_GLOBAL_CONTROL, 8, 3);
         Some(saved)
     }
 
@@ -171,7 +174,7 @@ mod tests {
         v.initialize();
         let counted = PmcEntry::prepare(&mut v, 100).unwrap();
         assert_ne!(v.read(o::PERF_CTL0, 8), 0);
-        assert_eq!(v.read(o::PERF_GLOBAL_CONTROL, 8), 1);
+        assert_eq!(v.read(o::PERF_GLOBAL_CONTROL, 8), 3);
         v.write(o::INSTR_RETIRED_CTR, 8, 2);
         v.write(o::EXIT_CODE, 8, 0x400);
         counted.finish(&mut v);

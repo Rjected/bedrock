@@ -1,0 +1,58 @@
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -54,6 +54,16 @@
+ 
+ static int __read_mostly tsc_force_recalibrate;
+ 
++/* Bedrock supplies virtual retired-instruction ticks in AMD PMC1. */
++static bool __read_mostly bedrock_pmc_clock;
++
++static int __init bedrock_pmc_clock_setup(char *arg)
++{
++	bedrock_pmc_clock = true;
++	return 0;
++}
++early_param("bedrock_pmc_clock", bedrock_pmc_clock_setup);
++
+ static struct clocksource_base art_base_clk = {
+ 	.id    = CSID_X86_ART,
+ };
+@@ -1131,6 +1141,12 @@
+  */
+ static u64 read_tsc(struct clocksource *cs)
+ {
++	if (unlikely(bedrock_pmc_clock)) {
++		u32 low, high;
++
++		asm volatile("rdpmc" : "=a" (low), "=d" (high) : "c" (1));
++		return ((u64)(high & 0xffff) << 32) | low;
++	}
+ 	return (u64)rdtsc_ordered();
+ }
+ 
+@@ -1157,7 +1173,8 @@
+ 
+ static int tsc_cs_enable(struct clocksource *cs)
+ {
+-	vclocks_set_used(VDSO_CLOCKMODE_TSC);
++	if (!bedrock_pmc_clock)
++		vclocks_set_used(VDSO_CLOCKMODE_TSC);
+ 	return 0;
+ }
+ 
+@@ -1565,6 +1582,15 @@
+ 	if (tsc_clocksource_reliable || no_tsc_watchdog)
+ 		tsc_disable_clocksource_watchdog();
+ 
++	if (bedrock_pmc_clock) {
++		/* RDPMC exposes 48 bits. Keep userspace on the syscall path so
++		 * CPL3 cannot read the deadline counter in PMC0.
++		 */
++		clocksource_tsc_early.mask = CLOCKSOURCE_MASK(48);
++		clocksource_tsc_early.vdso_clock_mode = VDSO_CLOCKMODE_NONE;
++		clocksource_tsc.mask = CLOCKSOURCE_MASK(48);
++		clocksource_tsc.vdso_clock_mode = VDSO_CLOCKMODE_NONE;
++	}
+ 	clocksource_register_khz(&clocksource_tsc_early, tsc_khz);
+ 	detect_art();
+ }

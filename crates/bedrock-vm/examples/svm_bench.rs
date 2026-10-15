@@ -15,6 +15,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 2 && args[1] == "native" {
         return native_loop_comparison(false);
     }
+    if args.len() == 2 && args[1] == "guest-rdpmc" {
+        return test_guest_rdpmc(false, 0, false, false);
+    }
+    if args.len() == 2 && args[1] == "guest-rdpmc-user" {
+        return test_guest_rdpmc(true, 0, false, false);
+    }
+    if args.len() == 2 && args[1] == "guest-rdpmc-1" {
+        return test_guest_rdpmc(false, 1, false, false);
+    }
+    if args.len() == 2 && args[1] == "guest-rdpmc-user-1" {
+        return test_guest_rdpmc(true, 1, false, false);
+    }
+    if args.len() == 2 && args[1] == "guest-rdpmc-cross-1" {
+        return test_guest_rdpmc(false, 1, true, false);
+    }
+    if args.len() == 2 && args[1] == "guest-rdpmc-fork-1" {
+        return test_guest_rdpmc(false, 1, true, true);
+    }
     if args.len() == 2 && args[1] == "native-branches" {
         return native_loop_comparison(true);
     }
@@ -157,6 +175,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(stopped);
         let seconds = start.elapsed().as_secs_f64();
         println!("SVM_BENCH_PASS instructions={EXPECTED} seconds={seconds:.6} instructions_per_second={:.0}", EXPECTED as f64 / seconds);
+        break;
+    }
+    Ok(())
+}
+
+fn test_guest_rdpmc(user: bool, counter: u32, cross: bool, fork: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        vm.memory_mut()?[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    // ECX selects the PMC; RDPMC; save low counter; 32 NOPs; RDPMC; subtract first read;
+    // retain delta in ESI; VMMCALL. This runs at guest CPL 0.
+    let mut code = vec![0xb9];
+    code.extend(counter.to_le_bytes());
+    code.extend([0x0f, 0x33, 0x89, 0xc3]);
+    code.extend([0x90; 32]);
+    if cross { code.extend([0x0f, 0x31]); }
+    code.extend([0x0f, 0x33, 0x29, 0xd8, 0x89, 0xc6, 0x31, 0xc0, 0x0f, 0x01, 0xd9]);
+    vm.memory_mut()?[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut regs = Regs::long_mode();
+    if user {
+        regs.control_regs.cr4 = Cr4::new((1 << 5) | (1 << 8)); // PAE | PCE
+        regs.segment_regs.cs = SegmentRegister::new(0x1b, 0xa0fb, u32::MAX, 0);
+        regs.segment_regs.ss = SegmentRegister::new(0x23, 0xc0f3, u32::MAX, 0);
+    }
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.rflags = 0x203;
+    regs.gprs.rsp = 0x8000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(if fork { 20 } else { 1000 }))?;
+    vm.seal_memory()?;
+    if fork {
+        loop {
+            let exit = vm.run()?;
+            if exit.exit_reason == 256 { continue; }
+            assert_eq!(exit.exit_reason, 259);
+            assert_eq!(exit.emulated_tsc, 20);
+            assert!((0x1000..0x1040).contains(&vm.get_regs()?.rip));
+            break;
+        }
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let child = vm.fork()?;
+            child.set_stop_at_tsc(None)?;
+            loop {
+                let exit = child.run()?;
+                if exit.exit_reason == 256 { continue; }
+                assert_eq!(exit.exit_reason, 258);
+                let regs = child.get_regs()?;
+                results.push((exit.emulated_tsc, regs.gprs.rsi & 0xffff_ffff,
+                    regs.gprs.rbx & 0xffff_ffff));
+                break;
+            }
+        }
+        assert_eq!(results[0], results[1], "forked virtual PMC streams diverged");
+        println!("SVM_GUEST_RDPMC_FORK tsc={} delta={} first={:#x}",
+            results[0].0, results[0].1, results[0].2);
+        return Ok(());
+    }
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        let regs = vm.get_regs()?;
+    println!("SVM_GUEST_RDPMC user={} counter={} cross={} exit={} rip={:#x} tsc={} delta={} first={:#x}",
+            user, counter, cross, exit.exit_reason, regs.rip, exit.emulated_tsc, regs.gprs.rsi & 0xffff_ffff,
+            regs.gprs.rbx & 0xffff_ffff);
+        assert_eq!(exit.exit_reason, 258);
+        assert!((32..=128).contains(&(regs.gprs.rsi & 0xffff_ffff)));
         break;
     }
     Ok(())

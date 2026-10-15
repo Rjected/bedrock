@@ -79,6 +79,9 @@ pub struct VmxContext {
 
     // The scalar entry starts at F3 MOVS/STOS and retires only on completion.
     pub svm_entry_repeat: u64,
+
+    // Diagnostic guest-readable retired-instruction clock base.
+    pub svm_clock_base: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
@@ -136,6 +139,7 @@ impl VmxContext {
             svm_guest_fpu_resident: 0,
             svm_guest_fpu_dirty: 0,
             svm_entry_repeat: 0,
+            svm_clock_base: 0,
         }
     }
 }
