@@ -30,6 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("SVM_CASE").as_deref() == Ok("masked-breakpoints") {
         return test_masked_breakpoints();
     }
+    if std::env::var("SVM_CASE").as_deref() == Ok("clock-guard-write") {
+        return test_clock_guard_write();
+    }
     test_mov_ss_random_interception()?;
     test_mov_ss_deadline()?;
     test_syscall(false)?;
@@ -45,8 +48,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_boundary_rep_prefix()?;
     test_boundary_rdrand()?;
     test_masked_breakpoints()?;
+    test_clock_guard_write()?;
     test_fpu_reservation()?;
     Ok(())
+}
+
+fn test_clock_guard_write() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x2000].fill(0x90);
+    // An unreachable RDRAND keeps this page on the guarded NPT path while
+    // the hot loop issues clock exits. Later the guest writes new code into
+    // the same page; it must be rescanned before the patched RDRAND executes.
+    memory[0x11f0..0x11f3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+    let mut code = Vec::new();
+    code.extend([0xb9, 64, 0, 0, 0]); // MOV ECX, 64
+    code.extend([0x0f, 0x31, 0xff, 0xc9, 0x75, 0xfa]); // RDTSC; DEC ECX; JNZ -6
+    code.extend([0xc7, 0x05]); // MOV DWORD PTR [RIP+disp32], 0x90f0c70f
+    let store_disp = code.len();
+    code.extend([0; 4]);
+    code.extend([0x0f, 0xc7, 0xf0, 0x90]);
+    let store_end = 0x1000 + code.len();
+    let target = 0x1080;
+    code[store_disp..store_disp + 4]
+        .copy_from_slice(&((target - store_end) as i32).to_le_bytes());
+    code.push(0xe9); // JMP target
+    let jump_disp = code.len();
+    code.extend([0; 4]);
+    let jump_end = 0x1000 + code.len();
+    code[jump_disp..jump_disp + 4]
+        .copy_from_slice(&((target - jump_end) as i32).to_le_bytes());
+    memory[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    memory[target..target + 9].copy_from_slice(&[
+        0x90, 0x90, 0x90, 0x90, // replaced with RDRAND EAX; NOP
+        0x31, 0xc0, 0x0f, 0x01, 0xd9, // XOR EAX,EAX; VMMCALL shutdown
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(25))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 259, "clock loop crossed the exact deadline");
+        assert_eq!(exit.emulated_tsc, 25);
+        break;
+    }
+    vm.set_stop_at_tsc(None)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 57, "patched RDRAND was not intercepted");
+        assert_eq!(vm.get_regs()?.rip, target as u64);
+        assert_eq!(&vm.memory()?[target..target + 4], &[0x0f, 0xc7, 0xf0, 0x90]);
+        break;
+    }
+    vm.set_rdrand_value(0x1234)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 258, "patched-code guest did not shut down");
+        let stats = vm.get_exit_stats()?;
+        assert!(stats.ept_violation.count < 20,
+            "clock loop lost its retained NPT execute grant: {} fetches",
+            stats.ept_violation.count);
+        println!("SVM_CLOCK_GUARD_WRITE_PASS npt={} exits={}",
+            stats.ept_violation.count, stats.total_exit_count());
+        return Ok(());
+    }
 }
 
 fn test_sysret_restores_guest_tf() -> Result<(), Box<dyn std::error::Error>> {
