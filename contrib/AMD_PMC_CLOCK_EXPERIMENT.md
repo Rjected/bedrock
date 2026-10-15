@@ -13,6 +13,20 @@ control, with substantial two-run variation. They should not be compared
 directly with the original-guest production timings because the guest kernel
 differs.
 
+A subsequent progress-driver campaign with the PMC clock enabled and a host
+`perf record -F 199 -g` sample **failed** near virtual second 180 with a VM
+`RUN` I/O error. The box kernel log identified `SVM PMU exceeded budget:
+count=6 budget=85 batch_count=5 bounded=true`, at `_copy_to_user` after a
+debug exit, and then rejected VM entry. The perf capture recorded 5,880
+samples with none lost, but sampling perturbed execution; this failure does
+not prove the PMC clock caused the overrun. It does show that this path needs
+more robustness work before merging. The original-guest production progress
+campaign, sampled earlier on the same box, passed in 109 seconds. Both perf
+reports and the failure log are under ignored
+`target/boxctl-evidence/box-b47a5eea/`. Profiler percentages are diagnostic
+only. The next step is to reproduce the bounded-batch overrun with a targeted
+interrupt-at-entry probe and fix its accounting.
+
 This branch is an isolated performance probe, not a production-ready PMU
 interface. The `bedrock_pmc_clock` boot parameter asks the Tempo runner to
 enable a per-VM AMD PMC clock ioctl, then the patched Linux kernel reads PMC1
