@@ -34,6 +34,12 @@ interaction with host hardware-PMU profiling; it does not establish the root
 cause. The opt-in stays off by default. The diagnostic and 9,264-sample
 per-process IBS profile are pushed on `dan/amd-pmc-ibs-profile-1015`
 (`1897a2c`).
+With the same patched guest, module, driver, seed, and hardware-cycle
+profiler but the PMC clock **off**, a later progress campaign passed in
+**108 seconds** with 7,926 samples. A repeat with the clock **on** and the
+same profiler also passed in **93 seconds** with 7,940 samples. The one
+stalled sampled run is therefore intermittent; these controls do not prove
+a PMC1/profiler incompatibility or its root cause.
 
 This is an experimental opt-in PMU interface. The `bedrock_pmc_clock` boot parameter asks the Tempo runner to
 enable a per-VM AMD PMC clock ioctl, then the patched Linux kernel reads PMC1
