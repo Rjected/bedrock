@@ -141,7 +141,7 @@ pub(crate) struct SvmGuardScratch {
     pub gate_tables: [u64; SVM_TABLE_CAPACITY],
     /// Two recent guarded roots avoid rewalking immutable page tables when
     /// Linux switches back without any table write or host remap.
-    pub root_tree_cache: [SvmRootTreeSnapshot; 2],
+    pub root_tree_cache: [SvmRootTreeSnapshot; 4],
     pub root_tree_cache_next: usize,
     pub root_tree_guard_epoch: u64,
     /// One-based indices into the active guarded tree. Built only after all

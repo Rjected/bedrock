@@ -927,10 +927,10 @@ fn cache_guarded_root_tree<C: VmContext>(ctx: &mut C, incoming_root: u64,
         entry.valid && entry.root == guard.gate_root
     }).or_else(|| guard.root_tree_cache.iter().position(|entry| !entry.valid))
         .unwrap_or_else(|| {
-            let next = guard.root_tree_cache_next & 1;
-            if guard.root_tree_cache[next].root == incoming_root { next ^ 1 } else { next }
+            let next = guard.root_tree_cache_next & 3;
+            if guard.root_tree_cache[next].root == incoming_root { (next + 1) & 3 } else { next }
         });
-    guard.root_tree_cache_next = (slot + 1) & 1;
+    guard.root_tree_cache_next = (slot + 1) & 3;
     let snapshot = &mut guard.root_tree_cache[slot];
     snapshot.valid = false;
     snapshot.root = guard.gate_root;
