@@ -97,9 +97,12 @@ mod hot_exit_diag {
     static MTF: Histogram = Histogram::new();
     static NPT_FETCH: Histogram = Histogram::new();
     static NPT_DATA: Histogram = Histogram::new();
+    static FETCH_PREDECESSOR: [AtomicU64; 1025] = [const { AtomicU64::new(0) }; 1025];
+    static FETCH_SAME_PAGE: [AtomicU64; 1025] = [const { AtomicU64::new(0) }; 1025];
+    static FETCH_PREV_GLOBAL: [AtomicU64; 1025] = [const { AtomicU64::new(0) }; 1025];
     static DUMPED: AtomicBool = AtomicBool::new(false);
 
-    pub(super) fn observe(virtual_tsc: u64, code: u64, info1: u64, entry_rip: u64, exit_rip: u64) {
+    pub(super) fn observe(virtual_tsc: u64, code: u64, previous_code: u64, previous_rip: u64, previous_batch_kind: u64, info1: u64, entry_rip: u64, exit_rip: u64) {
         if virtual_tsc < START_TSC || DUMPED.load(Relaxed) {
             return;
         }
@@ -108,6 +111,14 @@ mod hot_exit_diag {
         } else if code == 0x400 {
             if info1 & 0x11 == 0x11 {
                 NPT_FETCH.record(exit_rip);
+                let slot = (previous_code as usize).min(1024);
+                FETCH_PREDECESSOR[slot].fetch_add(1, Relaxed);
+                if previous_rip >> 12 == exit_rip >> 12 {
+                    FETCH_SAME_PAGE[slot].fetch_add(1, Relaxed);
+                }
+                if previous_batch_kind == 2 {
+                    FETCH_PREV_GLOBAL[slot].fetch_add(1, Relaxed);
+                }
             } else {
                 NPT_DATA.record(exit_rip);
             }
@@ -116,6 +127,24 @@ mod hot_exit_diag {
             MTF.dump("mtf");
             NPT_FETCH.dump("fetch");
             NPT_DATA.dump("data");
+            let mut top = [(0u64, 0usize); 12];
+            for (code, counter) in FETCH_PREDECESSOR.iter().enumerate() {
+                let count = counter.load(Relaxed);
+                for position in 0..top.len() {
+                    if count > top[position].0 {
+                        for shifted in (position + 1..top.len()).rev() {
+                            top[shifted] = top[shifted - 1];
+                        }
+                        top[position] = (count, code);
+                        break;
+                    }
+                }
+            }
+            for (rank, &(count, code)) in top.iter().enumerate() {
+                if count == 0 { break; }
+                kernel::pr_info!("SVM HOT fetch predecessor rank={} count={} code={:#x} same_page={} prev_global={}\n",
+                    rank + 1, count, code, FETCH_SAME_PAGE[code].load(Relaxed), FETCH_PREV_GLOBAL[code].load(Relaxed));
+            }
         }
     }
 }
@@ -426,10 +455,20 @@ pub(crate) unsafe fn run(
     ctx.guest_rax = v.read(o::RAX, 8);
     ctx.guest_cr2 = v.read(o::CR2, 8);
     let code = v.read(o::EXIT_CODE, 8);
+    let previous_code = ctx.svm_previous_exit_code;
+    let previous_rip = ctx.svm_previous_exit_rip;
+    let previous_batch_kind = ctx.svm_previous_batch_kind;
+    ctx.svm_previous_exit_code = code;
+    ctx.svm_previous_exit_rip = v.read(o::RIP, 8);
+    ctx.svm_previous_batch_kind = if batch.is_some_and(|batch| batch.global_execution) { 2 }
+        else if batch.is_some() { 1 } else { 0 };
     if batch.is_none() || code == 0x400 {
         hot_exit_diag::observe(
             ctx.svm_clock_base,
             code,
+            previous_code,
+            previous_rip,
+            previous_batch_kind,
             v.read(o::EXIT_INFO1, 8),
             entry_rip,
             v.read(o::RIP, 8),

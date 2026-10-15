@@ -86,6 +86,10 @@ pub struct VmxContext {
     pub svm_pmc_clock_enabled: u64,
     /// The SVM intercepts have been configured for this VM's one-way opt-in.
     pub svm_pmc_clock_access_configured: u64,
+    /// Diagnostic previous raw SVM exit, per VM rather than process-global.
+    pub svm_previous_exit_code: u64,
+    pub svm_previous_exit_rip: u64,
+    pub svm_previous_batch_kind: u64,
 }
 
 const _: () = assert!(core::mem::offset_of!(VmxContext, svm_host_fpu_reserved) == 296);
@@ -146,6 +150,9 @@ impl VmxContext {
             svm_clock_base: 0,
             svm_pmc_clock_enabled: 0,
             svm_pmc_clock_access_configured: 0,
+            svm_previous_exit_code: 0,
+            svm_previous_exit_rip: 0,
+            svm_previous_batch_kind: 0,
         }
     }
 }
