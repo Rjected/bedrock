@@ -296,7 +296,11 @@ pub(crate) unsafe fn run(
     let mut host_count = 0;
     let pmu_ready = !counting || unsafe { c_helpers::bedrock_svm_pmu_read(&mut host_count) } == 0;
     let overflow_nmi = counter.as_ref().is_some_and(|_| PmcEntry::overflow_nmi(v));
-    let retired = counter.and_then(|counter| counter.finish(v));
+    let decoded_debug_endpoint = batch
+        .filter(|batch| batch.counter_bounded && batch.repeat.is_none()
+            && !batch.page_execution && v.read(o::RIP, 8) == batch.endpoint())
+        .map(|batch| batch.count as u64);
+    let retired = counter.and_then(|counter| counter.finish(v, decoded_debug_endpoint));
     if !pmu_ready {
         kernel::pr_err!("SVM PMU read failed: rip={:#x} code={:#x}\n", entry_rip, v.read(o::EXIT_CODE, 8));
         return Err(VmEntryError::VmEntryFailed);

@@ -97,7 +97,7 @@ impl PmcEntry {
     /// instructions and interrupt-delivery ticks. An immediate execution
     /// breakpoint can stop entry before that tick. The programmable event only
     /// drives PMI.
-    pub fn finish(self, v: &mut Vmcb) -> Option<u64> {
+    pub fn finish(self, v: &mut Vmcb, decoded_debug_endpoint: Option<u64>) -> Option<u64> {
         let raw = v.read(o::INSTR_RETIRED_CTR, 8);
         let code = v.read(o::EXIT_CODE, 8);
         // An ordinary exit can occasionally save IRPERF one tick behind the
@@ -107,7 +107,13 @@ impl PmcEntry {
         // cannot independently establish the number of guest retirements.
         let pmc_start = 0u64.wrapping_sub(self.period) & ((1 << 48) - 1);
         let pmc_elapsed = v.read(o::PERF_CTR0, 8).wrapping_sub(pmc_start) & ((1 << 48) - 1);
-        let raw = if v.read(o::PERF_GLOBAL_STATUS, 8) & 1 == 0
+        // At a bounded debug breakpoint, the programmable counter was seen
+        // one tick ahead while IRPERF matched the decoded endpoint. Preserve
+        // that exact count without changing other debug exits.
+        let decoded_debug_count = code == 0x41
+            && decoded_debug_endpoint.is_some_and(|count| raw.checked_sub(1) == Some(count));
+        let raw = if !decoded_debug_count
+            && v.read(o::PERF_GLOBAL_STATUS, 8) & 1 == 0
             && pmc_elapsed < self.period
             && pmc_elapsed == raw.saturating_add(1)
         {
@@ -159,7 +165,7 @@ mod tests {
             assert_ne!(v.read(o::INTERCEPT_MISC1, 4) & (1 << 17), 0); // POPF stays intercepted.
             v.write(o::INSTR_RETIRED_CTR, 8, 0);
             v.write(o::EXIT_CODE, 8, 0x400);
-            assert_eq!(entry.finish(&mut v), None);
+            assert_eq!(entry.finish(&mut v, None), None);
             assert_eq!(v.read(o::INTERCEPT_MISC1, 4), misc);
             assert_eq!(v.read(o::RFLAGS, 8), flags);
         }
@@ -174,7 +180,7 @@ mod tests {
         assert_eq!(v.read(o::PERF_GLOBAL_CONTROL, 8), 1);
         v.write(o::INSTR_RETIRED_CTR, 8, 2);
         v.write(o::EXIT_CODE, 8, 0x400);
-        counted.finish(&mut v);
+        counted.finish(&mut v, None);
         let virt_ext = PmcEntry::disarm(&mut v);
         assert_ne!(v.read(o::VIRT_EXT, 8) & (1 << 3), 0);
         assert_eq!(v.read(o::PERF_CTL0, 8), 0);
@@ -220,7 +226,7 @@ mod tests {
             v.write(o::EXIT_CODE, 8, code);
             v.write(o::EXIT_INT_INFO, 4, info);
             v.write(o::PERF_GLOBAL_STATUS, 8, status);
-            assert_eq!(entry.finish(&mut v), Some(113));
+            assert_eq!(entry.finish(&mut v, None), Some(113));
             assert_eq!(v.read(o::EXIT_CODE, 8), if boundary { 0x60 } else { code });
             assert_eq!(v.read(o::EXIT_INT_INFO, 4), if boundary { 0 } else { info });
             assert_eq!(v.read(o::IDTR + 4, 4), 4095);
@@ -237,7 +243,7 @@ mod tests {
         v.initialize();
         v.write(o::IDTR + 4, 4, 65535);
         let entry = PmcEntry::prepare(&mut v, 1 << 30).unwrap();
-        assert_eq!(entry.finish(&mut v), None);
+        assert_eq!(entry.finish(&mut v, None), None);
         assert_eq!(v.read(o::IDTR + 4, 4), 65535);
     }
 
@@ -250,7 +256,7 @@ mod tests {
         let entry = PmcEntry::prepare(&mut v, 100).unwrap();
         v.write(o::INSTR_RETIRED_CTR, 8, 1);
         v.write(o::EXIT_CODE, 8, 0x64);
-        assert_eq!(entry.finish(&mut v), Some(0));
+        assert_eq!(entry.finish(&mut v, None), Some(0));
         assert_ne!(v.read(o::INTERCEPT_MISC1, 4) & (1 << 4), 0);
         assert_ne!(v.read(o::INT_CONTROL, 4) & (1 << 8), 0);
     }
@@ -271,7 +277,7 @@ mod tests {
             v.write(o::EXIT_CODE, 8, 0x41);
             v.write(o::RIP, 8, rip);
             v.write(o::DR6, 8, dr6);
-            assert_eq!(entry.finish(&mut v), expected);
+            assert_eq!(entry.finish(&mut v, None), expected);
         }
     }
 
@@ -285,7 +291,7 @@ mod tests {
                 let entry = PmcEntry::prepare(&mut v, 100).unwrap();
                 v.write(o::EXIT_CODE, 8, code);
                 v.write(o::RIP, 8, rip);
-                assert_eq!(entry.finish(&mut v), expected);
+                assert_eq!(entry.finish(&mut v, None), expected);
             }
         }
     }
@@ -306,7 +312,22 @@ mod tests {
             v.write(o::INSTR_RETIRED_CTR, 8, raw);
             v.write(o::PERF_GLOBAL_STATUS, 8, status);
             v.write(o::EXIT_CODE, 8, 0x72);
-            assert_eq!(entry.finish(&mut v), expected);
+            assert_eq!(entry.finish(&mut v, None), expected);
+        }
+    }
+
+    #[test]
+    fn debug_breakpoint_does_not_promote_a_programmable_counter_tick() {
+        for (endpoint, expected) in [(Some(5), Some(5)), (None, Some(6)), (Some(4), Some(6))] {
+            let mut v = Vmcb::new();
+            v.initialize();
+            let entry = PmcEntry::prepare(&mut v, 1 << 30).unwrap();
+            let start = v.read(o::PERF_CTR0, 8);
+            v.write(o::PERF_CTR0, 8, start + 7);
+            v.write(o::INSTR_RETIRED_CTR, 8, 6);
+            v.write(o::EXIT_CODE, 8, 0x41);
+            v.write(o::RIP, 8, 0x1012);
+            assert_eq!(entry.finish(&mut v, endpoint), expected);
         }
     }
 }
