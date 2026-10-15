@@ -100,12 +100,20 @@ mod hot_exit_diag {
     static NPT_FETCH: Histogram = Histogram::new();
     static NPT_DATA: Histogram = Histogram::new();
     static DUMPED: AtomicBool = AtomicBool::new(false);
+    static CLOCK_SINGLE_PAGE: AtomicU64 = AtomicU64::new(0);
+    static CLOCK_MULTI_PAGE: AtomicU64 = AtomicU64::new(0);
 
-    pub(super) fn observe(virtual_tsc: u64, code: u64, info1: u64, entry_rip: u64, exit_rip: u64) {
+    pub(super) fn observe(virtual_tsc: u64, code: u64, info1: u64, entry_rip: u64, exit_rip: u64, global_pages: usize) {
         if virtual_tsc < START_TSC || DUMPED.load(Relaxed) {
             return;
         }
-        if code == 0x41 {
+        if matches!(code, 0x06e | 0x087) {
+            if global_pages == 1 {
+                CLOCK_SINGLE_PAGE.fetch_add(1, Relaxed);
+            } else if global_pages > 1 {
+                CLOCK_MULTI_PAGE.fetch_add(1, Relaxed);
+            }
+        } else if code == 0x41 {
             MTF.record(entry_rip);
         } else if code == 0x400 {
             if info1 & 0x11 == 0x11 {
@@ -118,6 +126,8 @@ mod hot_exit_diag {
             MTF.dump("mtf");
             NPT_FETCH.dump("fetch");
             NPT_DATA.dump("data");
+            kernel::pr_info!("SVM HOT clock single={} multi={}\n",
+                CLOCK_SINGLE_PAGE.load(Relaxed), CLOCK_MULTI_PAGE.load(Relaxed));
         }
     }
 }
@@ -428,13 +438,14 @@ pub(crate) unsafe fn run(
     ctx.guest_rax = v.read(o::RAX, 8);
     ctx.guest_cr2 = v.read(o::CR2, 8);
     let code = v.read(o::EXIT_CODE, 8);
-    if batch.is_none() || code == 0x400 {
+    if batch.is_none() || matches!(code, 0x400 | 0x06e | 0x087) {
         hot_exit_diag::observe(
             ctx.svm_diag_virtual_base,
             code,
             v.read(o::EXIT_INFO1, 8),
             entry_rip,
             v.read(o::RIP, 8),
+            batch.filter(|batch| batch.global_execution).map_or(0, |batch| batch.code_page_count),
         );
     }
     // The XSETBV handler changes the XSAVE mask. Persist registers using
