@@ -847,6 +847,15 @@ The in-box SVM suite and exact 180-virtual-second DST campaign passed, but
 the full run took 201 host seconds against 198 seconds for the unchanged
 branch on that box. The trial was not merged; fewer fetch faults did not
 produce a wall-time gain.
+An AMD IBS operation profile of a passing full campaign on the same box
+captured 34,955 samples without loss. `svm_run_guest` accounted for 10.71% of
+samples and `collect_page_breakpoints` for 10.04%; unrelated serial I/O also
+appeared in the system-wide profile. An isolated trial replaced the latter's
+linear upper-level guarded-table scan with the existing hash index, preserving
+the level, guard, and upper-link checks and a linear fallback during rebuilds.
+Its local unit tests and in-box SVM suite passed, and the exact DST campaign
+passed in 201 host seconds, versus 198 seconds for the same-box unchanged
+control. The index trial was not merged because it showed no end-to-end gain.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
