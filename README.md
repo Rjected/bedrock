@@ -817,6 +817,18 @@ shortened diagnostic duration, so these are bottleneck proportions rather than
 production wall-time estimates. The remaining work is to lower that planning
 cost without paying comparable validation cost, and to reduce the much larger
 number of NPT faults in the full campaign.
+An isolated clock-opcode scalar-entry trial passed that full campaign in 200
+seconds, also within the control range, and was not merged. An instrumented
+shortened run then classified 14 million NPT faults on the same box: 9.54
+million were fetches from code pages that could not be globally trusted, and
+3.79 million were writes to guarded guest page-table pages. CoW accounted for
+about 0.11 million. Sampling every 4,096th untrusted-code fetch found 266
+distinct physical pages; the ten most frequent contributed 44% of the samples
+and the top 25 contributed 70%. One hot kernel site was `__schedule`, alongside
+other kernel and userspace pages. This points to a spread of code-page
+transitions and table writes rather than a single REP page. The shortened
+sample run ended with a workload-level `E4/graceful-stop` failure, so its
+counts are diagnostic only and do not establish a CI workload pass.
 
 For one-hour remote AMD bare-metal boxes, use the
 [boxctl setup and test guide](contrib/BOXCTL_AMD.md).
