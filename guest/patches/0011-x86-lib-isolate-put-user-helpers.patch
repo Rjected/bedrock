@@ -1,0 +1,19 @@
+--- a/arch/x86/lib/putuser.S
++++ b/arch/x86/lib/putuser.S
+@@ -38,6 +38,9 @@
+ .endm
+ 
+ .text
++/* Keep the hot user-copy helpers off adjacent code with RDRAND hazards. */
++	.p2align 12
++
+ SYM_FUNC_START(__put_user_1)
+ 	ANNOTATE_NOENDBR
+ 	check_range size=1
+@@ -154,3 +157,6 @@
+ 	_ASM_EXTABLE_UA(8b, __put_user_handle_exception)
+ 	_ASM_EXTABLE_UA(10b, __put_user_handle_exception)
+ #endif
++
++/* Keep following objects off the helper page as well. */
++	.p2align 12
