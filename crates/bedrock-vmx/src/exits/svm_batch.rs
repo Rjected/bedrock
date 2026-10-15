@@ -7,6 +7,14 @@ use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, Rep
 use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::Ordering;
 #[cfg(not(feature = "cargo"))]
+static SVM_ROOT_CACHE_RESTORES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static SVM_ROOT_CACHE_RELEASES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static SVM_ROOT_CACHE_DIRTY_REFRESHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static SVM_ROOT_CACHE_UNTRUSTED_REFRESHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
@@ -685,9 +693,13 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
         }
         let probes = PROBES.fetch_add(1, Relaxed) + 1;
         if probes % 50_000 == 0 {
-            kernel::pr_info!("AMD ROOT CACHE probes={} hits={} absent={} stale={} overlap={}\n",
+            kernel::pr_info!("AMD ROOT CACHE probes={} hits={} absent={} stale={} overlap={} hostwrite={} restore={} release={} dirty={} untrusted={}\n",
                 probes, HITS.load(Relaxed), ABSENT.load(Relaxed), STALE.load(Relaxed),
-                CODE_OVERLAP.load(Relaxed));
+                CODE_OVERLAP.load(Relaxed),
+                super::super::vm_state::SVM_ROOT_CACHE_HOST_WRITES.load(Relaxed),
+                SVM_ROOT_CACHE_RESTORES.load(Relaxed), SVM_ROOT_CACHE_RELEASES.load(Relaxed),
+                SVM_ROOT_CACHE_DIRTY_REFRESHES.load(Relaxed),
+                SVM_ROOT_CACHE_UNTRUSTED_REFRESHES.load(Relaxed));
         }
     }
     if let Some(slot) = cache_slot {
@@ -810,6 +822,8 @@ fn restore_global_table_guards<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &A,
 ) {
+    #[cfg(not(feature = "cargo"))]
+    SVM_ROOT_CACHE_RESTORES.fetch_add(1, Ordering::Relaxed);
     let guard = &mut ctx.state_mut().svm_guard;
     guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
     if guard.root_tree_guard_epoch == 0 {
@@ -1172,6 +1186,15 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     allocator: &A,
     can_guard_page_tables: bool,
 ) {
+    #[cfg(not(feature = "cargo"))]
+    {
+        if ctx.state().svm_guard.gate_dirty {
+            SVM_ROOT_CACHE_DIRTY_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        }
+        if ctx.state().svm_guard.gate_links_untrusted {
+            SVM_ROOT_CACHE_UNTRUSTED_REFRESHES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     if ctx.state().svm_guard.gate_dirty || ctx.state().svm_guard.gate_links_untrusted {
         let guard = &mut ctx.state_mut().svm_guard;
         guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
@@ -1425,6 +1448,8 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
     let Some(index) = retained_guard_for(&ctx.state().svm_guard, page) else {
         return false;
     };
+    #[cfg(not(feature = "cargo"))]
+    SVM_ROOT_CACHE_RELEASES.fetch_add(1, Ordering::Relaxed);
     let guard = &mut ctx.state_mut().svm_guard;
     guard.root_tree_guard_epoch = guard.root_tree_guard_epoch.wrapping_add(1);
     if guard.root_tree_guard_epoch == 0 {

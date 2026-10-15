@@ -9,6 +9,9 @@ use crate::prelude::*;
 
 use super::traits::InstructionBatch;
 #[cfg(not(feature = "cargo"))]
+pub(crate) static SVM_ROOT_CACHE_HOST_WRITES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
 use crate::ept::NptWriteGuard;
 #[cfg(feature = "cargo")]
 use bedrock_ept::NptWriteGuard;
@@ -230,6 +233,8 @@ impl SvmGuardScratch {
         if len == 0 {
             return;
         }
+        #[cfg(not(feature = "cargo"))]
+        SVM_ROOT_CACHE_HOST_WRITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Host writes bypass NPT, so an inactive-root child-link snapshot
         // cannot remain proven even when the current tree is unaffected.
         self.root_tree_guard_epoch = self.root_tree_guard_epoch.wrapping_add(1);
