@@ -8,6 +8,14 @@ use super::helpers::{ExitError, ExitHandlerResult};
 use super::svm::{physical, physical_for_frame_byte, write_contiguous_guest_bytes};
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
+#[cfg(not(feature = "cargo"))]
+static PF_DELIVERY_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PF_DELIVERY_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static EXT_DELIVERY_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static EXT_DELIVERY_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn read<C: VmContext>(ctx: &C, linear: u64, bytes: &mut [u8]) -> Result<(), ExitError> {
     for (i, byte) in bytes.iter_mut().enumerate() {
@@ -266,7 +274,26 @@ pub(super) fn pending_event<C: VmContext, A: CowAllocator<C::CowPage>>(
     };
     let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip)?;
     let fault = kind == 3 && !matches!(vector, 1 | 3 | 4);
+    #[cfg(not(feature = "cargo"))]
+    let delivery_start = rdtsc();
     let delivered = deliver(ctx, allocator, vector, rip, false, error, fault)?;
+    #[cfg(not(feature = "cargo"))]
+    if delivered {
+        use core::sync::atomic::Ordering::Relaxed;
+        let elapsed = rdtsc().saturating_sub(delivery_start);
+        if kind == 3 && vector == 14 {
+            PF_DELIVERY_CYCLES.fetch_add(elapsed, Relaxed);
+            let count = PF_DELIVERY_COUNT.fetch_add(1, Relaxed) + 1;
+            if count % 100_000 == 0 {
+                kernel::pr_info!("AMD DELIVER pf_count={} pf_cycles={} ext_count={} ext_cycles={}\n",
+                    count, PF_DELIVERY_CYCLES.load(Relaxed),
+                    EXT_DELIVERY_COUNT.load(Relaxed), EXT_DELIVERY_CYCLES.load(Relaxed));
+            }
+        } else if kind == 0 {
+            EXT_DELIVERY_CYCLES.fetch_add(elapsed, Relaxed);
+            EXT_DELIVERY_COUNT.fetch_add(1, Relaxed);
+        }
+    }
     let v = &ctx.state().vmcs;
     if delivered {
         v.write32(VmcsField32::VmEntryInterruptionInfo, 0)?;
