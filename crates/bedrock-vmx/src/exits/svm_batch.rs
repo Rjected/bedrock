@@ -5,47 +5,7 @@
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
 use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
-use core::sync::atomic::{AtomicU64, Ordering};
-
-static REFRESH_PENDING: AtomicU64 = AtomicU64::new(0);
-static REFRESH_LEAF: AtomicU64 = AtomicU64::new(0);
-static REFRESH_REARM: AtomicU64 = AtomicU64::new(0);
-static REFRESH_FULL: AtomicU64 = AtomicU64::new(0);
-static COLLECT_CALLS: AtomicU64 = AtomicU64::new(0);
-static COLLECT_HITS: AtomicU64 = AtomicU64::new(0);
-static COLLECT_WALKS: AtomicU64 = AtomicU64::new(0);
-static COLLECT_WALK_SUCCESS: AtomicU64 = AtomicU64::new(0);
-static COLLECT_WALK_BREAKPOINT_LIMIT: AtomicU64 = AtomicU64::new(0);
-static COLLECT_WALK_WORKSPACE_LIMIT: AtomicU64 = AtomicU64::new(0);
-static COLLECT_WALK_READ_FAIL: AtomicU64 = AtomicU64::new(0);
-static COLLECT_VALID_PROOF_MISSES: AtomicU64 = AtomicU64::new(0);
-static COLLECT_DIRTY: AtomicU64 = AtomicU64::new(0);
-static COLLECT_UNGUARDED: AtomicU64 = AtomicU64::new(0);
-static LEAF_CHANGED_ENTRIES: AtomicU64 = AtomicU64::new(0);
-static LEAF_INVALIDATED_PROOFS: AtomicU64 = AtomicU64::new(0);
-static LEAF_SNAPSHOT_MISS: AtomicU64 = AtomicU64::new(0);
-static INVALIDATE_TREE: AtomicU64 = AtomicU64::new(0);
-static INVALIDATE_CODE: AtomicU64 = AtomicU64::new(0);
-static FULL_PRESERVE: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_GUARD: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_NOT_READY: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_UNTRUSTED: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_ROOT: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_MAPPING: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_NO_PROOF: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_UPPER: AtomicU64 = AtomicU64::new(0);
-static FULL_REJECT_NO_RELEASE: AtomicU64 = AtomicU64::new(0);
-static TREE_CAP_FAIL: AtomicU64 = AtomicU64::new(0);
-static TREE_SCAN_FAIL: AtomicU64 = AtomicU64::new(0);
-static TREE_SCAN_MAX_COUNT: AtomicU64 = AtomicU64::new(0);
-static TREE_RESTRICT_ERR: AtomicU64 = AtomicU64::new(0);
-static TREE_RESTRICT_NONE: AtomicU64 = AtomicU64::new(0);
-static TREE_READY_SUCCESS: AtomicU64 = AtomicU64::new(0);
-static FULL_SWITCH_ROOT: AtomicU64 = AtomicU64::new(0);
-static FULL_COLD_GATE: AtomicU64 = AtomicU64::new(0);
-static FULL_DIRTY_GATE: AtomicU64 = AtomicU64::new(0);
-static ROOT_PROOF_PRESERVED: AtomicU64 = AtomicU64::new(0);
+use core::sync::atomic::Ordering;
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
@@ -553,7 +513,6 @@ fn add_translation_child<C: VmContext>(
         let entry = scratch.table_index[slot];
         if entry == 0 {
             if scratch.count == scratch.tables.len() {
-                TREE_CAP_FAIL.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
             let index = scratch.count;
@@ -672,8 +631,7 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
         root,
         ctx.state().ept.mapping_generation(),
     );
-    // The retained NPT guards keep page tables from inactive CR3 roots
-    // immutable. Their alias proofs remain valid while another root is scanned.
+    // Inactive-root table guards preserve proofs across a guarded CR3 switch.
     let guarded_root_switch = {
         let guard = &ctx.state().svm_guard;
         guard.gate_ready && !guard.gate_dirty && !guard.gate_links_untrusted
@@ -682,9 +640,6 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
             && guard.retained_mapping_generation == ctx.state().ept.mapping_generation()
             && guard.gate_guards[..guard.gate_count].iter().all(|saved| saved.valid)
     };
-    if guarded_root_switch {
-        ROOT_PROOF_PRESERVED.fetch_add(1, Ordering::Relaxed);
-    }
     let scratch = &mut ctx.state_mut().svm_guard;
     scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
     scratch.gate_leaf_filter_valid.fill(false);
@@ -916,7 +871,6 @@ fn can_refresh_leaf_only(
 }
 
 fn invalidate_alias_proofs(guard: &mut super::super::vm_state::SvmGuardScratch) {
-    INVALIDATE_TREE.fetch_add(1, Ordering::Relaxed);
     guard.alias_proof.valid = false;
     for proof in &mut guard.alias_proofs {
         proof.valid = false;
@@ -988,7 +942,6 @@ fn clear_leaf_snapshots(guard: &mut super::super::vm_state::SvmGuardScratch) {
 
 fn invalidate_alias_proofs_for_released_leaves<C: VmContext>(ctx: &mut C) -> Option<()> {
     if ctx.state().svm_guard.leaf_snapshot_overflow {
-        LEAF_SNAPSHOT_MISS.fetch_add(1, Ordering::Relaxed);
         return None;
     }
     let mut bytes = [0u8; 512];
@@ -1003,7 +956,6 @@ fn invalidate_alias_proofs_for_released_leaves<C: VmContext>(ctx: &mut C) -> Opt
         let table = guard.gate_tables[index];
         let Some(snapshot) = guard.leaf_snapshots.iter()
             .position(|snapshot| snapshot.valid && snapshot.page == table) else {
-            LEAF_SNAPSHOT_MISS.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         ctx.state_mut().svm_guard.leaf_pages.fill(0);
@@ -1022,7 +974,6 @@ fn invalidate_alias_proofs_for_released_leaves<C: VmContext>(ctx: &mut C) -> Opt
                     && old & 0x000f_ffff_ffff_f000 == physical {
                     continue;
                 }
-                LEAF_CHANGED_ENTRIES.fetch_add(1, Ordering::Relaxed);
                 leaf_page_insert(&mut ctx.state_mut().svm_guard.leaf_pages, physical)?;
             }
         }
@@ -1032,7 +983,6 @@ fn invalidate_alias_proofs_for_released_leaves<C: VmContext>(ctx: &mut C) -> Opt
             if proof.valid && proof.pages[..proof.page_count]
                 .iter().any(|&page| leaf_page_contains(set, page)) {
                 proof.valid = false;
-                LEAF_INVALIDATED_PROOFS.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1054,18 +1004,9 @@ fn alias_proofs_safe_across_rebuild<C: VmContext>(ctx: &C, root: u64) -> Option<
     let guard = &ctx.state().svm_guard;
     if !guard.gate_ready || !guard.gate_dirty || guard.gate_links_untrusted
         || guard.gate_root != root {
-        FULL_REJECT_GUARD.fetch_add(1, Ordering::Relaxed);
-        if !guard.gate_ready || !guard.gate_dirty {
-            FULL_REJECT_NOT_READY.fetch_add(1, Ordering::Relaxed);
-        } else if guard.gate_links_untrusted {
-            FULL_REJECT_UNTRUSTED.fetch_add(1, Ordering::Relaxed);
-        } else {
-            FULL_REJECT_ROOT.fetch_add(1, Ordering::Relaxed);
-        }
         return None;
     }
     if guard.gate_mapping_generation != ctx.state().ept.mapping_generation() {
-        FULL_REJECT_MAPPING.fetch_add(1, Ordering::Relaxed);
         return None;
     }
     let mut retained = [0u64; SVM_ALIAS_PROOF_CAPACITY / 64];
@@ -1075,7 +1016,6 @@ fn alias_proofs_safe_across_rebuild<C: VmContext>(ctx: &C, root: u64) -> Option<
         }
     }
     if retained.iter().all(|&word| word == 0) {
-        FULL_REJECT_NO_PROOF.fetch_add(1, Ordering::Relaxed);
         return None;
     }
     let mut released = false;
@@ -1092,7 +1032,6 @@ fn alias_proofs_safe_across_rebuild<C: VmContext>(ctx: &C, root: u64) -> Option<
         if level > 1 && (old_len == usize::from(u16::MAX)
             || old_start + old_len > guard.gate_upper_count)
         {
-            FULL_REJECT_UPPER.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         for offset in (0..4096).step_by(bytes.len()) {
@@ -1119,15 +1058,11 @@ fn alias_proofs_safe_across_rebuild<C: VmContext>(ctx: &C, root: u64) -> Option<
                             && old.entry & (1 << 63) == 0
                             && (old.entry ^ entry) & ((1 << 7) | 0x000f_ffff_ffff_f000) == 0);
                     if !unchanged {
-                        FULL_REJECT_UPPER.fetch_add(1, Ordering::Relaxed);
                         return None;
                     }
                 }
             }
         }
-    }
-    if !released {
-        FULL_REJECT_NO_RELEASE.fetch_add(1, Ordering::Relaxed);
     }
     released.then_some(retained)
 }
@@ -1159,7 +1094,6 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         restore_global_table_guards(ctx, allocator);
     }
     if ctx.state().svm_gate_pending_write && ctx.state().svm_gate_scalar_page.is_some() {
-        REFRESH_PENDING.fetch_add(1, Ordering::Relaxed);
         return;
     }
     if ctx.state().svm_gate_pending_write {
@@ -1207,7 +1141,6 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         ctx.state().ept.mapping_generation(),
     );
     if leaf_only {
-        REFRESH_LEAF.fetch_add(1, Ordering::Relaxed);
         if invalidate_alias_proofs_for_released_leaves(ctx).is_none() {
             invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
         }
@@ -1254,25 +1187,13 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
             guard.gate_leaf_filter_valid.fill(false);
             guard.alias_proof.valid = false;
             guard.gate_dirty = false;
-            REFRESH_REARM.fetch_add(1, Ordering::Relaxed);
             return;
         }
         invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
     }
     ctx.state_mut().svm_guard.valid = false;
-    REFRESH_FULL.fetch_add(1, Ordering::Relaxed);
-    if !ctx.state().svm_guard.gate_ready {
-        FULL_COLD_GATE.fetch_add(1, Ordering::Relaxed);
-    } else if ctx.state().svm_guard.gate_dirty {
-        FULL_DIRTY_GATE.fetch_add(1, Ordering::Relaxed);
-    } else if ctx.state().svm_guard.gate_root != root {
-        FULL_SWITCH_ROOT.fetch_add(1, Ordering::Relaxed);
-    }
     let mut retained = alias_proofs_safe_across_rebuild(ctx, root);
-    if retained.is_some() {
-        FULL_PRESERVE.fetch_add(1, Ordering::Relaxed);
-    } else {
-        FULL_REJECT.fetch_add(1, Ordering::Relaxed);
+    if retained.is_none() {
         // A released table in the old root is no longer write-protected.
         // Switching CR3 before its store can be checked must not preserve
         // proofs for that old root through the retained-guard registry.
@@ -1281,10 +1202,6 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         }
     }
     let scanned = collect_translation_tree_pages(ctx, &[]).is_some();
-    TREE_SCAN_MAX_COUNT.fetch_max(ctx.state().svm_guard.count as u64, Ordering::Relaxed);
-    if !scanned {
-        TREE_SCAN_FAIL.fetch_add(1, Ordering::Relaxed);
-    }
     // Keep guards from inactive roots live. A write to any of those tables
     // traps and invalidates their alias proofs before the next guest entry.
     if scanned && ctx.state().svm_guard.retained_guard_count
@@ -1344,12 +1261,10 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
                 guard.gate_guards[index] = saved;
             }
             Ok(None) => {
-                TREE_RESTRICT_NONE.fetch_add(1, Ordering::Relaxed);
                 restore_global_table_guards(ctx, allocator);
                 return;
             }
             Err(_) => {
-                TREE_RESTRICT_ERR.fetch_add(1, Ordering::Relaxed);
                 restore_global_table_guards(ctx, allocator);
                 return;
             }
@@ -1369,7 +1284,6 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     guard.gate_dirty = false;
     guard.gate_links_untrusted = false;
     guard.gate_ready = true;
-    TREE_READY_SUCCESS.fetch_add(1, Ordering::Relaxed);
     if let Some(retained) = retained {
         for (index, proof) in guard.alias_proofs.iter_mut().enumerate() {
             proof.valid = alias_proof_retained(&retained, index);
@@ -1411,7 +1325,6 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
     });
     if active_leaf && snapshot_released_leaf(ctx, page).is_none() {
         ctx.state_mut().svm_guard.leaf_snapshot_overflow = true;
-        LEAF_SNAPSHOT_MISS.fetch_add(1, Ordering::Relaxed);
         invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
     }
     for current in 0..count {
@@ -1942,7 +1855,6 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
             guard.gate_ready && guard.gate_dirty && guard.gate_root == root
         });
         if !gate_guarded && !pending_leaf_refresh && !pending_full_refresh {
-            INVALIDATE_CODE.fetch_add(1, Ordering::Relaxed);
             invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
         }
     }
@@ -2708,14 +2620,12 @@ fn visit_alias_entry<C: VmContext>(
             for &offset in &hazard.offsets[..hazard.count] {
                 let address = virtual_page + u64::from(offset);
                 if add_page_breakpoint(batch, address, breakpoint_masks_supported()).is_none() {
-                    COLLECT_WALK_BREAKPOINT_LIMIT.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
             }
         }
     } else {
         if *count == ctx.state().svm_guard.aliases.len() {
-            COLLECT_WALK_WORKSPACE_LIMIT.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         ctx.state_mut().svm_guard.aliases[*count] = super::super::vm_state::SvmAliasWalk {
@@ -2867,7 +2777,6 @@ fn collect_page_breakpoints<C: VmContext>(
     batch: &mut InstructionBatch,
     hazards: &[PageHazards],
 ) -> Option<()> {
-    COLLECT_CALLS.fetch_add(1, Ordering::Relaxed);
     if hazards.len() < batch.code_page_count {
         return None;
     }
@@ -2900,8 +2809,6 @@ fn collect_page_breakpoints<C: VmContext>(
         * SVM_ALIAS_PROOF_WAYS;
     let tree_guarded = !guard.gate_dirty && ((guard.valid && guard.root == root)
         || (guard.gate_ready && guard.gate_root == root));
-    if !tree_guarded { COLLECT_UNGUARDED.fetch_add(1, Ordering::Relaxed); }
-    if guard.gate_dirty { COLLECT_DIRTY.fetch_add(1, Ordering::Relaxed); }
     let matches = |proof: &super::super::vm_state::SvmAliasProof| {
         tree_guarded
             && proof.valid
@@ -2947,7 +2854,6 @@ fn collect_page_breakpoints<C: VmContext>(
             .map(|(way, _)| set + way)
     };
     if let Some(index) = cached {
-        COLLECT_HITS.fetch_add(1, Ordering::Relaxed);
         let proof = &ctx.state().svm_guard.alias_proofs[index];
         batch.page_breakpoints = proof.breakpoints;
         batch.page_breakpoint_masks = proof.breakpoint_masks;
@@ -2958,15 +2864,10 @@ fn collect_page_breakpoints<C: VmContext>(
         return Some(());
     }
     if hazard_pages > 1 && matches(&cache.alias_proof) {
-        COLLECT_HITS.fetch_add(1, Ordering::Relaxed);
         batch.page_breakpoints = cache.alias_proof.breakpoints;
         batch.page_breakpoint_masks = cache.alias_proof.breakpoint_masks;
         batch.page_breakpoint_count = cache.alias_proof.breakpoint_count;
         return Some(());
-    }
-    if ctx.state().svm_guard.alias_proofs[set..set + SVM_ALIAS_PROOF_WAYS]
-        .iter().any(|proof| proof.valid) {
-        COLLECT_VALID_PROOF_MISSES.fetch_add(1, Ordering::Relaxed);
     }
     // A proof for each page independently proves all executable aliases of
     // that page under the same guarded CR3. Their breakpoint union therefore
@@ -3005,13 +2906,11 @@ fn collect_page_breakpoints<C: VmContext>(
             if !complete { break; }
         }
         if complete {
-            COLLECT_HITS.fetch_add(1, Ordering::Relaxed);
             remember_alias_proof(ctx, batch, hazards, root, key_hash, set, hazard_pages, false);
             return Some(());
         }
         batch.page_breakpoint_count = 0;
     }
-    COLLECT_WALKS.fetch_add(1, Ordering::Relaxed);
     let mut selected_probes = [(0, 0, 0, 0); SVM_RECENT_PAGE_CAPACITY + 1];
     let precompute_probes = batch.code_page_count <= selected_probes.len();
     if precompute_probes {
@@ -3110,7 +3009,6 @@ fn collect_page_breakpoints<C: VmContext>(
         let mut leaf_filter = [0u64; SVM_LEAF_FILTER_WORDS];
         for offset in (0..4096).step_by(2048) {
             if ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes).is_err() {
-                COLLECT_WALK_READ_FAIL.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
             for (part, entry) in bytes.chunks_exact(8).enumerate() {
@@ -3150,7 +3048,6 @@ fn collect_page_breakpoints<C: VmContext>(
         cursor += 1;
     }
     remember_alias_proof(ctx, batch, hazards, root, key_hash, set, hazard_pages, true);
-    COLLECT_WALK_SUCCESS.fetch_add(1, Ordering::Relaxed);
     Some(())
 }
 
