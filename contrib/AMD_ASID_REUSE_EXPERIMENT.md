@@ -11,11 +11,14 @@ disposable box built or loaded a kernel module.
 The pinned one-seed Tempo DST campaign passed with `failed=0` in 195 and 199
 host seconds on the candidate. An unchanged production module on the same box
 passed the same campaign in 207 host seconds between those candidate runs.
+An additional unchanged control after both candidate runs passed in 201
+host seconds. These alternating results narrow the apparent advantage to a
+few seconds, which may be ordinary run variation.
 The patched guest kernel, initrd, images, seed, 180-virtual-second interval,
 and userspace driver SHA-256
 `f0d4c4c16cd5a25549d83107b1b0161c4432769d0c42e26f2144c5994648f554`
-were the same. The result suggests a modest speedup but needs more repeated
-controls before claiming a stable effect. It does not close the gap to the
+were the same. The result needs more repeated controls before claiming a
+stable effect. It does not close the gap to the
 reported approximately 65-second Intel CI run, which used a different host
 and guest kernel.
 
