@@ -36,3 +36,11 @@ SHA-256
 were held fixed. These runs suggest a small gain, with the sample too small
 to establish its precise size. The reported roughly 65-second Intel CI run
 used a different host and guest kernel; this change does not close that gap.
+
+After promotion to `dan/amd-tempo-dst`, the same box passed a two-seed exact
+campaign with `failed=0` in **344 host seconds**. Seed
+`14373434789495652599` used the pinned preemption interval and passed its
+workload in 134 seconds; seed `14373434789495652600` used no preemption and
+passed in 151 seconds. The complete two-seed campaign used the same driver
+hash and guest assets above. This expands functional coverage; it is not a
+matched performance comparison with Intel.

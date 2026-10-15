@@ -884,7 +884,8 @@ execute grants for every selected page. It passed 276 VMX unit tests, the
 full in-box SVM suite with a new two-page clock/code-write probe, and three
 exact pinned DST campaigns in 194, 197, and 197 host seconds. Unchanged
 same-box controls took 201, 202, and 207 seconds. This suggests a modest
-gain, not Intel timing parity; see
+gain, not Intel timing parity. A two-seed exact campaign also passed both
+seeds, including one without preemption, in 344 host seconds; see
 [the experiment details](contrib/AMD_MULTIPAGE_CLOCK_HOLD_EXPERIMENT.md).
 
 For one-hour remote AMD bare-metal boxes, use the
