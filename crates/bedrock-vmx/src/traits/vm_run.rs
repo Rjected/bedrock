@@ -2,6 +2,73 @@
 
 //! VM run loop and GPR synchronization.
 
+// Diagnostic-only clock-exit entry-phase counters. These atomics and extra
+// TSC reads perturb wall time; never use this branch for timing comparisons.
+#[cfg(not(feature = "cargo"))]
+mod clock_entry_phase {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    static SETUP: AtomicU64 = AtomicU64::new(0);
+    static GATE: AtomicU64 = AtomicU64::new(0);
+    static GPRS: AtomicU64 = AtomicU64::new(0);
+    static INTERRUPT: AtomicU64 = AtomicU64::new(0);
+    static SETUP_TAIL: AtomicU64 = AtomicU64::new(0);
+    static REFRESH: AtomicU64 = AtomicU64::new(0);
+    static REFRESH_CALLS: AtomicU64 = AtomicU64::new(0);
+    static HELD_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static FAST_ELIGIBLE: AtomicU64 = AtomicU64::new(0);
+    static FAST_CYCLES: AtomicU64 = AtomicU64::new(0);
+    static SLOW_CYCLES: AtomicU64 = AtomicU64::new(0);
+    static GATE_DIRTY: AtomicU64 = AtomicU64::new(0);
+    static ROOT_MISMATCH: AtomicU64 = AtomicU64::new(0);
+    static MAPPING_MISMATCH: AtomicU64 = AtomicU64::new(0);
+    static GATE_UNREADY: AtomicU64 = AtomicU64::new(0);
+    static NO_ROGPT: AtomicU64 = AtomicU64::new(0);
+    static PREPARE: AtomicU64 = AtomicU64::new(0);
+    static PLAN: AtomicU64 = AtomicU64::new(0);
+    static GUARD: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn record(setup: u64, gate: u64, refresh: u64, refresh_called: bool,
+        refresh_flags: u8, held_at_start: bool, gprs: u64, interrupt: u64, setup_tail: u64,
+        prepare: u64, plan: u64, guard: u64) {
+        SETUP.fetch_add(setup, Relaxed);
+        GATE.fetch_add(gate, Relaxed);
+        REFRESH.fetch_add(refresh, Relaxed);
+        REFRESH_CALLS.fetch_add(u64::from(refresh_called), Relaxed);
+        HELD_ENTRIES.fetch_add(u64::from(held_at_start), Relaxed);
+        if refresh_called {
+            let fast = refresh_flags == 0b01011;
+            FAST_ELIGIBLE.fetch_add(u64::from(fast), Relaxed);
+            if fast { FAST_CYCLES.fetch_add(refresh, Relaxed); }
+            else { SLOW_CYCLES.fetch_add(refresh, Relaxed); }
+            GATE_DIRTY.fetch_add(u64::from(refresh_flags & 4 != 0), Relaxed);
+            ROOT_MISMATCH.fetch_add(u64::from(refresh_flags & 8 == 0), Relaxed);
+            MAPPING_MISMATCH.fetch_add(u64::from(refresh_flags & 16 != 0), Relaxed);
+            GATE_UNREADY.fetch_add(u64::from(refresh_flags & 2 == 0), Relaxed);
+            NO_ROGPT.fetch_add(u64::from(refresh_flags & 1 == 0), Relaxed);
+        }
+        GPRS.fetch_add(gprs, Relaxed);
+        INTERRUPT.fetch_add(interrupt, Relaxed);
+        SETUP_TAIL.fetch_add(setup_tail, Relaxed);
+        PREPARE.fetch_add(prepare, Relaxed);
+        PLAN.fetch_add(plan, Relaxed);
+        GUARD.fetch_add(guard, Relaxed);
+        let count = COUNT.fetch_add(1, Relaxed) + 1;
+        if count % 1_000_000 == 0 {
+            kernel::pr_info!("AMD CLOCK ENTRY count={} setup={} gate={} refresh={} refresh_calls={} held={} gprs={} interrupt={} tail={} prepare={} plan={} guard={}\n",
+                count, SETUP.load(Relaxed), GATE.load(Relaxed), REFRESH.load(Relaxed),
+                REFRESH_CALLS.load(Relaxed), HELD_ENTRIES.load(Relaxed), GPRS.load(Relaxed),
+                INTERRUPT.load(Relaxed), SETUP_TAIL.load(Relaxed),
+                PREPARE.load(Relaxed), PLAN.load(Relaxed), GUARD.load(Relaxed));
+            kernel::pr_info!("AMD CLOCK REFRESH fast={} fast_cycles={} slow_cycles={} dirty={} root_mismatch={} mapping_mismatch={} unready={} no_rogpt={}\n",
+                FAST_ELIGIBLE.load(Relaxed), FAST_CYCLES.load(Relaxed),
+                SLOW_CYCLES.load(Relaxed), GATE_DIRTY.load(Relaxed),
+                ROOT_MISMATCH.load(Relaxed), MAPPING_MISMATCH.load(Relaxed),
+                GATE_UNREADY.load(Relaxed), NO_ROGPT.load(Relaxed));
+        }
+    }
+}
+
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 #[cfg(feature = "cargo")]
@@ -323,6 +390,8 @@ where
     }
     let loop_result = (|| loop {
         let loop_start_tsc = rdtsc();
+        #[cfg(not(feature = "cargo"))]
+        let held_at_loop_start = held_clock_execute.is_some();
 
         // Host RAM writes can revoke a trusted page without changing the
         // guarded hazard memo's code epoch. Never reuse an old page plan after
@@ -353,6 +422,24 @@ where
             }
         }
 
+        #[cfg(not(feature = "cargo"))]
+        let refresh_called = Ctx::V::uses_nested_paging() && held_clock_execute.is_none();
+        #[cfg(not(feature = "cargo"))]
+        let refresh_flags = {
+            let state = ctx.state();
+            let root = state.vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()
+                .map(|root| root & 0x000f_ffff_ffff_f000);
+            u8::from(runner.can_guard_page_tables())
+                | (u8::from(state.svm_guard.gate_ready) << 1)
+                | (u8::from(state.svm_guard.gate_dirty) << 2)
+                | (u8::from(root == Some(state.svm_guard.gate_root)) << 3)
+                | (u8::from(state.svm_guard.retained_guard_count != 0
+                    && state.svm_guard.retained_mapping_generation
+                        != state.ept.mapping_generation()) << 4)
+                | (u8::from(state.svm_gate_pending_write) << 5)
+        };
+        #[cfg(not(feature = "cargo"))]
+        let pre_refresh_tsc = rdtsc();
         if Ctx::V::uses_nested_paging() && held_clock_execute.is_none() {
             if ctx.state().svm_guard.gate_host_write_all {
                 ctx.state_mut().ept.invalidate_all_npt_code(allocator);
@@ -385,10 +472,18 @@ where
                 runner.can_guard_page_tables(),
             );
         }
+        #[cfg(not(feature = "cargo"))]
+        let post_refresh_tsc = rdtsc();
 
+        #[cfg(not(feature = "cargo"))]
+        let post_gate_tsc = rdtsc();
         ctx.sync_gprs_to_vmx_ctx();
+        #[cfg(not(feature = "cargo"))]
+        let post_gprs_tsc = rdtsc();
 
         inject_pending_interrupt(ctx).map_err(VmRunError::ExitHandler)?;
+        #[cfg(not(feature = "cargo"))]
+        let post_interrupt_tsc = rdtsc();
 
         // SVM software event delivery may write a COW stack frame. Release
         // the old grant before prepare_instruction_exit can perform it.
@@ -440,6 +535,8 @@ where
         if software_exit {
             ctx.sync_gprs_to_vmx_ctx();
         }
+        #[cfg(not(feature = "cargo"))]
+        let post_prepare_tsc = rdtsc();
         let mut scalar_page = ctx.state().svm_gate_scalar_page;
         if let (Some(page), Some(window)) = (scalar_page, instruction_window.as_ref()) {
             let current = window.physical.as_u64() & !4095;
@@ -557,6 +654,8 @@ where
                 }
             }
         }
+        #[cfg(not(feature = "cargo"))]
+        let post_plan_tsc = rdtsc();
         force_single_step = false;
         let mut arm_masked_retry = masked_retry_rip.is_some_and(|rip| {
             batch.as_ref().is_some_and(|batch| batch.global_execution)
@@ -928,6 +1027,26 @@ where
         let irq_window = post_irq_tsc.saturating_sub(pre_irq_tsc);
         ctx.state_mut().exit_stats.vmexit_overhead_cycles +=
             total_exit_overhead.saturating_sub(irq_window);
+
+        #[cfg(not(feature = "cargo"))]
+        if !software_exit && matches!(
+            ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(), Some(16 | 51)
+        ) {
+            clock_entry_phase::record(
+                pre_entry_tsc.saturating_sub(loop_start_tsc),
+                post_gate_tsc.saturating_sub(loop_start_tsc),
+                post_refresh_tsc.saturating_sub(pre_refresh_tsc),
+                refresh_called,
+                refresh_flags,
+                held_at_loop_start,
+                post_gprs_tsc.saturating_sub(post_gate_tsc),
+                post_interrupt_tsc.saturating_sub(post_gprs_tsc),
+                pre_entry_tsc.saturating_sub(post_interrupt_tsc),
+                post_prepare_tsc.saturating_sub(pre_entry_tsc),
+                post_plan_tsc.saturating_sub(post_prepare_tsc),
+                pre_guest_tsc.saturating_sub(post_plan_tsc),
+            );
+        }
 
         let kernel = machine.kernel();
         if Ctx::V::uses_nested_paging()
