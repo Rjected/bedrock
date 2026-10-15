@@ -33,6 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("SVM_CASE").as_deref() == Ok("clock-guard-write") {
         return test_clock_guard_write();
     }
+    if std::env::var("SVM_CASE").as_deref() == Ok("clock-paired-guard-write") {
+        return test_clock_paired_guard_write();
+    }
     test_mov_ss_random_interception()?;
     test_mov_ss_deadline()?;
     test_syscall(false)?;
@@ -49,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_boundary_rdrand()?;
     test_masked_breakpoints()?;
     test_clock_guard_write()?;
+    test_clock_paired_guard_write()?;
     test_fpu_reservation()?;
     Ok(())
 }
@@ -119,6 +123,87 @@ fn test_clock_guard_write() -> Result<(), Box<dyn std::error::Error>> {
             "clock loop lost its retained NPT execute grant: {} fetches",
             stats.ept_violation.count);
         println!("SVM_CLOCK_GUARD_WRITE_PASS npt={} exits={}",
+            stats.ept_violation.count, stats.total_exit_count());
+        return Ok(());
+    }
+}
+
+fn test_clock_paired_guard_write() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = Vm::create(2 * 1024 * 1024)?;
+    vm.set_rdrand_config(&RdrandConfig::exit_to_userspace())?;
+    let memory = vm.memory_mut()?;
+    for (address, entry) in [(0x3000, 0x4007u64), (0x4000, 0x5007), (0x5000, 0x87)] {
+        memory[address..address + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    memory[0x1000..0x3000].fill(0x90);
+    // Each page has an unreachable RNG hazard, so both need guarded NPT
+    // execute grants while the hot loop alternates between them.
+    for offset in [0x11f0, 0x21f0] {
+        memory[offset..offset + 3].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+    }
+    memory[0x1000..0x1007].copy_from_slice(&[
+        0x0f, 0x31, // RDTSC
+        0xe9, 0xf9, 0x0f, 0, 0, // JMP 0x2000
+    ]);
+    let mut code = Vec::new();
+    code.extend([0x0f, 0x31, 0xff, 0xc9]); // RDTSC; DEC ECX
+    code.extend([0x0f, 0x85]); // JNZ 0x1000
+    let back_disp = code.len();
+    code.extend([0; 4]);
+    let back_end = 0x2000 + code.len();
+    code[back_disp..back_disp + 4]
+        .copy_from_slice(&((0x1000i32 - back_end as i32)).to_le_bytes());
+    code.extend([0xc7, 0x05]); // MOV DWORD PTR [RIP+disp32], RDRAND EAX; NOP
+    let store_disp = code.len();
+    code.extend([0; 4]);
+    code.extend([0x0f, 0xc7, 0xf0, 0x90]);
+    let target = 0x2080;
+    let store_end = 0x2000 + code.len();
+    code[store_disp..store_disp + 4]
+        .copy_from_slice(&((target - store_end) as i32).to_le_bytes());
+    code.push(0xe9); // JMP target
+    let jump_disp = code.len();
+    code.extend([0; 4]);
+    let jump_end = 0x2000 + code.len();
+    code[jump_disp..jump_disp + 4]
+        .copy_from_slice(&((target - jump_end) as i32).to_le_bytes());
+    memory[0x2000..0x2000 + code.len()].copy_from_slice(&code);
+    memory[target..target + 9].copy_from_slice(&[
+        0x90, 0x90, 0x90, 0x90, 0x31, 0xc0, 0x0f, 0x01, 0xd9,
+    ]);
+    let mut regs = Regs::long_mode();
+    regs.control_regs.cr3 = Cr3::new(0x3000);
+    regs.rip = 0x1000;
+    regs.gprs.rcx = 64;
+    regs.gprs.rsp = 0x9000;
+    vm.set_regs(&regs)?;
+    vm.set_stop_at_tsc(Some(25))?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 259, "two-page clock loop crossed deadline");
+        assert_eq!(exit.emulated_tsc, 25);
+        break;
+    }
+    vm.set_stop_at_tsc(None)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 57, "patched RDRAND was not intercepted");
+        assert_eq!(vm.get_regs()?.rip, target as u64);
+        assert_eq!(&vm.memory()?[target..target + 4], &[0x0f, 0xc7, 0xf0, 0x90]);
+        break;
+    }
+    vm.set_rdrand_value(0x1234)?;
+    loop {
+        let exit = vm.run()?;
+        if exit.exit_reason == 256 { continue; }
+        assert_eq!(exit.exit_reason, 258, "patched-code guest did not shut down");
+        let stats = vm.get_exit_stats()?;
+        assert!(stats.ept_violation.count < 20,
+            "two-page clock loop lost its guarded NPT execute grants: {} fetches",
+            stats.ept_violation.count);
+        println!("SVM_CLOCK_PAIRED_GUARD_WRITE_PASS npt={} exits={}",
             stats.ept_violation.count, stats.total_exit_count());
         return Ok(());
     }

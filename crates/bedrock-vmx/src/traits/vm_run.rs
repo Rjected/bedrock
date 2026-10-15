@@ -70,6 +70,24 @@ where
 
 // ========== VM Run Methods ==========
 
+fn restore_held_clock_execute<Ctx, A>(
+    ctx: &mut Ctx,
+    allocator: &A,
+    first: &mut Option<NptExecuteGuard>,
+    paired: &mut [Option<NptExecuteGuard>; 3],
+)
+where
+    Ctx: VmContext,
+    A: CowAllocator<Ctx::CowPage>,
+{
+    if let Some(execute) = first.take() {
+        execute.restore(&mut ctx.state_mut().ept, allocator);
+    }
+    for execute in paired.iter_mut().filter_map(Option::take) {
+        execute.restore(&mut ctx.state_mut().ept, allocator);
+    }
+}
+
 /// Run the VM until an exit requiring userspace handling. Swaps the MSRs that
 /// have no VMCS fields around the run loop.
 ///
@@ -293,9 +311,12 @@ where
     let mut masked_retry_plan: Option<(super::InstructionBatch, u64, u64)> = None;
     // A clock read does not change guest memory or translations. Reuse its
     // global proof on the next entry. The code write guard is rearmed for
-    // every entry; a single-page execute grant may stay live between them.
+    // every entry; validated execute grants may stay live between clock exits.
     let mut clock_retry_plan: Option<(super::InstructionBatch, u64, u64)> = None;
     let mut held_clock_execute: Option<NptExecuteGuard> = None;
+    let mut held_clock_paired: [Option<NptExecuteGuard>; 3] = [None, None, None];
+    let mut held_clock_pages = [0u64; 4];
+    let mut held_clock_page_count = 0;
     if Ctx::V::uses_nested_paging() && !ctx.state().svm_host_memory_stable {
         // Userspace may have changed RAM between RUN calls.
         ctx.state_mut().svm_guard.valid = false;
@@ -348,7 +369,8 @@ where
                             == ctx.state().svm_guard.gate_root)
             });
             if !still_guarded {
-                held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
+                restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+                held_clock_page_count = 0;
                 clock_retry_plan = None;
             }
         }
@@ -396,7 +418,8 @@ where
             && ctx.state().vmcs.read32(VmcsField32::VmEntryInterruptionInfo)
                 .ok().is_none_or(|info| info & (1 << 31) != 0)
         {
-            held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
+            restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+            held_clock_page_count = 0;
             clock_retry_plan = None;
         }
 
@@ -501,7 +524,10 @@ where
                 (clock_retry_plan.take(), instruction_window.as_ref())
             {
                 let budget = super::super::exits::instruction_budget(ctx);
-                if !software_exit && !force_single_step && scalar_page.is_none()
+                if !software_exit && !force_single_step
+                    && scalar_page.is_none_or(|page| {
+                        previous.pages[..previous.code_page_count].contains(&page)
+                    })
                     && previous.global_execution
                     && budget > super::super::traits::InstructionBatch::COUNTER_DEADLINE_MARGIN
                     && ctx.state().svm_guard.gate_ready && !ctx.state().svm_guard.gate_dirty
@@ -524,12 +550,17 @@ where
                         previous.start = start;
                         batch = Some(previous);
                         reused_clock_plan = true;
+                        // The retained batch already grants this selected
+                        // page. A fetch-fault scalar hint cannot require a
+                        // second, overlapping execute-grant token.
+                        scalar_page = None;
                     }
                 }
             }
         }
         if held_clock_execute.is_some() && !reused_clock_plan {
-            held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
+            restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+            held_clock_page_count = 0;
         }
         if Ctx::V::uses_nested_paging() && !software_exit && !force_single_step {
             let trusted_scalar = scalar_page.is_some_and(|page| {
@@ -578,10 +609,14 @@ where
         if held_clock_execute.is_some()
             && !(reused_clock_plan
                 && batch.as_ref().is_some_and(|batch| {
-                    batch.global_execution && batch.code_page_count == 1
+                    batch.global_execution
+                        && batch.code_page_count == held_clock_page_count
+                        && batch.pages[..batch.code_page_count]
+                            == held_clock_pages[..held_clock_page_count]
                 }))
         {
-            held_clock_execute.take().unwrap().restore(&mut ctx.state_mut().ept, allocator);
+            restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+            held_clock_page_count = 0;
         }
         let mut scalar_execute = if !software_exit {
             scalar_page
@@ -614,9 +649,8 @@ where
             super::super::exits::protect_instruction_batch(ctx, allocator, batch)
         });
         if batch.is_some() && guard.is_none() {
-            if let Some(execute) = held_clock_execute.take() {
-                execute.restore(&mut ctx.state_mut().ept, allocator);
-            }
+            restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+            held_clock_page_count = 0;
             batch = None;
         }
         // A global batch has validated the current hazardous page's exact
@@ -654,13 +688,17 @@ where
         let mut paired_execute: [Option<NptExecuteGuard>; 3] = [None, None, None];
         if let Some(batch) = batch.as_ref().filter(|batch| batch.global_execution) {
             for index in 1..batch.code_page_count {
-                let Some(execute) = ctx.state_mut().ept.allow_npt_execute_4k(
-                    allocator,
-                    GuestPhysAddr::new(batch.pages[index]),
-                ) else {
+                let Some(execute) = held_clock_paired[index - 1].take().or_else(|| {
+                    ctx.state_mut().ept.allow_npt_execute_4k(
+                        allocator,
+                        GuestPhysAddr::new(batch.pages[index]),
+                    )
+                }) else {
                     for execute in paired_execute.into_iter().flatten() {
                         execute.restore(&mut ctx.state_mut().ept, allocator);
                     }
+                    restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+                    held_clock_page_count = 0;
                     if let Some(execute) = scalar_next_execute {
                         execute.restore(&mut ctx.state_mut().ept, allocator);
                     }
@@ -677,6 +715,7 @@ where
                 paired_execute[index - 1] = Some(execute);
             }
         }
+        held_clock_page_count = 0;
         if Ctx::V::uses_nested_paging() {
             super::super::exits::retain_translation_cache(
                 ctx,
@@ -805,20 +844,30 @@ where
                 masked_retry_plan = None;
             }
         }
-        for execute in paired_execute.into_iter().flatten() {
-            execute.restore(&mut ctx.state_mut().ept, allocator);
-        }
         let has_scalar_next_execute = scalar_next_execute.is_some();
         if let Some(execute) = scalar_next_execute {
             execute.restore(&mut ctx.state_mut().ept, allocator);
         }
         let hold_clock_execute = run_result.is_ok()
             && batch.as_ref().is_some_and(|batch| {
-                batch.global_execution && batch.code_page_count == 1
+                batch.global_execution && batch.code_page_count <= 4
             })
             && matches!(ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(), Some(16 | 51))
             && !force_single_step && masked_retry_rip.is_none()
             && !has_scalar_next_execute;
+        if hold_clock_execute {
+            let selected = batch.as_ref().unwrap();
+            held_clock_page_count = selected.code_page_count;
+            held_clock_pages[..selected.code_page_count]
+                .copy_from_slice(&selected.pages[..selected.code_page_count]);
+            for (held, current) in held_clock_paired.iter_mut().zip(paired_execute.iter_mut()) {
+                *held = current.take();
+            }
+        } else {
+            for execute in paired_execute.into_iter().flatten() {
+                execute.restore(&mut ctx.state_mut().ept, allocator);
+            }
+        }
         if let Some(execute) = scalar_execute.take_if(|_| !hold_clock_execute) {
             execute.restore(&mut ctx.state_mut().ept, allocator);
             let replay = ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
@@ -848,6 +897,7 @@ where
                 .as_ref()
                 .is_some_and(|batch| batch.global_execution && batch.code_page_count == 2)
             && !force_single_step
+            && !matches!(ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok(), Some(16 | 51))
         {
             if let Some(page) = super::super::exits::InstructionWindow::read_cached(ctx)
                 .ok()
@@ -971,6 +1021,10 @@ where
                         execute.restore(&mut ctx.state_mut().ept, allocator);
                     }
                 }
+                if held_clock_execute.is_none() {
+                    restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+                    held_clock_page_count = 0;
+                }
 
                 let loop_end_tsc = rdtsc();
                 ctx.state_mut().exit_stats.total_run_cycles +=
@@ -1007,9 +1061,7 @@ where
             }
         }
     })();
-    if let Some(execute) = held_clock_execute.take() {
-        execute.restore(&mut ctx.state_mut().ept, allocator);
-    }
+    restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
 
     // Must run on the same CPU as `prepare`.
     let finish_result = ctx
