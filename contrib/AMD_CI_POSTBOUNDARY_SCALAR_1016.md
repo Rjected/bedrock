@@ -22,6 +22,15 @@ retain execute permission and stop repeated fetch faults. Remaining scalar
 faults, including other one-hazard pages, still dominate the AMD execution
 cost. The absolute diagnostic runtime is not a production speed comparison.
 
+The leading remaining sampled one-hazard pair was physical page `0x1feb000`,
+offset `0xe86` (184 samples). Its hot fetch RIPs resolved against the pinned
+guest `vmlinux` to `__schedule` around `0xffffffff81febed0`. The apparent
+`REP` bytes at `0xffffffff81febe86` are inside an immediate operand of a
+`mov` in the preceding `is_mmconf_reserved` function. This is a cold false
+hazard sharing a page with hot scheduler code; dropping its guard still needs
+a proof that no guest entry can jump into those bytes. A page-local byte scan
+alone cannot establish that.
+
 Raw counter lines are under ignored
 `target/boxctl-evidence/box-5e63aad0/postboundary/dmesg.txt` in this
 worktree. No kernel module was built or loaded on the workstation.
