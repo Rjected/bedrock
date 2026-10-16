@@ -63,3 +63,10 @@ same-box production control. Matched short progress runs showed little
 change in total NPT faults. The trial remains isolated on
 `dan/amd-root-conditional-reproof-1016`; the root-switch revocations are
 not the main remaining fetch-fault source.
+
+A [one-hazard reachable-region probe](AMD_CI_ONE_HAZARD_REGION_FEASIBILITY_1016.md)
+found a zero-breakpoint region for about 2% of sampled guarded entries,
+with none of the logged zero regions on the hot scheduler page. Broadly
+applying that prover to one-hazard pages would mostly exchange an exact
+hazard breakpoint for one or more frontier stops, so no execution change
+was merged.
