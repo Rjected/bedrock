@@ -54,3 +54,12 @@ versus a 166-second adjacent unchanged-production control. It remains
 isolated on `dan/amd-stable-tree-1016`; the overlap diagnostic is on
 `dan/amd-postsuccessor-scalar-1016`. The larger root-switch class still
 requires a proof that is valid in the new address space.
+
+A [destination-root proof diagnostic](AMD_CI_ROOT_REPROOF_FEASIBILITY_1016.md)
+found cached alias proofs for all conditional pages in 495/576 sampled root
+switches. A [full reproof trial](AMD_CI_ROOT_REPROOF_TRIAL_1016.md)
+successfully retained many grants, but took 168 seconds versus a 166-second
+same-box production control. Matched short progress runs showed little
+change in total NPT faults. The trial remains isolated on
+`dan/amd-root-conditional-reproof-1016`; the root-switch revocations are
+not the main remaining fetch-fault source.
