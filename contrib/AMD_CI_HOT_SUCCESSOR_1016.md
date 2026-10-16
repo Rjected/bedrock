@@ -39,6 +39,14 @@ run. The A/B/A sequence supports an approximately 8–12-second gain on this
 seed. It does not establish Intel-equivalent performance: the reported Intel
 run used different host hardware and guest images.
 
+After cherry-picking the candidate into production as `23f7e79`, the exact
+pushed tree passed the complete in-box SVM suite, all 282 VMX and 19 EPT
+library tests, and a full-duration two-seed campaign. Both seeds
+`14373434789495652599` and `14373434789495652600` passed (`failed=0`) in
+335 host seconds total. The second seed uses a different preemption setting;
+the aggregate two-seed timing is a correctness result, not an A/B speed
+comparison with the one-seed control.
+
 Raw status and campaign logs are under ignored
 `target/boxctl-evidence/box-ad3b5fef/` in this worktree and on the box until
 its lease expires. All kernel-module builds and loads occurred inside the
