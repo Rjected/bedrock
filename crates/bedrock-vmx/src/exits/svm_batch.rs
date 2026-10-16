@@ -7,6 +7,8 @@ use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, Rep
 use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::Ordering;
 #[cfg(not(feature = "cargo"))]
+use core::sync::atomic::AtomicU64;
+#[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
@@ -22,6 +24,47 @@ const _: () = assert!(SVM_ALIAS_PROOF_LOOKUP_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_LEAF_FILTER_WORDS == 16);
 const _: () = assert!(SVM_REBUILD_GUARD_INDEX_CAPACITY.is_power_of_two());
 const _: () = assert!(SVM_REBUILD_GUARD_INDEX_CAPACITY > SVM_RETAINED_GUARD_CAPACITY);
+
+#[cfg(not(feature = "cargo"))]
+static GLOBAL_DETAIL_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static GLOBAL_HAZARD_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static GLOBAL_BREAKPOINT_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static GLOBAL_RECENT_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static GLOBAL_RECENT_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_COLLECT_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_CACHE_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_COMPOSE_HITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_COMPOSE_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_WALKS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_WALK_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_MISS_UNGUARDED: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_MISS_SAME_INVALID: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_MISS_SET_FULL: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_MISS_SINGLE: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_MISS_MULTI: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_LEAF_DIFF_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_LEAF_DIFF_NEW_EXEC: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static BP_LEAF_DIFF_INVALIDATED: AtomicU64 = AtomicU64::new(0);
 
 fn successor_slot(root: u64, from: u64) -> usize {
     let key = (from >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -646,7 +689,7 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     if (!scratch.gate_ready || scratch.gate_dirty || scratch.gate_root != root)
         && !preserve_alias_proofs && !guarded_root_switch
     {
-        invalidate_alias_proofs(scratch);
+        invalidate_alias_proofs_reason(scratch, 0);
     }
     scratch.valid = false;
     scratch.translation_count = 0;
@@ -781,7 +824,7 @@ fn restore_global_table_guards<C: VmContext, A: CowAllocator<C::CowPage>>(
     guard.gate_dirty = false;
     guard.gate_links_untrusted = true;
     clear_leaf_snapshots(guard);
-    invalidate_alias_proofs(guard);
+    invalidate_alias_proofs_reason(guard, 1);
 }
 
 fn retained_guard_for(guard: &super::super::vm_state::SvmGuardScratch, page: u64) -> Option<usize> {
@@ -881,6 +924,36 @@ fn invalidate_alias_proofs(guard: &mut super::super::vm_state::SvmGuardScratch) 
     guard.alias_proofs_nonempty = false;
 }
 
+fn invalidate_alias_proofs_reason(
+    guard: &mut super::super::vm_state::SvmGuardScratch,
+    reason: usize,
+) {
+    #[cfg(not(feature = "cargo"))]
+    {
+        static TOTAL: AtomicU64 = AtomicU64::new(0);
+        static REASONS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+        if guard.alias_proofs_nonempty {
+            REASONS[reason].fetch_add(1, Ordering::Relaxed);
+            let n = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+            if n & ((1 << 12) - 1) == 0 {
+                kernel::pr_info!("SVM_ALIAS_INVALIDATE total={} tree={} restore={} leaf_fail={} dirty={} retained={} snapshot={} upper={} hazard={}\n",
+                    n,
+                    REASONS[0].load(Ordering::Relaxed),
+                    REASONS[1].load(Ordering::Relaxed),
+                    REASONS[2].load(Ordering::Relaxed),
+                    REASONS[3].load(Ordering::Relaxed),
+                    REASONS[4].load(Ordering::Relaxed),
+                    REASONS[5].load(Ordering::Relaxed),
+                    REASONS[6].load(Ordering::Relaxed),
+                    REASONS[7].load(Ordering::Relaxed));
+            }
+        }
+    }
+    #[cfg(feature = "cargo")]
+    let _ = reason;
+    invalidate_alias_proofs(guard);
+}
+
 /// A changed leaf PTE can create an executable alias only for the physical
 /// page it names after the write. Removed aliases leave extra breakpoints.
 fn leaf_page_slot(physical: u64) -> usize {
@@ -945,6 +1018,8 @@ fn clear_leaf_snapshots(guard: &mut super::super::vm_state::SvmGuardScratch) {
 }
 
 fn invalidate_alias_proofs_for_released_leaves<C: VmContext>(ctx: &mut C) -> Option<()> {
+    #[cfg(not(feature = "cargo"))]
+    BP_LEAF_DIFF_CALLS.fetch_add(1, Ordering::Relaxed);
     if ctx.state().svm_guard.leaf_snapshot_overflow {
         return None;
     }
@@ -979,6 +1054,8 @@ fn invalidate_alias_proofs_for_released_leaves<C: VmContext>(ctx: &mut C) -> Opt
                     continue;
                 }
                 leaf_page_insert(&mut ctx.state_mut().svm_guard.leaf_pages, physical)?;
+                #[cfg(not(feature = "cargo"))]
+                BP_LEAF_DIFF_NEW_EXEC.fetch_add(1, Ordering::Relaxed);
             }
         }
         let guard = &mut *ctx.state_mut().svm_guard;
@@ -987,6 +1064,8 @@ fn invalidate_alias_proofs_for_released_leaves<C: VmContext>(ctx: &mut C) -> Opt
             if proof.valid && proof.pages[..proof.page_count]
                 .iter().any(|&page| leaf_page_contains(set, page)) {
                 proof.valid = false;
+                #[cfg(not(feature = "cargo"))]
+                BP_LEAF_DIFF_INVALIDATED.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1076,6 +1155,23 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     allocator: &A,
     can_guard_page_tables: bool,
 ) {
+    #[cfg(not(feature = "cargo"))]
+    {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        static FAST: AtomicU64 = AtomicU64::new(0);
+        static DIRTY: AtomicU64 = AtomicU64::new(0);
+        let n = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        if ctx.state().svm_guard.gate_ready && !ctx.state().svm_guard.gate_dirty {
+            FAST.fetch_add(1, Ordering::Relaxed);
+        } else {
+            DIRTY.fetch_add(1, Ordering::Relaxed);
+        }
+        if n & ((1 << 22) - 1) == 0 {
+            kernel::pr_info!("SVM_REFRESH_CLASS calls={} ready_clean={} dirty_or_unready={}\n",
+                n, FAST.load(Ordering::Relaxed), DIRTY.load(Ordering::Relaxed));
+        }
+    }
     if !can_guard_page_tables {
         ctx.state_mut().svm_guard.gate_disabled_no_rogpt = true;
         if !ctx.state().svm_guard.gate_ready
@@ -1146,7 +1242,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     );
     if leaf_only {
         if invalidate_alias_proofs_for_released_leaves(ctx).is_none() {
-            invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+            invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 2);
         }
         let count = ctx.state().svm_guard.gate_count;
         let mut rearmed = true;
@@ -1193,7 +1289,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
             guard.gate_dirty = false;
             return;
         }
-        invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+        invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 3);
     }
     ctx.state_mut().svm_guard.valid = false;
     let mut retained = alias_proofs_safe_across_rebuild(ctx, root);
@@ -1202,7 +1298,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
         // Switching CR3 before its store can be checked must not preserve
         // proofs for that old root through the retained-guard registry.
         if ctx.state().svm_guard.gate_dirty {
-            invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+            invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 3);
         }
     }
     let scanned = collect_translation_tree_pages(ctx, &[]).is_some();
@@ -1243,7 +1339,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
                 continue;
             }
             ctx.state_mut().svm_guard.retained_guards[retained_index].valid = false;
-            invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+            invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 4);
             retained = None;
         }
         match ctx.state_mut().ept.restrict_write_4k(allocator, gpa) {
@@ -1329,7 +1425,7 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
     });
     if active_leaf && snapshot_released_leaf(ctx, page).is_none() {
         ctx.state_mut().svm_guard.leaf_snapshot_overflow = true;
-        invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+        invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 5);
     }
     for current in 0..count {
         if ctx.state().svm_guard.gate_tables[current] == page {
@@ -1341,7 +1437,7 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
     // write can then invalidate only proofs whose code pages are executable
     // through that leaf; upper or inactive-root writes still drop all proofs.
     if !active_leaf {
-        invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+        invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 6);
     }
     true
 }
@@ -1859,7 +1955,7 @@ fn cached_page_hazards<C: VmContext>(ctx: &mut C, physical: u64) -> Option<PageH
             guard.gate_ready && guard.gate_dirty && guard.gate_root == root
         });
         if !gate_guarded && !pending_leaf_refresh && !pending_full_refresh {
-            invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+            invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 7);
         }
     }
     let cache = &ctx.state().svm_guard;
@@ -2197,6 +2293,18 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     window: &super::svm::InstructionWindow,
     output: &mut Option<InstructionBatch>,
 ) -> Option<()> {
+    #[cfg(not(feature = "cargo"))]
+    {
+        let n = GLOBAL_DETAIL_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n & ((1 << 22) - 1) == 0 {
+            kernel::pr_info!("SVM_GLOBAL_DETAIL calls={} hazards={} breakpoints={} recent_calls={} recent_cycles={}\n",
+                n,
+                GLOBAL_HAZARD_CYCLES.load(Ordering::Relaxed),
+                GLOBAL_BREAKPOINT_CYCLES.load(Ordering::Relaxed),
+                GLOBAL_RECENT_CALLS.load(Ordering::Relaxed),
+                GLOBAL_RECENT_CYCLES.load(Ordering::Relaxed));
+        }
+    }
     let page = window.physical.as_u64() & !4095;
     let trusted = ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page));
     if !can_count
@@ -2246,7 +2354,12 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     let batch = output.as_mut().unwrap();
     batch.pages[0] = page;
     if !trusted {
-        let mut hazard = cached_page_hazards(ctx, page)?;
+        #[cfg(not(feature = "cargo"))]
+        let detail_start = rdtsc();
+        let current_hazard = cached_page_hazards(ctx, page);
+        #[cfg(not(feature = "cargo"))]
+        GLOBAL_HAZARD_CYCLES.fetch_add(rdtsc().saturating_sub(detail_start), Ordering::Relaxed);
+        let mut hazard = current_hazard?;
         if hazard.count == 0 {
             // A page first fetched while the translation gate was dirty can
             // remain on the scalar path after the gate becomes usable. The
@@ -2284,7 +2397,12 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         {
             return Some(());
         }
-        collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
+        #[cfg(not(feature = "cargo"))]
+        let detail_start = rdtsc();
+        let collected = collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard));
+        #[cfg(not(feature = "cargo"))]
+        GLOBAL_BREAKPOINT_CYCLES.fetch_add(rdtsc().saturating_sub(detail_start), Ordering::Relaxed);
+        collected?;
         let boundary_proven = suppress_safe_single_alias_boundary(
             ctx, allocator, batch, &hazard, window.linear,
         );
@@ -2298,6 +2416,8 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // hazardous pages without an execute fault when all executable
         // aliases fit the four hardware breakpoints. Each admitted page must
         // also be safe at a boundary with every other admitted page.
+        #[cfg(not(feature = "cargo"))]
+        let detail_start = rdtsc();
         let current_linear = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
         let mut hazards = [hazard; 4];
@@ -2378,6 +2498,11 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             batch.code_page_count += 1;
             batch.page_count += 1;
             hazard_count += other.count;
+        }
+        #[cfg(not(feature = "cargo"))]
+        {
+            GLOBAL_RECENT_CALLS.fetch_add(1, Ordering::Relaxed);
+            GLOBAL_RECENT_CYCLES.fetch_add(rdtsc().saturating_sub(detail_start), Ordering::Relaxed);
         }
     } else {
         // A globally trusted current page uses no debug-register slots. A
@@ -2782,6 +2907,31 @@ fn collect_page_breakpoints<C: VmContext>(
     batch: &mut InstructionBatch,
     hazards: &[PageHazards],
 ) -> Option<()> {
+    #[cfg(not(feature = "cargo"))]
+    let collect_start = rdtsc();
+    #[cfg(not(feature = "cargo"))]
+    {
+        let n = BP_COLLECT_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n & ((1 << 22) - 1) == 0 {
+            kernel::pr_info!("SVM_BP_COLLECT calls={} cached={} cached_cycles={} composed={} composed_cycles={} walks={} walk_cycles={}\n",
+                n, BP_CACHE_HITS.load(Ordering::Relaxed),
+                BP_CACHE_CYCLES.load(Ordering::Relaxed),
+                BP_COMPOSE_HITS.load(Ordering::Relaxed),
+                BP_COMPOSE_CYCLES.load(Ordering::Relaxed),
+                BP_WALKS.load(Ordering::Relaxed),
+                BP_WALK_CYCLES.load(Ordering::Relaxed));
+            kernel::pr_info!("SVM_BP_MISS unguarded={} same_invalid={} set_full={} single={} multi={}\n",
+                BP_MISS_UNGUARDED.load(Ordering::Relaxed),
+                BP_MISS_SAME_INVALID.load(Ordering::Relaxed),
+                BP_MISS_SET_FULL.load(Ordering::Relaxed),
+                BP_MISS_SINGLE.load(Ordering::Relaxed),
+                BP_MISS_MULTI.load(Ordering::Relaxed));
+            kernel::pr_info!("SVM_BP_LEAF_DIFF calls={} new_exec={} invalidated={}\n",
+                BP_LEAF_DIFF_CALLS.load(Ordering::Relaxed),
+                BP_LEAF_DIFF_NEW_EXEC.load(Ordering::Relaxed),
+                BP_LEAF_DIFF_INVALIDATED.load(Ordering::Relaxed));
+        }
+    }
     if hazards.len() < batch.code_page_count {
         return None;
     }
@@ -2866,12 +3016,44 @@ fn collect_page_breakpoints<C: VmContext>(
         let cache = &mut ctx.state_mut().svm_guard;
         cache.alias_last_hit = index;
         cache.alias_lookup[lookup] = (index + 1) as u16;
+        #[cfg(not(feature = "cargo"))]
+        {
+            BP_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            BP_CACHE_CYCLES.fetch_add(rdtsc().saturating_sub(collect_start), Ordering::Relaxed);
+        }
         return Some(());
+    }
+    #[cfg(not(feature = "cargo"))]
+    {
+        if !tree_guarded {
+            BP_MISS_UNGUARDED.fetch_add(1, Ordering::Relaxed);
+        }
+        if ctx.state().svm_guard.alias_proofs[set..set + SVM_ALIAS_PROOF_WAYS]
+            .iter().any(|proof| !proof.valid && proof.key_hash == key_hash
+                && proof.root == root)
+        {
+            BP_MISS_SAME_INVALID.fetch_add(1, Ordering::Relaxed);
+        }
+        if ctx.state().svm_guard.alias_proofs[set..set + SVM_ALIAS_PROOF_WAYS]
+            .iter().all(|proof| proof.valid)
+        {
+            BP_MISS_SET_FULL.fetch_add(1, Ordering::Relaxed);
+        }
+        if hazard_pages == 1 {
+            BP_MISS_SINGLE.fetch_add(1, Ordering::Relaxed);
+        } else {
+            BP_MISS_MULTI.fetch_add(1, Ordering::Relaxed);
+        }
     }
     if hazard_pages > 1 && matches(&cache.alias_proof) {
         batch.page_breakpoints = cache.alias_proof.breakpoints;
         batch.page_breakpoint_masks = cache.alias_proof.breakpoint_masks;
         batch.page_breakpoint_count = cache.alias_proof.breakpoint_count;
+        #[cfg(not(feature = "cargo"))]
+        {
+            BP_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            BP_CACHE_CYCLES.fetch_add(rdtsc().saturating_sub(collect_start), Ordering::Relaxed);
+        }
         return Some(());
     }
     // A proof for each page independently proves all executable aliases of
@@ -2912,6 +3094,11 @@ fn collect_page_breakpoints<C: VmContext>(
         }
         if complete {
             remember_alias_proof(ctx, batch, hazards, root, key_hash, set, hazard_pages, false);
+            #[cfg(not(feature = "cargo"))]
+            {
+                BP_COMPOSE_HITS.fetch_add(1, Ordering::Relaxed);
+                BP_COMPOSE_CYCLES.fetch_add(rdtsc().saturating_sub(collect_start), Ordering::Relaxed);
+            }
             return Some(());
         }
         batch.page_breakpoint_count = 0;
@@ -3052,6 +3239,11 @@ fn collect_page_breakpoints<C: VmContext>(
         cursor += 1;
     }
     remember_alias_proof(ctx, batch, hazards, root, key_hash, set, hazard_pages, true);
+    #[cfg(not(feature = "cargo"))]
+    {
+        BP_WALKS.fetch_add(1, Ordering::Relaxed);
+        BP_WALK_CYCLES.fetch_add(rdtsc().saturating_sub(collect_start), Ordering::Relaxed);
+    }
     Some(())
 }
 

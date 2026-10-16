@@ -4,8 +4,35 @@
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
+#[cfg(not(feature = "cargo"))]
+use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
+
+// Disposable-box diagnostic: aggregate phase costs without extending the
+// userspace stats ABI or emitting a log line on every VM exit.
+#[cfg(not(feature = "cargo"))]
+static PROFILE_ENTRIES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_TOTAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_REFRESH: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_INSTRUCTION: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_PLAN: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_PROTECT: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_GLOBAL_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_GLOBAL_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_FALLBACK_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_FALLBACK_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "cargo"))]
+static PROFILE_CLOCK_REUSES: AtomicU64 = AtomicU64::new(0);
 
 use super::{
     CowAllocator, InstructionCounter, IrqGuard, Kernel, Machine, Page, ReverseIrqGuard,
@@ -344,6 +371,8 @@ where
     }
     let loop_result = (|| loop {
         let loop_start_tsc = rdtsc();
+        #[cfg(not(feature = "cargo"))]
+        let mut phase_refresh = 0u64;
 
         // Host RAM writes can revoke a trusted page without changing the
         // guarded hazard memo's code epoch. Never reuse an old page plan after
@@ -401,11 +430,15 @@ where
             }
             ctx.state_mut().svm_guard.gate_host_write_count = 0;
             ctx.state_mut().svm_guard.gate_host_write_all = false;
+            #[cfg(not(feature = "cargo"))]
+            let phase_start = rdtsc();
             super::super::exits::refresh_global_tree(
                 ctx,
                 allocator,
                 runner.can_guard_page_tables(),
             );
+            #[cfg(not(feature = "cargo"))]
+            { phase_refresh = rdtsc().saturating_sub(phase_start); }
         }
 
         ctx.sync_gprs_to_vmx_ctx();
@@ -452,6 +485,8 @@ where
 
         // Split borrow: vmx_ctx mutably, vmcs immutably.
         let mut instruction_window = None;
+        #[cfg(not(feature = "cargo"))]
+        let phase_start = rdtsc();
         let software_exit = Ctx::V::uses_nested_paging()
             && super::super::exits::prepare_instruction_exit(
                 ctx,
@@ -460,6 +495,8 @@ where
                 &mut instruction_window,
             )
             .map_err(VmRunError::ExitHandler)?;
+        #[cfg(not(feature = "cargo"))]
+        let phase_instruction = rdtsc().saturating_sub(phase_start);
         if software_exit {
             ctx.sync_gprs_to_vmx_ctx();
         }
@@ -490,6 +527,8 @@ where
         if replay_single_step {
             force_single_step = true;
         }
+        #[cfg(not(feature = "cargo"))]
+        let phase_start = rdtsc();
         let mut batch = None;
         let mut reused_clock_plan = false;
         // A false address-mask hit retires no instruction at its RIP. The
@@ -550,6 +589,8 @@ where
                         previous.start = start;
                         batch = Some(previous);
                         reused_clock_plan = true;
+                        #[cfg(not(feature = "cargo"))]
+                        PROFILE_CLOCK_REUSES.fetch_add(1, Ordering::Relaxed);
                         // The retained batch already grants this selected
                         // page. A fetch-fault scalar hint cannot require a
                         // second, overlapping execute-grant token.
@@ -568,14 +609,26 @@ where
             });
             if !trusted_scalar && batch.is_none() {
                 if let Some(window) = instruction_window.as_mut() {
-                    if super::super::exits::prepare_global_into(
+                    #[cfg(not(feature = "cargo"))]
+                    let subphase_start = rdtsc();
+                    let global = super::super::exits::prepare_global_into(
                         ctx,
                         allocator,
                         runner.can_count_instructions(),
                         scalar_page.is_some(),
                         window,
                         &mut batch,
-                    ).is_none() {
+                    );
+                    #[cfg(not(feature = "cargo"))]
+                    {
+                        PROFILE_GLOBAL_CALLS.fetch_add(1, Ordering::Relaxed);
+                        PROFILE_GLOBAL_CYCLES.fetch_add(
+                            rdtsc().saturating_sub(subphase_start), Ordering::Relaxed,
+                        );
+                    }
+                    if global.is_none() {
+                        #[cfg(not(feature = "cargo"))]
+                        let subphase_start = rdtsc();
                         batch = window.fill_full(ctx).ok().and_then(|_| {
                             super::super::exits::prepare_instruction_batch(
                                 ctx,
@@ -584,11 +637,20 @@ where
                                 window,
                             )
                         });
+                        #[cfg(not(feature = "cargo"))]
+                        {
+                            PROFILE_FALLBACK_CALLS.fetch_add(1, Ordering::Relaxed);
+                            PROFILE_FALLBACK_CYCLES.fetch_add(
+                                rdtsc().saturating_sub(subphase_start), Ordering::Relaxed,
+                            );
+                        }
                     }
                 }
             }
         }
         force_single_step = false;
+        #[cfg(not(feature = "cargo"))]
+        let phase_plan = rdtsc().saturating_sub(phase_start);
         let mut arm_masked_retry = masked_retry_rip.is_some_and(|rip| {
             batch.as_ref().is_some_and(|batch| batch.global_execution)
                 && ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok() == Some(rip)
@@ -645,9 +707,13 @@ where
         } else {
             None
         };
+        #[cfg(not(feature = "cargo"))]
+        let phase_start = rdtsc();
         let guard = batch.as_ref().and_then(|batch| {
             super::super::exits::protect_instruction_batch(ctx, allocator, batch)
         });
+        #[cfg(not(feature = "cargo"))]
+        let phase_protect = rdtsc().saturating_sub(phase_start);
         if batch.is_some() && guard.is_none() {
             restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
             held_clock_page_count = 0;
@@ -725,6 +791,29 @@ where
             );
         }
         let pre_guest_tsc = rdtsc();
+        #[cfg(not(feature = "cargo"))]
+        if Ctx::V::uses_nested_paging() {
+            let n = PROFILE_ENTRIES.fetch_add(1, Ordering::Relaxed) + 1;
+            PROFILE_TOTAL.fetch_add(pre_guest_tsc.saturating_sub(loop_start_tsc), Ordering::Relaxed);
+            PROFILE_REFRESH.fetch_add(phase_refresh, Ordering::Relaxed);
+            PROFILE_INSTRUCTION.fetch_add(phase_instruction, Ordering::Relaxed);
+            PROFILE_PLAN.fetch_add(phase_plan, Ordering::Relaxed);
+            PROFILE_PROTECT.fetch_add(phase_protect, Ordering::Relaxed);
+            if n & ((1 << 22) - 1) == 0 {
+                kernel::pr_info!("SVM_ENTRY_PHASE entries={} total={} refresh={} instruction={} plan={} protect={}\n",
+                    n, PROFILE_TOTAL.load(Ordering::Relaxed),
+                    PROFILE_REFRESH.load(Ordering::Relaxed),
+                    PROFILE_INSTRUCTION.load(Ordering::Relaxed),
+                    PROFILE_PLAN.load(Ordering::Relaxed),
+                    PROFILE_PROTECT.load(Ordering::Relaxed));
+                kernel::pr_info!("SVM_ENTRY_SUBPHASE global_calls={} global_cycles={} fallback_calls={} fallback_cycles={} clock_reuses={}\n",
+                    PROFILE_GLOBAL_CALLS.load(Ordering::Relaxed),
+                    PROFILE_GLOBAL_CYCLES.load(Ordering::Relaxed),
+                    PROFILE_FALLBACK_CALLS.load(Ordering::Relaxed),
+                    PROFILE_FALLBACK_CYCLES.load(Ordering::Relaxed),
+                    PROFILE_CLOCK_REUSES.load(Ordering::Relaxed));
+            }
+        }
         ctx.state_mut().exit_stats.vmentry_overhead_cycles +=
             pre_guest_tsc.saturating_sub(pre_entry_tsc);
         let state = ctx.state_mut();
