@@ -2298,9 +2298,25 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             return Some(());
         }
         collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
+        #[cfg(not(feature = "cargo"))]
+        let boundary_candidate = hazard.count == 1 && hazard.offsets[0] == 4095;
         let boundary_proven = suppress_safe_single_alias_boundary(
             ctx, allocator, batch, &hazard, window.linear,
         );
+        #[cfg(not(feature = "cargo"))]
+        if boundary_candidate {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static CANDIDATES: AtomicU64 = AtomicU64::new(0);
+            static PROVEN: AtomicU64 = AtomicU64::new(0);
+            if boundary_proven {
+                PROVEN.fetch_add(1, Ordering::Relaxed);
+            }
+            let candidates = CANDIDATES.fetch_add(1, Ordering::Relaxed) + 1;
+            if candidates % (1 << 20) == 0 {
+                kernel::pr_info!("SVM_BOUNDARY_PROOF candidates={} proven={}\n",
+                    candidates, PROVEN.load(Ordering::Relaxed));
+            }
+        }
         if boundary_proven {
             hazard.count = 0;
         }
