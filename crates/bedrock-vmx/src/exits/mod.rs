@@ -40,7 +40,7 @@ pub use reasons::ExitReason;
 pub(crate) use svm::prepare_instruction_exit;
 pub(crate) use svm_batch::prepare as prepare_instruction_batch;
 pub(crate) use svm_batch::{bounded_repeat_entry, instruction_budget, prepare_global_into, proven_nonhazard, refresh_global_tree};
-pub(crate) use svm_batch::{conditional_code_needs_revoke, revoke_conditional_code};
+pub(crate) use svm_batch::{conditional_code_needs_revoke, reprove_conditional_code_for_root, revoke_conditional_code};
 pub(crate) use svm_batch::protect as protect_instruction_batch;
 pub(crate) use svm_batch::gate_table_contains;
 pub use vmcall::{

@@ -2566,6 +2566,99 @@ pub(crate) fn conditional_code_needs_revoke<C: VmContext>(ctx: &C) -> bool {
         || ctx.state().ept.trusted_code_generation() != guard.conditional_trusted_generation
 }
 
+/// Retain a root-dependent boundary grant across CR3 only after proving its
+/// sole executable alias and safe continuation in the new guarded root.
+/// Every page must pass before any grant is retained for the next entry.
+pub(crate) fn reprove_conditional_code_for_root<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+) -> bool {
+    #[cfg(not(feature = "cargo"))]
+    use core::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(not(feature = "cargo"))]
+    static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    #[cfg(not(feature = "cargo"))]
+    static SUCCESSES: AtomicU64 = AtomicU64::new(0);
+    let guard = &ctx.state().svm_guard;
+    if guard.conditional_code_count == 0 {
+        return false;
+    }
+    let Some(root) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3)
+        .ok().map(|root| root & 0x000f_ffff_ffff_f000) else { return false; };
+    if root == guard.conditional_root
+        || !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted
+        || guard.gate_root != root || guard.gate_host_write_all
+        || guard.gate_host_write_count != 0
+        || guard.code_epoch != guard.conditional_code_epoch
+        || ctx.state().ept.mapping_generation() != guard.conditional_mapping_generation
+        || ctx.state().ept.trusted_code_generation() != guard.conditional_trusted_generation
+    {
+        return false;
+    }
+    #[cfg(not(feature = "cargo"))]
+    {
+        let attempts = ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+        if attempts % (1 << 14) == 0 {
+            kernel::pr_info!("SVM_ROOT_REPROOF attempts={} successes={}\n",
+                attempts, SUCCESSES.load(Ordering::Relaxed));
+        }
+    }
+    let count = guard.conditional_code_count;
+    for index in 0..count {
+        let page = ctx.state().svm_guard.conditional_code_pages[index];
+        let (_, Some(memo_index)) = hazard_memo_lookup(ctx, page) else { return false; };
+        let memo = &ctx.state().svm_guard.hazard_memos[memo_index];
+        if !memo.valid || !memo.guarded || memo.rejected
+            || memo.guarded_mapping_generation != ctx.state().ept.mapping_generation()
+            || !memo.proof.boundary_guarded || memo.proof.count != 1
+            || memo.proof.offsets[0] != 4095 || memo.proof.boundary[31] != 0x0f
+        {
+            return false;
+        }
+        let hazard = PageHazards {
+            boundary: memo.proof.boundary,
+            boundary_guarded: memo.proof.boundary_guarded,
+            edge: memo.proof.edge,
+            offsets: memo.proof.offsets,
+            count: memo.proof.count,
+        };
+        let Some(proof) = cached_single_page_alias_proof(ctx, root, page, &hazard) else {
+            return false;
+        };
+        if proof.breakpoint_count != 1 || proof.breakpoint_masks[0] != 0 {
+            return false;
+        }
+        let address = proof.breakpoints[0];
+        if address & 4095 != 4095 {
+            return false;
+        }
+        let Some(next_linear) = address.checked_add(1) else { return false; };
+        let Ok(next_physical) = super::svm::physical(ctx, next_linear) else { return false; };
+        let next_page = next_physical.as_u64() & !4095;
+        if conditional_code_contains(ctx, next_page)
+            || !ctx.state().ept.npt_trusted_code_4k(allocator, next_physical)
+        {
+            return false;
+        }
+        let mut joined = [0u8; 16];
+        joined[0] = 0x0f;
+        if ctx.read_guest_memory(next_physical, &mut joined[1..]).is_err()
+            || hazardous_entry(&joined)
+        {
+            return false;
+        }
+    }
+    let guard = &mut ctx.state_mut().svm_guard;
+    guard.conditional_root = root;
+    guard.conditional_tree_generation = guard.tree_generation;
+    #[cfg(not(feature = "cargo"))]
+    {
+        // Diagnostic counter for the isolated root-reproof experiment.
+        SUCCESSES.fetch_add(1, Ordering::Relaxed);
+    }
+    true
+}
+
 pub(crate) fn revoke_conditional_code<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &A,
@@ -5329,6 +5422,79 @@ mod tests {
         assert!(!ctx.state().ept.npt_trusted_code_4k(&allocator, GuestPhysAddr::new(0x1000)));
         assert_eq!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x1000)).unwrap().1,
             bedrock_ept::EptPermissions::READ_WRITE);
+    }
+
+    #[test]
+    fn conditional_boundary_reproves_new_root_only_with_safe_single_alias() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        ctx.memory[0x1fff] = 0x0f;
+        ctx.memory[0x2000..0x2002].copy_from_slice(&[0xfc, 0xc8]);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page),
+                HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        for _ in 0..17 {
+            page_hazards_memo(&mut ctx, 0x1000).unwrap();
+        }
+        protect_recurrent_code(&mut ctx, &allocator, 0x1000);
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x2000),
+        ).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(batch.page_breakpoint_count, 0);
+        assert!(conditional_code_contains(&ctx, 0x1000));
+
+        // The new CR3 maps the same code and continuation through a guarded
+        // root, and its alias proof has been independently established.
+        ctx.memory.copy_within(0x3000..0x4000, 0x8000);
+        ctx.vmcs_setup().set_field_natural(VmcsFieldNatural::GuestCr3, 0x8000);
+        ctx.state_mut().svm_guard.gate_root = 0x8000;
+        ctx.state_mut().svm_guard.tree_generation += 1;
+        let (_, Some(memo_index)) = hazard_memo_lookup(&ctx, 0x1000) else { panic!() };
+        let memo = &ctx.state().svm_guard.hazard_memos[memo_index];
+        let hazard = PageHazards {
+            boundary: memo.proof.boundary,
+            boundary_guarded: memo.proof.boundary_guarded,
+            edge: memo.proof.edge,
+            offsets: memo.proof.offsets,
+            count: memo.proof.count,
+        };
+        let mut proof = *ctx.state().svm_guard.alias_proofs.iter().find(|proof| {
+            proof.valid && proof.root == 0x3000 && proof.page_count == 1
+                && proof.pages[0] == 0x1000
+        }).unwrap();
+        let mut hash = 0x8000u64.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ alias_proof_item(0x1000, &hazard);
+        hash ^= hash >> 32;
+        proof.root = 0x8000;
+        proof.key_hash = hash;
+        let slot = ((hash as usize) & (SVM_ALIAS_PROOF_CAPACITY / SVM_ALIAS_PROOF_WAYS - 1))
+            * SVM_ALIAS_PROOF_WAYS;
+        proof.breakpoint_count = 2;
+        ctx.state_mut().svm_guard.alias_proofs[slot] = proof;
+        assert!(conditional_code_needs_revoke(&ctx));
+        assert!(!reprove_conditional_code_for_root(&mut ctx, &allocator));
+        ctx.state_mut().svm_guard.alias_proofs[slot].breakpoint_count = 1;
+        ctx.memory[0x2000..0x2002].copy_from_slice(&[0xc7, 0xf0]);
+        assert!(!reprove_conditional_code_for_root(&mut ctx, &allocator));
+        ctx.memory[0x2000..0x2002].copy_from_slice(&[0xfc, 0xc8]);
+        assert!(reprove_conditional_code_for_root(&mut ctx, &allocator));
+        assert!(!conditional_code_needs_revoke(&ctx));
+        assert!(ctx.state().ept.npt_trusted_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)));
     }
 
     #[test]

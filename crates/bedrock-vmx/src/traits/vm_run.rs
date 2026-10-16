@@ -469,6 +469,7 @@ where
         // grants first so a saved NX bit cannot undo the revocation.
         if Ctx::V::uses_nested_paging()
             && super::super::exits::conditional_code_needs_revoke(ctx)
+            && !super::super::exits::reprove_conditional_code_for_root(ctx, allocator)
         {
             restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
             held_clock_page_count = 0;
