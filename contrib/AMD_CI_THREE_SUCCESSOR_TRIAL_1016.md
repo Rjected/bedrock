@@ -14,7 +14,34 @@ distinct frequent destinations beside a different second-order prediction.
 The SVM-only kernel module built inside disposable HWE boxes; no module
 was built or loaded on the workstation.
 
-**Accelerated hardware validation and timing remain pending.** A boxctl
+Accelerated validation subsequently ran on disposable EPYC 4245P / HWE
+`7.0.0-38-generic` box `box-81a4de72`. The candidate and unchanged
+production each passed the full in-box SVM suite. The exact pinned one-seed,
+180-virtual-second Tempo workload passed in all three A/B/A runs:
+
+| Module | Host wall time | Workload failures |
+| --- | ---: | ---: |
+| Candidate A | 167 s | 0 |
+| Unchanged production B | 169 s | 0 |
+| Candidate A repeat | 170 s | 0 |
+
+The same driver SHA-256 was
+`f0d4c4c16cd5a25549d83107b1b0161c4432769d0c42e26f2144c5994648f554`.
+The candidate therefore has **no established performance gain** and remains
+isolated, not merged into production.
+
+A diagnostic-only branch `dan/amd-third-successor-profile-1016` counted
+offers and successful third-page selections. In a passing shortened
+60-virtual-second run, the final logged checkpoint had 66,717 third-page
+offers among 12,320,768 trusted-page plans (0.54%); 10,101 offers named the
+hot scheduler page. The selection counter crossed 16,384, including 332
+scheduler selections at that checkpoint; it was logged at powers of two,
+so that is a lower bound rather than the final selection total. This
+explains why an additional guarded successor is too infrequent to move the
+full workload timing appreciably. The diagnostic contains a guest-specific
+address solely for measurement and must not be merged.
+
+Before that box became available, a boxctl
 `m4-metal-small` box in FRA provisioned an EPYC 4244P. Its SVM suite failed
 the control-flow acceleration exit-count assertion (`20,023` exits), so it
 cannot be used for a fair Tempo comparison. A replacement `m4-metal-small`
@@ -25,8 +52,7 @@ fell back to instruction stepping and failed its expected-exit assertion.
 That box was also deleted. FRA2 and LON returned out-of-stock errors for
 `m4-metal-small`. All created boxes from this attempt were deleted.
 
-Next validation needs a disposable EPYC 4245P box with the HWE kernel and
-the pinned Tempo guest assets. Run the full in-box SVM suite, then compare
-the exact pinned 180-virtual-second seed against unchanged production on
-the same box, with a candidate repeat if the first comparison improves.
-Do not merge based on the library tests alone.
+Raw status files and the diagnostic dmesg excerpt are under ignored
+`target/boxctl-evidence/box-81a4de72/third-successor-ab-a/` in the
+production worktree. The production module was restored and passed its full
+in-box SVM suite. No kernel module was built or loaded on the workstation.

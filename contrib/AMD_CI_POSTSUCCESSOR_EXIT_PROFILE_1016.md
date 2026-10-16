@@ -84,7 +84,10 @@ boundary failure both need follow-up.
 
 A [third guarded successor candidate](AMD_CI_THREE_SUCCESSOR_TRIAL_1016.md)
 addresses the observed selection gap when the second-order prediction differs
-from both frequent destinations. It passed 283 local library tests and was
-pushed on isolated branch `dan/amd-three-successor-1016`. Accelerated hardware
-validation is pending because the available disposable boxes provisioned
-EPYC 4244P or EPYC 9124 rather than the previously validated EPYC 4245P.
+from both frequent destinations. It passed 283 local library tests and the
+full in-box SVM suite, but an EPYC 4245P same-box A/B/A pinned comparison
+took 167/169/170 seconds (candidate/production/candidate). The branch
+`dan/amd-three-successor-1016` remains isolated because it has no established
+performance gain. A short diagnostic showed the third edge was offered in
+only 0.54% of trusted-page plans. The scheduler page accounts for a minority
+of those offers; widening this planner alone will not close the Intel gap.
