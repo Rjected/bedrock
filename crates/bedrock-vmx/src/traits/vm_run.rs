@@ -12,6 +12,55 @@ use super::{
     VirtualMachineControlStructure, VmContext, VmRunError, VmRunner,
 };
 
+// Diagnostic only: estimate whether a persistent guarded breakpoint for the
+// hot scheduler page could fit the preceding counted interval. The page is
+// pinned-guest specific; this code must never be merged into production.
+#[cfg(not(feature = "cargo"))]
+fn profile_sticky_feasibility<Ctx: VmContext>(
+    ctx: &Ctx,
+    batch: Option<&super::InstructionBatch>,
+) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    static COUNTS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+    if ctx.state().vmcs.read32(VmcsField32::VmExitReason).ok()
+        .is_none_or(|reason| reason & 0xffff != 48)
+        || ctx.state().vmcs.read64(VmcsField64::GuestPhysicalAddr).ok()
+            .is_none_or(|gpa| gpa & !4095 != 0x1feb000)
+        || ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification).ok()
+            .is_none_or(|qual| qual & 0x10 == 0)
+    {
+        return;
+    }
+    let kind = match batch {
+        Some(batch) if batch.global_execution => {
+            if batch.pages[..batch.code_page_count].contains(&0x1feb000) {
+                5
+            } else {
+                batch.page_breakpoint_count.min(4)
+            }
+        }
+        _ => 6,
+    };
+    COUNTS[kind].fetch_add(1, Ordering::Relaxed);
+    let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if total % (1 << 12) == 0 {
+        let source = batch.filter(|batch| batch.global_execution)
+            .map_or(u64::MAX, |batch| batch.pages[0]);
+        let recent = &ctx.state().svm_recent_pages;
+        kernel::pr_info!("SVM_STICKY_EDGE source={:#x} recent0={:#x} recent1={:#x} recent2={:#x} slots={}\n",
+            source, recent[0], recent[1], recent[2], kind);
+    }
+    if total % (1 << 15) == 0 {
+        kernel::pr_info!("SVM_STICKY_FEAS total={} slots0={} slots1={} slots2={} slots3={} full={} selected={} other={}\n",
+            total,
+            COUNTS[0].load(Ordering::Relaxed), COUNTS[1].load(Ordering::Relaxed),
+            COUNTS[2].load(Ordering::Relaxed), COUNTS[3].load(Ordering::Relaxed),
+            COUNTS[4].load(Ordering::Relaxed), COUNTS[5].load(Ordering::Relaxed),
+            COUNTS[6].load(Ordering::Relaxed));
+    }
+}
+
 // ========== GPR Sync Methods ==========
 
 /// Copy GPRs into `VmxContext` and set up the XSAVE area pointers.
@@ -764,6 +813,10 @@ where
             unsafe { runner.run(&mut state.vmx_ctx, &state.vmcs, batch.as_ref()) }
         };
         let post_guest_tsc = rdtsc();
+        #[cfg(not(feature = "cargo"))]
+        if Ctx::V::uses_nested_paging() && run_result.is_ok() {
+            profile_sticky_feasibility(ctx, batch.as_ref());
+        }
         ctx.state_mut().exit_stats.guest_cycles += post_guest_tsc.saturating_sub(pre_guest_tsc);
         if arm_masked_retry {
             let flags = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRflags)

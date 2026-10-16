@@ -2474,6 +2474,59 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let hot = predicted_hot_successor(
             &ctx.state().svm_guard, root, current_linear, predicted,
         );
+        #[cfg(not(feature = "cargo"))]
+        if matches!(batch.pages[0], 0x1fe5000 | 0x1258000) {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static EVENTS: AtomicU64 = AtomicU64::new(0);
+            static SAMPLES: AtomicU64 = AtomicU64::new(0);
+            static REASONS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+            let event = EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+            if event % 256 == 0 {
+                let target = 0xffffffff81feb000;
+                let reason = if predicted != Some(target) && hot != Some(target) {
+                    0 // Neither successor candidate names the scheduler page.
+                } else if batch.code_page_count >= 3 {
+                    1
+                } else if cached_code_translation(ctx, target) != Some(0x1feb000) {
+                    2
+                } else if ctx.state().ept.npt_trusted_code_4k(
+                    allocator, GuestPhysAddr::new(0x1feb000)) {
+                    3
+                } else if let Some(hazard) = cached_page_hazards(ctx, 0x1feb000) {
+                    if hazard.count == 0 || !hazard.boundary_guarded {
+                        5
+                    } else if let Some(proof) = cached_single_page_alias_proof(
+                        ctx, root, 0x1feb000, &hazard,
+                    ) {
+                        if proof.breakpoint_count == 0
+                            || proof.breakpoint_count > batch.page_breakpoints.len() {
+                            7
+                        } else {
+                            9 // Basic proof and breakpoint budget are available.
+                        }
+                    } else {
+                        6
+                    }
+                } else {
+                    4
+                };
+                REASONS[reason].fetch_add(1, Ordering::Relaxed);
+                let samples = SAMPLES.fetch_add(1, Ordering::Relaxed) + 1;
+                if samples % 256 == 0 {
+                    kernel::pr_info!("SVM_SCHED_PLAN events={} samples={} unpred={} cap={} xlat={} trusted={} nohaz={} unsafe={} noproof={} bp={} eligible={}\n",
+                        event, samples,
+                        REASONS[0].load(Ordering::Relaxed),
+                        REASONS[1].load(Ordering::Relaxed),
+                        REASONS[2].load(Ordering::Relaxed),
+                        REASONS[3].load(Ordering::Relaxed),
+                        REASONS[4].load(Ordering::Relaxed),
+                        REASONS[5].load(Ordering::Relaxed),
+                        REASONS[6].load(Ordering::Relaxed),
+                        REASONS[7].load(Ordering::Relaxed),
+                        REASONS[9].load(Ordering::Relaxed));
+                }
+            }
+        }
         let mut selected_hazard: Option<PageHazards> = None;
         for linear in predicted.into_iter().chain(hot).filter(|&linear| linear != current_linear) {
             if batch.code_page_count >= 3 {
@@ -3991,6 +4044,24 @@ pub(crate) fn remember_page<C: VmContext>(ctx: &mut C, linear: u64) {
     let from = ctx.state().svm_recent_pages[0];
     if from == page {
         return;
+    }
+    #[cfg(not(feature = "cargo"))]
+    if from == 0xffffffff81fe5000 || from == 0xffffffff81258000 {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static TOTAL: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        static TARGET: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        let index = usize::from(from == 0xffffffff81258000);
+        let n = TOTAL[index].fetch_add(1, Ordering::Relaxed) + 1;
+        if page == 0xffffffff81feb000 {
+            TARGET[index].fetch_add(1, Ordering::Relaxed);
+        }
+        if n % (1 << 16) == 0 {
+            kernel::pr_info!("SVM_STICKY_SOURCE from={:#x} total={} target={}\n",
+                from, n, TARGET[index].load(Ordering::Relaxed));
+        }
+        if n % (1 << 12) == 0 {
+            kernel::pr_info!("SVM_STICKY_TRANSITION from={:#x} to={:#x}\n", from, page);
+        }
     }
     if from != u64::MAX {
         if let Ok(root) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3) {
