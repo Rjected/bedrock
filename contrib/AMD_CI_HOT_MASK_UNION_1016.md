@@ -15,7 +15,7 @@ passed on disposable EPYC 4245P / HWE `7.0.0-38-generic` box
 The pinned one-seed, 180-virtual-second Tempo CI workload used the same box,
 guest assets, driver SHA-256
 `f0d4c4c16cd5a25549d83107b1b0161c4432769d0c42e26f2144c5994648f554`,
-and seed `14373434789495652599` for both runs:
+and seed `14373434789495652599` for all three runs:
 
 | Variant | Verdict | Host wall time |
 | --- | --- | ---: |
@@ -29,6 +29,18 @@ so it is not merged into `dan/amd-tempo-dst`. Warm checkpoint wall time was
 added alias-proof evaluation and masking work is a plausible cause, but this
 test does not isolate it. The production module was restored and passed the
 in-box SVM suite before the final control run.
+
+A second, shortened 60-virtual-second diagnostic used the same pinned seed
+and progress driver on the same box. It is not a CI timing comparison. The
+candidate passed in 145 host seconds, while the adjacent unchanged production
+control passed in 114 seconds. Candidate and control reached the warm
+checkpoint in 72.7 and 48.0 wall seconds, respectively. At the end of each
+seeded 60-second branch, the candidate had 7.35 million NPT exits and 3.18
+million synthetic MTF exits; production had 9.12 million NPT exits and 2.36
+million MTF exits. The candidate exchanged some fetch faults for more
+single-step exits and consumed more recorded guest/run cycles. These counters
+support a costly false-hit/replay mechanism, though the diagnostic cannot
+attribute each extra MTF exit to a particular masked offset.
 
 Raw campaign logs and status files are under ignored
 `target/boxctl-evidence/box-d267068a/` in this worktree. The first control's
