@@ -45,3 +45,12 @@ The progress campaign log and status are under ignored
 worktree. All kernel-module builds and loads were confined to the disposable
 box. The production module was restored and passed its full in-box SVM suite
 before the box expired.
+
+On the next disposable HWE box, an overlap diagnostic found that all
+147,608 root-change revocations at its last checkpoint also changed the
+guarded-tree generation. A [same-root generation trial](AMD_CI_STABLE_TREE_TRIAL_1016.md)
+passed the pinned workload, but its cheaper variant took 167 seconds
+versus a 166-second adjacent unchanged-production control. It remains
+isolated on `dan/amd-stable-tree-1016`; the overlap diagnostic is on
+`dan/amd-postsuccessor-scalar-1016`. The larger root-switch class still
+requires a proof that is valid in the new address space.
