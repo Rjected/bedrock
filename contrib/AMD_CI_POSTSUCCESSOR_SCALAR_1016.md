@@ -49,3 +49,25 @@ Raw `dmesg` is under ignored
 `target/boxctl-evidence/box-ad3b5fef/` in this worktree. The production
 module was restored and passed the full in-box SVM suite before box expiry.
 No kernel module was built or loaded on the workstation.
+
+## Root/tree overlap follow-up
+
+On a new disposable EPYC 4245P / HWE `7.0.0-38-generic` box
+`box-2b77e4f7`, a further read-only diagnostic passed the same pinned
+60-virtual-second seed in 95 host seconds (`failed=0`). At its last
+65,536-event checkpoint it counted 393,216 conditional-grant revocations.
+The ordered classification included 147,608 root changes, 120,789 pending
+host writes, and 48,023 tree-generation changes with the same root. Every
+one of those 147,608 root changes also had a different tree generation;
+there were zero root-only revocations. The 393,216 events invalidated
+723,838 page grants in total (about 1.84 pages per event).
+
+A second 95-second passing diagnostic on the same box counted at least
+196,608 uses of the intact global guarded tree to rebuild a smaller
+bounded guard. This path currently advances `tree_generation` even though
+the global tree has no pending guest write. That suggests a narrow
+hypervisor-only optimization: preserve the proof generation when the
+root, NPT mapping, guarded tables, and pending-write state are unchanged.
+It does not justify retaining a grant through a root switch, which still
+needs a proof for the new root. The counters and campaign statuses are
+under ignored `target/boxctl-evidence/box-2b77e4f7/` in this worktree.

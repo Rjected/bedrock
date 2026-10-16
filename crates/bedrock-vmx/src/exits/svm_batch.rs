@@ -682,6 +682,15 @@ fn collect_translation_tree_pages_with_retention<C: VmContext>(
             return None;
         }
         let scratch = &mut ctx.state_mut().svm_guard;
+        #[cfg(not(feature = "cargo"))]
+        {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static CLEAN_GATE_REUSE: AtomicU64 = AtomicU64::new(0);
+            let count = CLEAN_GATE_REUSE.fetch_add(1, Ordering::Relaxed) + 1;
+            if count % (1 << 16) == 0 {
+                kernel::pr_info!("SVM_CLEAN_GATE_REUSE count={}\n", count);
+            }
+        }
         scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
         scratch.translation_count = 0;
         scratch.translation_cursor = 0;
@@ -2579,6 +2588,27 @@ pub(crate) fn conditional_code_needs_revoke<C: VmContext>(ctx: &C) -> bool {
         use core::sync::atomic::{AtomicU64, Ordering};
         static TOTAL: AtomicU64 = AtomicU64::new(0);
         static COUNTS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+        static ROOT_ONLY: AtomicU64 = AtomicU64::new(0);
+        static ROOT_AND_TREE: AtomicU64 = AtomicU64::new(0);
+        static ROOT_AND_WRITE: AtomicU64 = AtomicU64::new(0);
+        static ROOT_AND_CODE: AtomicU64 = AtomicU64::new(0);
+        static PAGES_REVOKED: AtomicU64 = AtomicU64::new(0);
+        let changed_root = root != Some(guard.conditional_root);
+        let changed_tree = guard.tree_generation != guard.conditional_tree_generation;
+        let pending_write = guard.gate_host_write_all || guard.gate_host_write_count != 0;
+        let changed_code = guard.code_epoch != guard.conditional_code_epoch;
+        let changed_mapping = ctx.state().ept.mapping_generation() != guard.conditional_mapping_generation;
+        let changed_trusted = ctx.state().ept.trusted_code_generation() != guard.conditional_trusted_generation;
+        let invalid_gate = !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted;
+        if changed_root {
+            if !(changed_tree || pending_write || changed_code || changed_mapping || changed_trusted || invalid_gate) {
+                ROOT_ONLY.fetch_add(1, Ordering::Relaxed);
+            }
+            if changed_tree { ROOT_AND_TREE.fetch_add(1, Ordering::Relaxed); }
+            if pending_write { ROOT_AND_WRITE.fetch_add(1, Ordering::Relaxed); }
+            if changed_code { ROOT_AND_CODE.fetch_add(1, Ordering::Relaxed); }
+        }
+        PAGES_REVOKED.fetch_add(guard.conditional_code_count as u64, Ordering::Relaxed);
         COUNTS[reason].fetch_add(1, Ordering::Relaxed);
         let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
         if total % (1 << 16) == 0 {
@@ -2587,6 +2617,10 @@ pub(crate) fn conditional_code_needs_revoke<C: VmContext>(ctx: &C) -> bool {
                 COUNTS[1].load(Ordering::Relaxed), COUNTS[2].load(Ordering::Relaxed),
                 COUNTS[3].load(Ordering::Relaxed), COUNTS[4].load(Ordering::Relaxed),
                 COUNTS[5].load(Ordering::Relaxed), COUNTS[6].load(Ordering::Relaxed));
+            kernel::pr_info!("SVM_BOUNDARY_REVOKE_OVERLAP total={} root_only={} root_tree={} root_write={} root_code={} pages={}\n",
+                total, ROOT_ONLY.load(Ordering::Relaxed), ROOT_AND_TREE.load(Ordering::Relaxed),
+                ROOT_AND_WRITE.load(Ordering::Relaxed), ROOT_AND_CODE.load(Ordering::Relaxed),
+                PAGES_REVOKED.load(Ordering::Relaxed));
         }
     }
     reason.is_some()
