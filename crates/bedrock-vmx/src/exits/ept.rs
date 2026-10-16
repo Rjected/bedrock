@@ -15,6 +15,62 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+#[cfg(not(feature = "cargo"))]
+fn profile_scalar_cause<C: VmContext>(ctx: &C, page: u64) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    // Gate unavailable, dirty, table, memo hint missing, rejected scan,
+    // zero-hazard boundary, one through four hazards, five-plus hazards.
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    static COUNTS: [AtomicU64; 11] = [const { AtomicU64::new(0) }; 11];
+    let guard = &ctx.state().svm_guard;
+    let kind = if !guard.gate_ready {
+        0
+    } else if guard.gate_dirty {
+        1
+    } else if super::svm_batch::gate_table_contains(guard, page) {
+        2
+    } else {
+        let key = ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+            & (super::super::vm_state::SVM_HAZARD_LOOKUP_CAPACITY - 1);
+        let memo = guard.hazard_lookup[key].checked_sub(1)
+            .and_then(|index| guard.hazard_memos.get(usize::from(index)))
+            .filter(|memo| memo.valid && memo.proof.page == page);
+        match memo {
+            None => 3,
+            Some(memo) if memo.rejected => 4,
+            Some(memo) if memo.proof.count == 0 => 5,
+            Some(memo) => 5 + memo.proof.count.min(5),
+        }
+    };
+    COUNTS[kind].fetch_add(1, Ordering::Relaxed);
+    let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if kind == 6 && total % (1 << 13) == 0 {
+        let key = ((page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize)
+            & (super::super::vm_state::SVM_HAZARD_LOOKUP_CAPACITY - 1);
+        if let Some(memo) = guard.hazard_lookup[key].checked_sub(1)
+            .and_then(|index| guard.hazard_memos.get(usize::from(index)))
+            .filter(|memo| memo.valid && memo.proof.page == page && memo.proof.count == 1)
+        {
+            let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).unwrap_or(0);
+            kernel::pr_info!("SVM_SCALAR_H1 page={:#x} hazard={:#x} rip={:#x}\n",
+                page, memo.proof.offsets[0], rip);
+        }
+    }
+    if total % (1 << 20) == 0 {
+        kernel::pr_info!("SVM_SCALAR_CAUSE total={} unready={} dirty={} table={} no_hint={} rejected={} boundary={} h1={} h2={} h3={} h4={} h5plus={}\n",
+            total,
+            COUNTS[0].load(Ordering::Relaxed), COUNTS[1].load(Ordering::Relaxed),
+            COUNTS[2].load(Ordering::Relaxed), COUNTS[3].load(Ordering::Relaxed),
+            COUNTS[4].load(Ordering::Relaxed), COUNTS[5].load(Ordering::Relaxed),
+            COUNTS[6].load(Ordering::Relaxed), COUNTS[7].load(Ordering::Relaxed),
+            COUNTS[8].load(Ordering::Relaxed), COUNTS[9].load(Ordering::Relaxed),
+            COUNTS[10].load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(feature = "cargo")]
+fn profile_scalar_cause<C: VmContext>(_: &C, _: u64) {}
+
 /// Handle EPT violation exit.
 pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
@@ -74,6 +130,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
                 }
             } else {
                 ctx.state_mut().svm_gate_scalar_page = Some(page);
+                profile_scalar_cause(ctx, page);
                 return ExitHandlerResult::Continue;
             }
         }

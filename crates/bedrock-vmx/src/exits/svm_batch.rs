@@ -2557,13 +2557,39 @@ pub(crate) fn conditional_code_needs_revoke<C: VmContext>(ctx: &C) -> bool {
     }
     let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3)
         .ok().map(|root| root & 0x000f_ffff_ffff_f000);
-    !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted
-        || guard.gate_host_write_all || guard.gate_host_write_count != 0
-        || root != Some(guard.conditional_root)
-        || guard.tree_generation != guard.conditional_tree_generation
-        || guard.code_epoch != guard.conditional_code_epoch
-        || ctx.state().ept.mapping_generation() != guard.conditional_mapping_generation
-        || ctx.state().ept.trusted_code_generation() != guard.conditional_trusted_generation
+    let reason = if !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted {
+        Some(0)
+    } else if guard.gate_host_write_all || guard.gate_host_write_count != 0 {
+        Some(1)
+    } else if root != Some(guard.conditional_root) {
+        Some(2)
+    } else if guard.tree_generation != guard.conditional_tree_generation {
+        Some(3)
+    } else if guard.code_epoch != guard.conditional_code_epoch {
+        Some(4)
+    } else if ctx.state().ept.mapping_generation() != guard.conditional_mapping_generation {
+        Some(5)
+    } else if ctx.state().ept.trusted_code_generation() != guard.conditional_trusted_generation {
+        Some(6)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "cargo"))]
+    if let Some(reason) = reason {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static TOTAL: AtomicU64 = AtomicU64::new(0);
+        static COUNTS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+        COUNTS[reason].fetch_add(1, Ordering::Relaxed);
+        let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+        if total % (1 << 16) == 0 {
+            kernel::pr_info!("SVM_BOUNDARY_REVOKE total={} gate={} host_write={} root={} tree={} code={} mapping={} trusted={}\n",
+                total, COUNTS[0].load(Ordering::Relaxed),
+                COUNTS[1].load(Ordering::Relaxed), COUNTS[2].load(Ordering::Relaxed),
+                COUNTS[3].load(Ordering::Relaxed), COUNTS[4].load(Ordering::Relaxed),
+                COUNTS[5].load(Ordering::Relaxed), COUNTS[6].load(Ordering::Relaxed));
+        }
+    }
+    reason.is_some()
 }
 
 pub(crate) fn revoke_conditional_code<C: VmContext, A: CowAllocator<C::CowPage>>(
@@ -2585,6 +2611,35 @@ fn promote_conditional_boundary_code<C: VmContext, A: CowAllocator<C::CowPage>>(
     next_page: u64,
     root: u64,
 ) {
+    #[cfg(not(feature = "cargo"))]
+    {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+        static CAPACITY: AtomicU64 = AtomicU64::new(0);
+        static DUP_PAGE: AtomicU64 = AtomicU64::new(0);
+        static DUP_NEXT: AtomicU64 = AtomicU64::new(0);
+        static TRUST_FAIL: AtomicU64 = AtomicU64::new(0);
+        static SUCCESS: AtomicU64 = AtomicU64::new(0);
+        let attempts = ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+        let guard = &ctx.state().svm_guard;
+        if guard.conditional_code_count == guard.conditional_code_pages.len() {
+            CAPACITY.fetch_add(1, Ordering::Relaxed);
+        } else if conditional_code_contains(ctx, page) {
+            DUP_PAGE.fetch_add(1, Ordering::Relaxed);
+        } else if conditional_code_contains(ctx, next_page) {
+            DUP_NEXT.fetch_add(1, Ordering::Relaxed);
+        } else if ctx.state().ept.npt_trusted_code_4k(allocator, GuestPhysAddr::new(page)) {
+            TRUST_FAIL.fetch_add(1, Ordering::Relaxed);
+        } else {
+            SUCCESS.fetch_add(1, Ordering::Relaxed);
+        }
+        if attempts % (1 << 16) == 0 {
+            kernel::pr_info!("SVM_BOUNDARY_PROMOTE attempts={} capacity={} dup_page={} dup_next={} trust_fail={} eligible={}\n",
+                attempts, CAPACITY.load(Ordering::Relaxed),
+                DUP_PAGE.load(Ordering::Relaxed), DUP_NEXT.load(Ordering::Relaxed),
+                TRUST_FAIL.load(Ordering::Relaxed), SUCCESS.load(Ordering::Relaxed));
+        }
+    }
     let guard = &ctx.state().svm_guard;
     if guard.conditional_code_count == guard.conditional_code_pages.len()
         || conditional_code_contains(ctx, page)
