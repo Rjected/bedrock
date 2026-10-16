@@ -2217,6 +2217,18 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     if budget <= InstructionBatch::COUNTER_DEADLINE_MARGIN {
         return None;
     }
+    static CACHE_LOOKUPS: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    static CACHE_HITS: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let lookups = CACHE_LOOKUPS.fetch_add(1, Ordering::Relaxed) + 1;
+    #[cfg(not(feature = "cargo"))]
+    if lookups & ((1 << 20) - 1) == 0 {
+        kernel::pr_info!("SVM CI PAGE CACHE lookups={} hits={}\n",
+            lookups, CACHE_HITS.load(Ordering::Relaxed));
+    }
+    #[cfg(feature = "cargo")]
+    let _ = lookups;
     let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
         & 0x000f_ffff_ffff_f000;
     let recent = ctx.state().svm_recent_pages;
@@ -2274,6 +2286,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             let mut batch = *cached;
             batch.start = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?;
             batch.instruction_budget = budget;
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             *output = Some(batch);
             return Some(());
         }
