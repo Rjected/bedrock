@@ -4,8 +4,13 @@
 
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
+#[cfg(not(feature = "cargo"))]
+use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
+
+#[cfg(not(feature = "cargo"))]
+static MASK_FALSE_HIT_SAMPLES: AtomicU64 = AtomicU64::new(0);
 
 use super::{
     CowAllocator, InstructionCounter, IrqGuard, Kernel, Machine, Page, ReverseIrqGuard,
@@ -807,6 +812,16 @@ where
                 let rip = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip)
                     .map_err(|_| VmRunError::ExitHandler(
                         super::super::exits::ExitError::Fatal("SVM masked breakpoint RIP unavailable")))?;
+                // Disposable-box diagnostic: sample real false masked hits so
+                // merge selection can be judged by executed offsets.
+                #[cfg(not(feature = "cargo"))]
+                if MASK_FALSE_HIT_SAMPLES.fetch_add(1, Ordering::Relaxed) & 255 == 0 {
+                    let physical = window.as_ref().map_or(0, |w| w.physical.as_u64());
+                    kernel::pr_info!("SVM_MASK_FALSE_HIT phys={:#x} offset={:#x} rip={:#x} masks={:?} breaks={:?}\n",
+                        physical & !4095, physical & 4095, rip,
+                        batch.as_ref().map(|b| b.page_breakpoint_masks),
+                        batch.as_ref().map(|b| b.page_breakpoints));
+                }
                 let qual = ctx.state().vmcs.read_natural(VmcsFieldNatural::ExitQualification)
                     .map_err(|_| VmRunError::ExitHandler(
                         super::super::exits::ExitError::Fatal("SVM masked breakpoint qualification unavailable")))?;
