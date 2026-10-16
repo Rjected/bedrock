@@ -583,6 +583,14 @@ fn index_gate_tables(guard: &mut super::super::vm_state::SvmGuardScratch) {
 }
 
 fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64]) -> Option<()> {
+    collect_translation_tree_pages_with_retention(ctx, code_pages, false)
+}
+
+fn collect_translation_tree_pages_with_retention<C: VmContext>(
+    ctx: &mut C,
+    code_pages: &[u64],
+    retain_checked_proofs: bool,
+) -> Option<()> {
     let root = ctx
         .state()
         .vmcs
@@ -644,7 +652,7 @@ fn collect_translation_tree_pages<C: VmContext>(ctx: &mut C, code_pages: &[u64])
     scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
     scratch.gate_leaf_filter_valid.fill(false);
     if (!scratch.gate_ready || scratch.gate_dirty || scratch.gate_root != root)
-        && !preserve_alias_proofs && !guarded_root_switch
+        && !preserve_alias_proofs && !guarded_root_switch && !retain_checked_proofs
     {
         invalidate_alias_proofs(scratch);
     }
@@ -1205,7 +1213,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
             invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
         }
     }
-    let scanned = collect_translation_tree_pages(ctx, &[]).is_some();
+    let scanned = collect_translation_tree_pages_with_retention(ctx, &[], retained.is_some()).is_some();
     // Keep guards from inactive roots live. A write to any of those tables
     // traps and invalidates their alias proofs before the next guest entry.
     if scanned && ctx.state().svm_guard.retained_guard_count
@@ -1218,6 +1226,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
     }
     ctx.state_mut().svm_guard.gate_root = root;
     if !scanned {
+        invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
         return;
     }
     let count = ctx.state().svm_guard.count;
@@ -1337,10 +1346,14 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
         }
     }
     ctx.state_mut().svm_guard.gate_dirty = true;
-    // The dirty gate prevents proof use until the store retires. A leaf PTE
-    // write can then invalidate only proofs whose code pages are executable
-    // through that leaf; upper or inactive-root writes still drop all proofs.
-    if !active_leaf {
+    // The dirty gate prevents proof use until the store retires. A full
+    // active-root rebuild compares released upper links before retaining
+    // proofs; an inactive-root write cannot be checked by that comparison.
+    let active_upper = (0..count).any(|current| {
+        ctx.state().svm_guard.gate_tables[current] == page
+            && ctx.state().svm_guard.gate_levels[current] > 1
+    });
+    if !active_leaf && !active_upper {
         invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
     }
     true
@@ -6372,6 +6385,47 @@ mod tests {
         assert!(!alias_proof_retained(&alias_proofs_safe_across_rebuild(&ctx, 0x3000).unwrap(), 0));
         ctx.memory[0x6048..0x6050].copy_from_slice(&0x2007u64.to_le_bytes());
         assert!(alias_proof_retained(&alias_proofs_safe_across_rebuild(&ctx, 0x3000).unwrap(), 0));
+    }
+
+    #[test]
+    fn upper_table_write_retains_proof_only_for_unchanged_links() {
+        let mut ctx = paged_context(&[0x90]);
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator,
+            bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        collect_translation_tree_pages(&mut ctx, &[]).unwrap();
+        let pages = ctx.state().svm_guard.tables[..ctx.state().svm_guard.count].to_vec();
+        for page in pages {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator,
+                GuestPhysAddr::new(page),
+                HostPhysAddr::new(page + 0x1000000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        refresh_global_tree(&mut ctx, &allocator, true);
+        assert!(ctx.state().svm_guard.gate_ready);
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.alias_proofs[0].valid = true;
+        guard.alias_proofs[0].root = 0x3000;
+        guard.alias_proofs[0].page_count = 1;
+        guard.alias_proofs[0].pages[0] = 0x1000;
+        guard.alias_proofs_nonempty = true;
+
+        assert!(release_global_table_write(&mut ctx, &allocator, 0x3000));
+        assert!(ctx.state().svm_guard.alias_proofs[0].valid);
+        ctx.memory[0x3000..0x3008].copy_from_slice(&0x4027u64.to_le_bytes());
+        refresh_global_tree(&mut ctx, &allocator, true);
+        assert!(ctx.state().svm_guard.gate_ready);
+        assert!(ctx.state().svm_guard.alias_proofs[0].valid);
+
+        assert!(release_global_table_write(&mut ctx, &allocator, 0x3000));
+        ctx.memory[0x3000..0x3008].copy_from_slice(&0x7007u64.to_le_bytes());
+        refresh_global_tree(&mut ctx, &allocator, true);
+        assert!(!ctx.state().svm_guard.alias_proofs[0].valid);
     }
 
     #[test]
