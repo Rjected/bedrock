@@ -162,6 +162,13 @@ fn npt_code_gate_keeps_unknown_and_remapped_pages_nonexecutable() {
         .unwrap();
     assert_eq!(child.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
 
+    parent.trust_conditional_npt_code_4k(&allocator, gpa).unwrap();
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_EXECUTE);
+    let conditional_child = parent.clone_for_fork(&mut allocator).unwrap();
+    assert_eq!(conditional_child.lookup(&allocator, gpa).unwrap().1, EptPermissions::from_bits(1));
+    parent.invalidate_npt_code_4k(&allocator, gpa).unwrap();
+    assert_eq!(parent.lookup(&allocator, gpa).unwrap().1, EptPermissions::READ_WRITE);
+
     parent.permit_npt_execute_4k(&allocator, gpa).unwrap();
     assert_eq!(
         parent.lookup(&allocator, gpa).unwrap().1,

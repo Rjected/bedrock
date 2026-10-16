@@ -152,8 +152,8 @@ impl EptEntry {
     }
 
     pub(crate) fn set_npt_trusted_code(&mut self, trusted: bool) {
-        // Bits 9 and 10 are software-available NPT leaf bits. Bit 10 remembers
-        // original writability so COW leaves remain read-only on invalidation.
+        // Bits 9-11 are software-available NPT leaf bits. Bit 10 remembers
+        // original writability; bit 11 marks a root-dependent code proof.
         if trusted {
             if self.0 & (1 << 9) != 0 {
                 return;
@@ -163,10 +163,14 @@ impl EptEntry {
             self.set_npt_nx(false);
         } else if self.0 & (1 << 9) != 0 {
             let writable = self.0 & (1 << 10) != 0;
-            self.0 &= !((1 << 9) | (1 << 10));
+            self.0 &= !((1 << 9) | (1 << 10) | (1 << 11));
             self.set_npt_writable(writable);
             self.set_npt_nx(true);
         }
+    }
+
+    pub(crate) fn set_npt_conditional_code(&mut self) {
+        self.0 |= 1 << 11;
     }
 
     pub const fn raw(&self) -> u64 {

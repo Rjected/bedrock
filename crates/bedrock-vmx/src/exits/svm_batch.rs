@@ -2144,7 +2144,11 @@ pub(crate) fn protect_recurrent_code<C: VmContext, A: CowAllocator<C::CowPage>>(
         if stale < 1 << 20 {
             return;
         }
+        let victim_page = cache.hazard_memos[victim].proof.page;
         let old_guard = cache.hazard_memos[victim].write_guard;
+        if conditional_code_contains(ctx, victim_page) {
+            revoke_conditional_code(ctx, allocator);
+        }
         old_guard.restore(&mut ctx.state_mut().ept, allocator);
         let cache = &mut ctx.state_mut().svm_guard;
         cache.hazard_memos[victim].guarded = false;
@@ -2176,6 +2180,9 @@ pub(crate) fn release_recurrent_code_write<C: VmContext, A: CowAllocator<C::CowP
     let Some(index) = index.filter(|&index| ctx.state().svm_guard.hazard_memos[index].guarded) else {
         return false;
     };
+    if conditional_code_contains(ctx, physical) {
+        revoke_conditional_code(ctx, allocator);
+    }
     let write_guard = ctx.state().svm_guard.hazard_memos[index].write_guard;
     write_guard.restore(&mut ctx.state_mut().ept, allocator);
     let cache = &mut ctx.state_mut().svm_guard;
@@ -2442,6 +2449,76 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
 /// page-table tree proves exactly one executable alias and its next page is
 /// already trusted (hence write-protected), inspect that fixed continuation
 /// and release the otherwise unnecessary debug-register slot for this entry.
+pub(crate) fn conditional_code_contains<C: VmContext>(ctx: &C, page: u64) -> bool {
+    let guard = &ctx.state().svm_guard;
+    guard.conditional_code_pages[..guard.conditional_code_count].contains(&page)
+}
+
+/// A conditional grant is valid only in the root and guarded-tree epoch that
+/// proved its sole executable alias and safe next-page continuation. A change
+/// to any dependency revokes every such grant before another VM entry.
+pub(crate) fn conditional_code_needs_revoke<C: VmContext>(ctx: &C) -> bool {
+    let guard = &ctx.state().svm_guard;
+    if guard.conditional_code_count == 0 {
+        return false;
+    }
+    let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3)
+        .ok().map(|root| root & 0x000f_ffff_ffff_f000);
+    !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted
+        || guard.gate_host_write_all || guard.gate_host_write_count != 0
+        || root != Some(guard.conditional_root)
+        || guard.tree_generation != guard.conditional_tree_generation
+        || guard.code_epoch != guard.conditional_code_epoch
+        || ctx.state().ept.mapping_generation() != guard.conditional_mapping_generation
+        || ctx.state().ept.trusted_code_generation() != guard.conditional_trusted_generation
+}
+
+pub(crate) fn revoke_conditional_code<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+) {
+    let count = ctx.state().svm_guard.conditional_code_count;
+    ctx.state_mut().svm_guard.conditional_code_count = 0;
+    for index in 0..count {
+        let page = ctx.state().svm_guard.conditional_code_pages[index];
+        let _ = ctx.state_mut().ept.invalidate_npt_code_4k(allocator, GuestPhysAddr::new(page));
+    }
+}
+
+fn promote_conditional_boundary_code<C: VmContext, A: CowAllocator<C::CowPage>>(
+    ctx: &mut C,
+    allocator: &A,
+    page: u64,
+    next_page: u64,
+    root: u64,
+) {
+    let guard = &ctx.state().svm_guard;
+    if guard.conditional_code_count == guard.conditional_code_pages.len()
+        || conditional_code_contains(ctx, page)
+        || conditional_code_contains(ctx, next_page)
+    {
+        return;
+    }
+    if ctx.state_mut().ept.trust_conditional_npt_code_4k(
+        allocator, GuestPhysAddr::new(page),
+    ).is_none() {
+        return;
+    }
+    let tree_generation = ctx.state().svm_guard.tree_generation;
+    let mapping_generation = ctx.state().ept.mapping_generation();
+    let code_epoch = ctx.state().svm_guard.code_epoch;
+    let trusted_generation = ctx.state().ept.trusted_code_generation();
+    let guard = &mut ctx.state_mut().svm_guard;
+    let index = guard.conditional_code_count;
+    guard.conditional_code_pages[index] = page;
+    guard.conditional_code_count += 1;
+    guard.conditional_root = root;
+    guard.conditional_tree_generation = tree_generation;
+    guard.conditional_mapping_generation = mapping_generation;
+    guard.conditional_code_epoch = code_epoch;
+    guard.conditional_trusted_generation = trusted_generation;
+}
+
 fn suppress_safe_single_alias_boundary<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
     allocator: &A,
@@ -2522,6 +2599,9 @@ fn suppress_safe_single_alias_boundary<C: VmContext, A: CowAllocator<C::CowPage>
     }
     batch.page_breakpoint_count = 0;
     batch.page_breakpoints[0] = 0;
+    promote_conditional_boundary_code(
+        ctx, allocator, page, next_physical.as_u64() & !4095, root,
+    );
     true
 }
 
@@ -5017,6 +5097,16 @@ mod tests {
         ).unwrap();
         let proven = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(proven.page_breakpoint_count, 0);
+        assert!(ctx.state().ept.npt_trusted_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)));
+        ctx.state_mut().svm_guard.gate_dirty = true;
+        assert!(conditional_code_needs_revoke(&ctx));
+        revoke_conditional_code(&mut ctx, &allocator);
+        assert!(!ctx.state().ept.npt_trusted_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)));
+        ctx.state_mut().svm_guard.gate_dirty = false;
+        let reproven = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(reproven.page_breakpoint_count, 0);
         // Model the trusted-code revocation that a real guest or host write
         // performs before the modified bytes can execute.
         ctx.state_mut().ept.invalidate_npt_code_4k(
@@ -5026,6 +5116,10 @@ mod tests {
         ctx.state_mut().ept.trust_npt_code_4k(
             &allocator, GuestPhysAddr::new(0x2000),
         ).unwrap();
+        assert!(conditional_code_needs_revoke(&ctx));
+        revoke_conditional_code(&mut ctx, &allocator);
+        assert!(!ctx.state().ept.npt_trusted_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)));
         let unsafe_next = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(&unsafe_next.page_breakpoints[..unsafe_next.page_breakpoint_count], &[0x1fff]);
         ctx.memory[0x2000..0x2002].copy_from_slice(&[0xfc, 0xc8]);
@@ -5045,6 +5139,42 @@ mod tests {
         assert_eq!(aliased.page_breakpoint_count, 2);
         assert!(aliased.page_breakpoints[..2].contains(&0x1fff));
         assert!(aliased.page_breakpoints[..2].contains(&0x9fff));
+    }
+
+    #[test]
+    fn conditional_boundary_trust_revokes_before_recurrent_write_release() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        ctx.memory[0x1fff] = 0x0f;
+        ctx.memory[0x2000..0x2002].copy_from_slice(&[0xfc, 0xc8]);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page), HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let _ = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        for _ in 0..17 {
+            assert_eq!(page_hazards_memo(&mut ctx, 0x1000).unwrap().count, 1);
+        }
+        protect_recurrent_code(&mut ctx, &allocator, 0x1000);
+        ctx.state_mut().ept.trust_npt_code_4k(&allocator, GuestPhysAddr::new(0x2000)).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(batch.page_breakpoint_count, 0);
+        assert!(conditional_code_contains(&ctx, 0x1000));
+        assert!(release_recurrent_code_write(&mut ctx, &allocator, 0x1000));
+        assert!(!conditional_code_contains(&ctx, 0x1000));
+        assert!(!ctx.state().ept.npt_trusted_code_4k(&allocator, GuestPhysAddr::new(0x1000)));
+        assert_eq!(ctx.state().ept.lookup(&allocator, GuestPhysAddr::new(0x1000)).unwrap().1,
+            bedrock_ept::EptPermissions::READ_WRITE);
     }
 
     #[test]
