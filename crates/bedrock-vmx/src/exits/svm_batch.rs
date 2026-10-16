@@ -2557,6 +2557,64 @@ pub(crate) fn conditional_code_needs_revoke<C: VmContext>(ctx: &C) -> bool {
     }
     let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3)
         .ok().map(|root| root & 0x000f_ffff_ffff_f000);
+    #[cfg(not(feature = "cargo"))]
+    if let Some(new_root) = root.filter(|&root| root != guard.conditional_root) {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static ROOT_EVENTS: AtomicU64 = AtomicU64::new(0);
+        static SAMPLES: AtomicU64 = AtomicU64::new(0);
+        static GATE_READY: AtomicU64 = AtomicU64::new(0);
+        static DEPS_STABLE: AtomicU64 = AtomicU64::new(0);
+        static ALL_ALIAS: AtomicU64 = AtomicU64::new(0);
+        static PAGES: AtomicU64 = AtomicU64::new(0);
+        static ALIAS_PAGES: AtomicU64 = AtomicU64::new(0);
+        static CONTINUATION_PAGES: AtomicU64 = AtomicU64::new(0);
+        let event = ROOT_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+        if event % 256 == 0 {
+            let ready = guard.gate_ready && !guard.gate_dirty
+                && !guard.gate_links_untrusted && guard.gate_root == new_root;
+            let deps = ready && !guard.gate_host_write_all
+                && guard.gate_host_write_count == 0
+                && guard.code_epoch == guard.conditional_code_epoch
+                && ctx.state().ept.mapping_generation() == guard.conditional_mapping_generation
+                && ctx.state().ept.trusted_code_generation() == guard.conditional_trusted_generation;
+            let mut alias_pages = 0u64;
+            let mut continuation_pages = 0u64;
+            if ready {
+                for &page in &guard.conditional_code_pages[..guard.conditional_code_count] {
+                    if guard.alias_proofs.iter().any(|proof| proof.valid
+                        && proof.root == new_root && proof.page_count == 1
+                        && proof.pages[0] == page)
+                    {
+                        alias_pages += 1;
+                    }
+                    let slot = ((page >> 12) as usize) & (guard.boundary_continuations.len() - 1);
+                    let continuation = guard.boundary_continuations[slot];
+                    if continuation.valid && continuation.root == new_root
+                        && continuation.page == page
+                        && continuation.tree_generation == guard.tree_generation
+                    {
+                        continuation_pages += 1;
+                    }
+                }
+            }
+            if ready { GATE_READY.fetch_add(1, Ordering::Relaxed); }
+            if deps { DEPS_STABLE.fetch_add(1, Ordering::Relaxed); }
+            if ready && alias_pages == guard.conditional_code_count as u64 {
+                ALL_ALIAS.fetch_add(1, Ordering::Relaxed);
+            }
+            PAGES.fetch_add(guard.conditional_code_count as u64, Ordering::Relaxed);
+            ALIAS_PAGES.fetch_add(alias_pages, Ordering::Relaxed);
+            CONTINUATION_PAGES.fetch_add(continuation_pages, Ordering::Relaxed);
+            let samples = SAMPLES.fetch_add(1, Ordering::Relaxed) + 1;
+            if samples % 64 == 0 {
+                kernel::pr_info!("SVM_ROOT_PROOF events={} samples={} ready={} deps={} all_alias={} pages={} alias_pages={} continuations={}\n",
+                    event, samples, GATE_READY.load(Ordering::Relaxed),
+                    DEPS_STABLE.load(Ordering::Relaxed), ALL_ALIAS.load(Ordering::Relaxed),
+                    PAGES.load(Ordering::Relaxed), ALIAS_PAGES.load(Ordering::Relaxed),
+                    CONTINUATION_PAGES.load(Ordering::Relaxed));
+            }
+        }
+    }
     !guard.gate_ready || guard.gate_dirty || guard.gate_links_untrusted
         || guard.gate_host_write_all || guard.gate_host_write_count != 0
         || root != Some(guard.conditional_root)
