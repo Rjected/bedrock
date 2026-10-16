@@ -2352,6 +2352,47 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         {
             return None;
         }
+        #[cfg(not(feature = "cargo"))]
+        if hazard.count == 1 && hazard.offsets[0] != 4095
+            && hazard_memo_lookup(ctx, page).1.is_some_and(|index| {
+                let memo = &ctx.state().svm_guard.hazard_memos[index];
+                memo.valid && memo.guarded
+            })
+        {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static EVENTS: AtomicU64 = AtomicU64::new(0);
+            static SAMPLES: AtomicU64 = AtomicU64::new(0);
+            static ZERO: AtomicU64 = AtomicU64::new(0);
+            static ONE: AtomicU64 = AtomicU64::new(0);
+            static MANY: AtomicU64 = AtomicU64::new(0);
+            static FAILED: AtomicU64 = AtomicU64::new(0);
+            let event = EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+            if event % 256 == 0 {
+                let cursor = ctx.state().svm_guard.region_cursor;
+                let previous = ctx.state().svm_guard.region_proofs[cursor];
+                let mut trial = *batch;
+                let result = collect_reachable_breakpoints(ctx, &mut trial, window.linear);
+                ctx.state_mut().svm_guard.region_proofs[cursor] = previous;
+                ctx.state_mut().svm_guard.region_cursor = cursor;
+                match result.map(|()| trial.page_breakpoint_count) {
+                    Some(0) => {
+                        ZERO.fetch_add(1, Ordering::Relaxed);
+                        kernel::pr_info!("SVM_ONE_REGION_ZERO page={:#x} linear={:#x}\n",
+                            page, window.linear);
+                    }
+                    Some(1) => { ONE.fetch_add(1, Ordering::Relaxed); }
+                    Some(_) => { MANY.fetch_add(1, Ordering::Relaxed); }
+                    None => { FAILED.fetch_add(1, Ordering::Relaxed); }
+                }
+                let samples = SAMPLES.fetch_add(1, Ordering::Relaxed) + 1;
+                if samples % 2048 == 0 {
+                    kernel::pr_info!("SVM_ONE_REGION events={} samples={} zero={} one={} many={} failed={}\n",
+                        event, samples, ZERO.load(Ordering::Relaxed),
+                        ONE.load(Ordering::Relaxed), MANY.load(Ordering::Relaxed),
+                        FAILED.load(Ordering::Relaxed));
+                }
+            }
+        }
         // A five-hazard page needs a masked DR range to fit the four slots.
         // Decode only the reachable region first: its proof often needs one
         // exact breakpoint, avoiding harmless #DB exits across the mask.
