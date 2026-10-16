@@ -275,6 +275,26 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         Ok(())
     }
 
+    fn read_guest_memory_into_leaf_snapshot(
+        &mut self,
+        gpa: GuestPhysAddr,
+        slot: usize,
+    ) -> Result<(), MemoryError> {
+        if gpa.as_u64() & 4095 != 0 {
+            return Err(MemoryError::OutOfRange);
+        }
+        let src = if let Some(cow_page) = <CowPageMap<P>>::get(&self.cow_pages, gpa) {
+            Page::virtual_address(cow_page).as_u64() as *const u8
+        } else {
+            self.parent_read_page(gpa).ok_or(MemoryError::OutOfRange)?
+        };
+        let dst = self.state.svm_guard.leaf_snapshots[slot].bytes.as_mut_ptr();
+        // SAFETY: src points to an aligned resident guest page (COW or
+        // parent); dst is a separate 4096-byte VM-state snapshot buffer.
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
+        Ok(())
+    }
+
     fn guest_memory_matches(
         &self,
         gpa: GuestPhysAddr,

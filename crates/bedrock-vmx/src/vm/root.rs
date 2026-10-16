@@ -148,6 +148,24 @@ impl<V: VirtualMachineControlStructure, G: GuestMemory, I: InstructionCounter> V
         Ok(())
     }
 
+    fn read_guest_memory_into_leaf_snapshot(
+        &mut self,
+        gpa: GuestPhysAddr,
+        slot: usize,
+    ) -> Result<(), MemoryError> {
+        let offset = gpa.as_u64() as usize;
+        let end = offset.checked_add(4096).ok_or(MemoryError::OutOfRange)?;
+        if gpa.as_u64() & 4095 != 0 || end > self.memory.size() {
+            return Err(MemoryError::OutOfRange);
+        }
+        let src = unsafe { self.memory.as_ptr().add(offset) };
+        let dst = self.state.svm_guard.leaf_snapshots[slot].bytes.as_mut_ptr();
+        // SAFETY: bounds and alignment were checked above; guest memory and
+        // the VM's snapshot buffer are separate allocations of 4096 bytes.
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, 4096) };
+        Ok(())
+    }
+
     fn guest_memory_matches(
         &self,
         gpa: GuestPhysAddr,

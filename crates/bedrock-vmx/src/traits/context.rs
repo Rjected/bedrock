@@ -32,6 +32,23 @@ pub trait VmContext {
 
     fn read_guest_memory(&self, gpa: GuestPhysAddr, buf: &mut [u8]) -> Result<(), MemoryError>;
 
+    /// Snapshot one aligned guest page directly into the SVM leaf buffer.
+    /// Direct-memory backends override this to avoid a page-sized kernel stack
+    /// allocation or repeated 512-byte reads on every guarded table write.
+    fn read_guest_memory_into_leaf_snapshot(
+        &mut self,
+        gpa: GuestPhysAddr,
+        slot: usize,
+    ) -> Result<(), MemoryError> {
+        let mut bytes = [0u8; 512];
+        for offset in (0..4096).step_by(bytes.len()) {
+            self.read_guest_memory(GuestPhysAddr::new(gpa.as_u64() + offset as u64), &mut bytes)?;
+            self.state_mut().svm_guard.leaf_snapshots[slot].bytes[offset..offset + bytes.len()]
+                .copy_from_slice(&bytes);
+        }
+        Ok(())
+    }
+
     /// Compare guest bytes without requiring a full-page temporary buffer.
     /// Backends with direct guest page pointers can override the default.
     fn guest_memory_matches(

@@ -933,12 +933,7 @@ fn snapshot_released_leaf<C: VmContext>(ctx: &mut C, page: u64) -> Option<()> {
         return Some(());
     }
     let slot = guard.leaf_snapshots.iter().position(|snapshot| !snapshot.valid)?;
-    let mut bytes = [0u8; 512];
-    for offset in (0..4096).step_by(bytes.len()) {
-        ctx.read_guest_memory(GuestPhysAddr::new(page + offset as u64), &mut bytes).ok()?;
-        ctx.state_mut().svm_guard.leaf_snapshots[slot].bytes[offset..offset + bytes.len()]
-            .copy_from_slice(&bytes);
-    }
+    ctx.read_guest_memory_into_leaf_snapshot(GuestPhysAddr::new(page), slot).ok()?;
     let snapshot = &mut ctx.state_mut().svm_guard.leaf_snapshots[slot];
     snapshot.page = page;
     snapshot.valid = true;
