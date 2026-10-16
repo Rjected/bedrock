@@ -2227,7 +2227,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     let mapping_generation = ctx.state().ept.mapping_generation();
     let cache = &ctx.state().svm_guard;
     if cache.global_plan.valid
-        && cache.global_plan_linear == window.linear
+        && cache.global_plan_linear == current_linear
         && cache.global_plan_root == root
         && cache.global_plan_predicted == predicted.unwrap_or(u64::MAX)
         && cache.global_plan.code_epoch == cache.code_epoch
@@ -2241,9 +2241,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     {
         // SAFETY: valid is published only after the complete batch is saved.
         let cached = unsafe { cache.global_plan.batch.assume_init_ref() };
-        if cached.global_execution && cached.start
-            == ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?
-            && cached.pages[0] == page
+        if cached.global_execution && cached.pages[0] == page
             && cached.pages[..cached.code_page_count].iter().all(|&physical| {
                 if ctx.state().ept.npt_trusted_code_4k(
                     allocator, GuestPhysAddr::new(physical)) {
@@ -2257,6 +2255,12 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
                     || memo.guarded_mapping_generation != mapping_generation {
                     return false;
                 }
+                // Reusing the page plan at a new RIP must still reject an
+                // unsafe instruction entry on its current code page.
+                if physical == page && memo.proof.offsets[..memo.proof.count]
+                    .contains(&((window.physical.as_u64() & 4095) as u16)) {
+                    return false;
+                }
                 let hazard = PageHazards {
                     boundary: memo.proof.boundary,
                     boundary_guarded: memo.proof.boundary_guarded,
@@ -2268,6 +2272,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             })
         {
             let mut batch = *cached;
+            batch.start = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok()?;
             batch.instruction_budget = budget;
             *output = Some(batch);
             return Some(());
@@ -2467,7 +2472,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     let trusted_code_generation = ctx.state().ept.trusted_code_generation();
     let cache = &mut ctx.state_mut().svm_guard;
     cache.global_plan.valid = false;
-    cache.global_plan_linear = window.linear;
+    cache.global_plan_linear = current_linear;
     cache.global_plan_root = root;
     cache.global_plan_predicted = predicted.unwrap_or(u64::MAX);
     cache.global_plan.code_epoch = cache.code_epoch;
@@ -4879,6 +4884,35 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn page_scoped_global_cache_checks_new_entry_offset() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x2000].fill(0x90);
+        ctx.memory[0x1100..0x1103].copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        ctx.state_mut().ept.map_4k(
+            &mut allocator, GuestPhysAddr::new(0x1000), HostPhysAddr::new(0x101000),
+            bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+            bedrock_ept::EptMemoryType::WriteBack,
+        ).unwrap();
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let first = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
+        assert_eq!(first.start, 0x1000);
+        ctx.set_guest_rip(0x1010);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let reused = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
+        assert_eq!(reused.start, 0x1010);
+        assert_eq!(reused.page_breakpoints, first.page_breakpoints);
+        ctx.set_guest_rip(0x1100);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert!(prepare_global(&mut ctx, &allocator, true, false, &window).is_none());
     }
 
     #[test]
