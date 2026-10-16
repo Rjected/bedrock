@@ -415,6 +415,10 @@ pub(crate) struct SvmPageSuccessor {
     pub root: u64,
     pub from: u64,
     pub to: u64,
+    /// Two frequent destinations retained independently of the latest edge.
+    pub hot: [u64; 2],
+    pub hot_count: [u16; 2],
+    pub observations: u16,
     pub valid: bool,
 }
 

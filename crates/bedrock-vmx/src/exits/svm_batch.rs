@@ -4,7 +4,9 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+#[cfg(test)]
+use super::super::vm_state::SvmPageSuccessor;
 use core::sync::atomic::Ordering;
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
@@ -57,6 +59,63 @@ fn predicted_successor(
 ) -> Option<u64> {
     let entry = &guard.successors[successor_slot(root, from)];
     (entry.valid && entry.root == root && entry.from == from).then_some(entry.to)
+}
+
+fn predicted_hot_successor(
+    guard: &super::super::vm_state::SvmGuardScratch,
+    root: u64,
+    from: u64,
+    excluded: Option<u64>,
+) -> Option<u64> {
+    let entry = &guard.successors[successor_slot(root, from)];
+    if !entry.valid || entry.root != root || entry.from != from {
+        return None;
+    }
+    // A weak second destination costs an extra alias lookup, NPT grant, and
+    // debug-register slot on every selected interval. Require a persistent
+    // share of recent observations before considering it.
+    let minimum = (entry.observations / 10).max(16);
+    (0..2)
+        .filter(|&index| entry.hot_count[index] >= minimum
+            && Some(entry.hot[index]) != excluded)
+        .max_by_key(|&index| entry.hot_count[index])
+        .map(|index| entry.hot[index])
+}
+
+fn record_successor(
+    entry: &mut super::super::vm_state::SvmPageSuccessor,
+    root: u64,
+    from: u64,
+    to: u64,
+) {
+    if !entry.valid || entry.root != root || entry.from != from {
+        *entry = super::super::vm_state::SvmPageSuccessor {
+            root, from, to, hot: [to, 0], hot_count: [1, 0],
+            observations: 1, valid: true,
+        };
+        return;
+    }
+    entry.to = to;
+    // A two-counter frequent-items sketch retains alternating hot edges
+    // without scanning every recent page on VM entry. Periodic decay lets a
+    // changed guest control-flow pattern replace an old winner.
+    if entry.observations >= 1024 {
+        entry.observations /= 2;
+        for count in &mut entry.hot_count {
+            *count /= 2;
+        }
+    }
+    entry.observations += 1;
+    if let Some(index) = (0..2).find(|&index| entry.hot_count[index] != 0 && entry.hot[index] == to) {
+        entry.hot_count[index] = entry.hot_count[index].saturating_add(1);
+    } else if let Some(index) = (0..2).find(|&index| entry.hot_count[index] == 0) {
+        entry.hot[index] = to;
+        entry.hot_count[index] = 1;
+    } else {
+        for count in &mut entry.hot_count {
+            *count -= 1;
+        }
+    }
 }
 
 /// Unknown instructions and control transfers terminate a batch. The flags
@@ -2412,33 +2471,67 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let predicted = predicted_second_successor(
             &ctx.state().svm_guard, root, recent[1], current_linear,
         ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
-        if let Some(linear) = predicted.filter(|&linear| linear != current_linear) {
-            if let Some(physical) = cached_code_translation(ctx, linear) {
-                if physical != page
-                    && !gate_table_contains(&ctx.state().svm_guard, physical)
-                    && !ctx.state().ept.npt_trusted_code_4k(
-                        allocator, GuestPhysAddr::new(physical))
-                {
-                    if let Some(hazard) = cached_page_hazards(ctx, physical) {
-                        if hazard.count != 0 && hazard.boundary_guarded {
-                            if let Some(proof) =
-                                cached_single_page_alias_proof(ctx, root, physical, &hazard)
-                            {
-                                if proof.breakpoint_count != 0
-                                    && proof.breakpoint_count <= batch.page_breakpoints.len()
-                                {
-                                    batch.pages[1] = physical;
-                                    batch.code_page_count = 2;
-                                    batch.page_count = 2;
-                                    batch.page_breakpoints = proof.breakpoints;
-                                    batch.page_breakpoint_masks = proof.breakpoint_masks;
-                                    batch.page_breakpoint_count = proof.breakpoint_count;
-                                }
-                            }
-                        }
-                    }
-                }
+        let hot = predicted_hot_successor(
+            &ctx.state().svm_guard, root, current_linear, predicted,
+        );
+        let mut selected_hazard: Option<PageHazards> = None;
+        for linear in predicted.into_iter().chain(hot).filter(|&linear| linear != current_linear) {
+            if batch.code_page_count >= 3 {
+                break;
             }
+            let Some(physical) = cached_code_translation(ctx, linear) else { continue; };
+            if batch.pages[..batch.code_page_count].contains(&physical)
+                || gate_table_contains(&ctx.state().svm_guard, physical)
+                || ctx.state().ept.npt_trusted_code_4k(
+                    allocator, GuestPhysAddr::new(physical))
+            {
+                continue;
+            }
+            let Some(hazard) = cached_page_hazards(ctx, physical) else { continue; };
+            if hazard.count == 0 || !hazard.boundary_guarded
+                || selected_hazard.is_some_and(|selected| {
+                    !hazard_boundary_safe(&selected, &hazard)
+                        || !hazard_boundary_safe(&hazard, &selected)
+                })
+            {
+                continue;
+            }
+            let Some(proof) = cached_single_page_alias_proof(ctx, root, physical, &hazard) else {
+                continue;
+            };
+            if proof.breakpoint_count == 0 {
+                continue;
+            }
+            let mut breakpoints = batch.page_breakpoints;
+            let mut masks = batch.page_breakpoint_masks;
+            let mut count = batch.page_breakpoint_count;
+            let mut fits = true;
+            for index in 0..proof.breakpoint_count {
+                let address = proof.breakpoints[index];
+                let mask = proof.breakpoint_masks[index];
+                if (0..count).any(|slot| {
+                    masks[slot] & mask == mask
+                        && address & !u64::from(masks[slot])
+                            == breakpoints[slot] & !u64::from(masks[slot])
+                }) {
+                    continue;
+                }
+                if count == breakpoints.len() {
+                    fits = false;
+                    break;
+                }
+                breakpoints[count] = address;
+                masks[count] = mask;
+                count += 1;
+            }
+            if !fits { continue; }
+            batch.pages[batch.code_page_count] = physical;
+            batch.code_page_count += 1;
+            batch.page_count += 1;
+            batch.page_breakpoints = breakpoints;
+            batch.page_breakpoint_masks = masks;
+            batch.page_breakpoint_count = count;
+            selected_hazard = Some(hazard);
         }
     }
     Some(())
@@ -3910,12 +4003,7 @@ pub(crate) fn remember_page<C: VmContext>(ctx: &mut C, linear: u64) {
                 };
             }
             let slot = successor_slot(root, from);
-            ctx.state_mut().svm_guard.successors[slot] = SvmPageSuccessor {
-                root,
-                from,
-                to: page,
-                valid: true,
-            };
+            record_successor(&mut ctx.state_mut().svm_guard.successors[slot], root, from, page);
         }
     }
     let recent = &mut ctx.state_mut().svm_recent_pages;
@@ -4859,7 +4947,8 @@ mod tests {
         assert_eq!(&repeated.page_breakpoints[..repeated.page_breakpoint_count],
             &batch.page_breakpoints[..batch.page_breakpoint_count]);
         ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
-            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x9000, valid: true };
+            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x9000,
+                hot: [0x9000, 0], hot_count: [1, 0], observations: 1, valid: true };
         let predicted = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(&predicted.pages[..predicted.code_page_count], &[0x1000, 0x9000, 0x2000]);
         assert_eq!(predicted.page_breakpoint_count, 3);
@@ -4952,7 +5041,8 @@ mod tests {
         ctx.state_mut().ept.trust_npt_code_4k(
             &allocator, GuestPhysAddr::new(0x1000)).unwrap();
         ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
-            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000, valid: true };
+            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000,
+                hot: [0x2000, 0], hot_count: [1, 0], observations: 1, valid: true };
         ctx.set_guest_rip(0x1000);
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let batch = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
@@ -4970,6 +5060,70 @@ mod tests {
         }
         assert_eq!(prepare_global(&mut ctx, &allocator, true, false, &window)
             .unwrap().code_page_count, 1);
+    }
+
+    #[test]
+    fn trusted_page_guards_two_frequent_successors_with_distinct_breakpoints() {
+        let mut ctx = paged_context(&[0x90]);
+        for page in [0x1000usize, 0x2000, 0x9000] {
+            ctx.memory[page..page + 4096].fill(0x90);
+        }
+        for page in [0x2000usize, 0x9000] {
+            ctx.memory[page + 0x100..page + 0x103]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000, 0x9000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page), HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        for page in [0x2000, 0x9000] {
+            ctx.set_guest_rip(page);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
+                .unwrap().page_breakpoint_count, 1);
+        }
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)).unwrap();
+        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
+            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000,
+                hot: [0x2000, 0x9000], hot_count: [180, 130],
+                observations: 512, valid: true };
+        ctx.set_guest_rip(0x1000);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
+        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000, 0x9000]);
+        assert_eq!(batch.page_breakpoint_count, 2);
+        assert!(breakpoint_matches(&batch, 0x2100));
+        assert!(breakpoint_matches(&batch, 0x9100));
+    }
+
+    #[test]
+    fn frequent_successor_tracker_keeps_two_hot_destinations() {
+        let mut entry = SvmPageSuccessor { root: 0, from: 0, to: 0,
+            hot: [0; 2], hot_count: [0; 2], observations: 0, valid: false };
+        for _ in 0..300 {
+            for to in [0x2000, 0x9000, 0x2000, 0xa000, 0x9000,
+                0x2000, 0x9000, 0x2000, 0xb000, 0x9000] {
+                record_successor(&mut entry, 0x3000, 0x1000, to);
+            }
+        }
+        assert_eq!(entry.to, 0x9000);
+        let mut guard = paged_context(&[0x90]);
+        guard.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] = entry;
+        assert_eq!(predicted_hot_successor(&guard.state().svm_guard,
+            0x3000, 0x1000, Some(0x9000)), Some(0x2000));
+        assert_eq!(predicted_hot_successor(&guard.state().svm_guard,
+            0x4000, 0x1000, Some(0x9000)), None);
     }
 
     #[test]
