@@ -681,8 +681,16 @@ fn collect_translation_tree_pages_with_retention<C: VmContext>(
         {
             return None;
         }
+        // Reusing an intact, write-protected guarded tree does not change
+        // any executable alias or boundary continuation. Keep its proof
+        // generation stable across expiry of the smaller bounded guard.
+        let stable_tree = !scratch.gate_links_untrusted
+            && !scratch.gate_host_write_all && scratch.gate_host_write_count == 0
+            && scratch.gate_mapping_generation == ctx.state().ept.mapping_generation();
         let scratch = &mut ctx.state_mut().svm_guard;
-        scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
+        if !stable_tree {
+            scratch.tree_generation = scratch.tree_generation.wrapping_add(1);
+        }
         scratch.translation_count = 0;
         scratch.translation_cursor = 0;
         scratch.valid = true;
@@ -6465,12 +6473,20 @@ mod tests {
         ctx.state_mut().svm_guard.gate_root = root;
         ctx.state_mut().svm_guard.gate_ready = true;
 
+        let mapping_generation = ctx.state().ept.mapping_generation();
+        ctx.state_mut().svm_guard.gate_mapping_generation = mapping_generation;
+        for saved in &mut ctx.state_mut().svm_guard.gate_guards[..count] {
+            saved.valid = true;
+        }
+
         ctx.state_mut().svm_guard.valid = false;
         ctx.state_mut().svm_guard.tables[0] = 0;
         ctx.state_mut().svm_guard.levels[0] = 0;
         ctx.state_mut().svm_guard.translation_count = 1;
         ctx.state_mut().svm_guard.translations[0] = (0x1000, 0x9000);
+        let tree_generation = ctx.state().svm_guard.tree_generation;
         collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
+        assert_eq!(ctx.state().svm_guard.tree_generation, tree_generation);
         assert_eq!(ctx.state().svm_guard.tables[0], root);
         assert_eq!(ctx.state().svm_guard.count, count);
         assert_eq!(ctx.state().svm_guard.levels[0], 0); // No table walk.
@@ -6479,10 +6495,19 @@ mod tests {
         ctx.state_mut().svm_guard.valid = false;
         assert!(collect_translation_tree_pages(&mut ctx, &[0x3000]).is_none());
 
+        // A pending host table write bypasses the NPT guard, so bounded
+        // reuse must not preserve the prior proof generation.
+        ctx.state_mut().svm_guard.gate_host_write_count = 1;
+        ctx.state_mut().svm_guard.valid = false;
+        collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
+        assert_ne!(ctx.state().svm_guard.tree_generation, tree_generation);
+        ctx.state_mut().svm_guard.gate_host_write_count = 0;
+
         ctx.state_mut().svm_guard.gate_dirty = true;
         ctx.state_mut().svm_guard.valid = false;
         collect_translation_tree_pages(&mut ctx, &[0x1000]).unwrap();
         assert_eq!(ctx.state().svm_guard.levels[0], 4); // Rewalked.
+        assert_ne!(ctx.state().svm_guard.tree_generation, tree_generation);
     }
 
     #[test]
