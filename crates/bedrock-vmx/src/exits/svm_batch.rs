@@ -2573,7 +2573,10 @@ fn add_page_breakpoint_range(
             let bits = 64 - differing.leading_zeros();
             // Wider ranges cause too many harmless #DB exits; retain the
             // scalar path when a page needs more than a 1 KiB range.
-            if bits > 10 {
+            // Cross-page unions can create many false #DB exits on hot code.
+            // Keep the existing 1 KiB limit for a single page, but admit a
+            // new page only when every required merge fits within 256 B.
+            if bits > if avoid.is_some() { 8 } else { 10 } {
                 continue;
             }
             let mask = ((1u64 << bits) - 1) as u16;
@@ -5777,7 +5780,7 @@ mod tests {
         let mut ctx = paged_context(&[0x90]);
         let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
         let mut batch = prepare(&mut ctx, true, true, &window).unwrap();
-        batch.page_breakpoints = [0x1172, 0x1372, 0x1572, 0x1772];
+        batch.page_breakpoints = [0x1172, 0x11a2, 0x11d2, 0x11f2];
         batch.page_breakpoint_masks = [0; 4];
         batch.page_breakpoint_count = 4;
         for address in [0x2ffd, 0x2ffe, 0x2fff] {
@@ -5785,18 +5788,31 @@ mod tests {
         }
         assert_eq!(batch.page_breakpoint_count, 4);
         assert!(!breakpoint_matches(&batch, 0x1310));
-        for address in [0x1172, 0x1372, 0x1572, 0x1772, 0x2ffd, 0x2ffe, 0x2fff] {
+        for address in [0x1172, 0x11a2, 0x11d2, 0x11f2, 0x2ffd, 0x2ffe, 0x2fff] {
             assert!(breakpoint_matches(&batch, address), "uncovered {address:#x}");
         }
-        assert!(batch.page_breakpoint_masks.contains(&0x3ff));
+        assert!(batch.page_breakpoint_masks.iter().all(|&mask| mask <= 0xff));
+        assert!(batch.page_breakpoint_masks.iter().any(|&mask| mask != 0));
         assert!(batch.page_breakpoint_masks.contains(&3));
+    }
+
+    #[test]
+    fn cross_page_union_rejects_a_required_wide_mask() {
+        let mut ctx = paged_context(&[0x90]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let mut batch = prepare(&mut ctx, true, true, &window).unwrap();
+        batch.page_breakpoints = [0x1172, 0x1372, 0x1572, 0x1772];
+        batch.page_breakpoint_count = 4;
+        assert!(add_page_breakpoint_range(
+            &mut batch, 0x2fff, 0, true, Some(0x1310),
+        ).is_none());
     }
 
     #[test]
     fn global_plan_admits_proved_page_after_masked_union() {
         let mut ctx = paged_context(&[0x90]);
         ctx.memory[0x1000..0x3000].fill(0x90);
-        for offset in [0x172, 0x372, 0x572, 0x772] {
+        for offset in [0x172, 0x1a2, 0x1d2, 0x1f2] {
             ctx.memory[0x1000 + offset..0x1003 + offset]
                 .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
         }
@@ -5829,7 +5845,7 @@ mod tests {
         assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000]);
         assert_eq!(batch.page_breakpoint_count, 4);
         assert!(!breakpoint_matches(&batch, 0x1310));
-        for address in [0x1172, 0x1372, 0x1572, 0x1772, 0x2c10, 0x2c20, 0x2c30] {
+        for address in [0x1172, 0x11a2, 0x11d2, 0x11f2, 0x2c10, 0x2c20, 0x2c30] {
             assert!(breakpoint_matches(&batch, address), "uncovered {address:#x}");
         }
     }
