@@ -405,7 +405,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         }
 
         let old_mapping_generation = self.state.ept.mapping_generation();
-        let unrelated_data_page = {
+        let (table_page, code_page) = {
             let guard = &self.state.svm_guard;
             let page = page_gpa.as_u64();
             let table = super::super::exits::gate_table_contains(guard, page)
@@ -414,8 +414,26 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                     .iter().any(|saved| saved.valid && saved.guest == page)
                 || guard.has_cached_leaf_filter(page);
             let code = guard.may_have_code_proof(page);
-            !table && !code
+            (table, code)
         };
+        let unrelated_data_page = !table_page && !code_page;
+        #[cfg(not(feature = "cargo"))]
+        {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static COWS: AtomicU64 = AtomicU64::new(0);
+            static TABLE: AtomicU64 = AtomicU64::new(0);
+            static CODE: AtomicU64 = AtomicU64::new(0);
+            static DATA: AtomicU64 = AtomicU64::new(0);
+            if table_page { TABLE.fetch_add(1, Ordering::Relaxed); }
+            else if code_page { CODE.fetch_add(1, Ordering::Relaxed); }
+            else { DATA.fetch_add(1, Ordering::Relaxed); }
+            let n = COWS.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 8 || n % 1024 == 0 {
+                kernel::pr_info!("SVM_COW_CLASS n={} table={} code={} data={}\n", n,
+                    TABLE.load(Ordering::Relaxed), CODE.load(Ordering::Relaxed),
+                    DATA.load(Ordering::Relaxed));
+            }
+        }
         if let Err(_e) = self.state.ept.remap_4k(
             allocator,
             page_gpa,
@@ -444,6 +462,15 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             }
         } else {
             self.state.svm_guard.gate_dirty = true;
+            #[cfg(not(feature = "cargo"))]
+            {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static RELEVANT: AtomicU64 = AtomicU64::new(0);
+                let n = RELEVANT.fetch_add(1, Ordering::Relaxed) + 1;
+                if n <= 8 || n % 1024 == 0 {
+                    kernel::pr_info!("SVM_COW_RELEVANT n={}\n", n);
+                }
+            }
             self.state.svm_guard.invalidate_leaf_filters_for_remap();
         }
 
@@ -536,6 +563,15 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             }
 
             self.state.svm_guard.gate_dirty = true;
+            #[cfg(not(feature = "cargo"))]
+            {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static FEEDBACK: AtomicU64 = AtomicU64::new(0);
+                let n = FEEDBACK.fetch_add(1, Ordering::Relaxed) + 1;
+                if n <= 8 || n % 1024 == 0 {
+                    kernel::pr_info!("SVM_COW_FEEDBACK n={}\n", n);
+                }
+            }
             self.state.svm_guard.invalidate_leaf_filters_for_remap();
 
             // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a
@@ -612,6 +648,15 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         }
 
         self.state.svm_guard.gate_dirty = true;
+        #[cfg(not(feature = "cargo"))]
+        {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static IO_CHANNEL: AtomicU64 = AtomicU64::new(0);
+            let n = IO_CHANNEL.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 8 || n % 1024 == 0 {
+                kernel::pr_info!("SVM_COW_IO_CHANNEL n={}\n", n);
+            }
+        }
         self.state.svm_guard.invalidate_leaf_filters_for_remap();
 
         // SDM Vol 3C §30.4.3.4: single-context INVEPT after changing a leaf's

@@ -195,6 +195,15 @@ impl SvmGuardScratch {
     }
 
     pub fn invalidate_leaf_filters_for_remap(&mut self) {
+        #[cfg(not(feature = "cargo"))]
+        {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static REMAPS: AtomicU64 = AtomicU64::new(0);
+            let n = REMAPS.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 16 || n % 1024 == 0 {
+                kernel::pr_info!("SVM_LEAF_FILTER_REMAP n={}\n", n);
+            }
+        }
         self.leaf_filter_cache_epoch = self.leaf_filter_cache_epoch.wrapping_add(1);
         self.gate_leaf_filter_valid.fill(false);
         // A wrapped epoch must not match filters from its previous cycle.

@@ -2929,6 +2929,11 @@ fn collect_page_breakpoints<C: VmContext>(
         }
         batch.page_breakpoint_count = 0;
     }
+    #[cfg(not(feature = "cargo"))]
+    let walk_start = super::super::timing::rdtsc();
+    #[cfg(not(feature = "cargo"))]
+    let (mut cached_upper, mut skipped_leaf, mut read_leaf, mut read_upper) =
+        (0u32, 0u32, 0u32, 0u32);
     let mut selected_probes = [(0, 0, 0, 0); SVM_RECENT_PAGE_CAPACITY + 1];
     let precompute_probes = batch.code_page_count <= selected_probes.len();
     if precompute_probes {
@@ -2973,6 +2978,8 @@ fn collect_page_breakpoints<C: VmContext>(
             None
         };
         if let Some(index) = cached {
+            #[cfg(not(feature = "cargo"))]
+            { cached_upper += 1; }
             let start = usize::from(ctx.state().svm_guard.gate_upper_starts[index]);
             let end = start + usize::from(ctx.state().svm_guard.gate_upper_lengths[index]);
             for edge_index in start..end {
@@ -3019,11 +3026,15 @@ fn collect_page_breakpoints<C: VmContext>(
                     })
                 }
             {
+                #[cfg(not(feature = "cargo"))]
+                { skipped_leaf += 1; }
                 cursor += 1;
                 continue;
             }
         }
         let mut leaf_filter = [0u64; SVM_LEAF_FILTER_WORDS];
+        #[cfg(not(feature = "cargo"))]
+        if walk.level == 1 { read_leaf += 1; } else { read_upper += 1; }
         for offset in (0..4096).step_by(4096) {
             if ctx.read_guest_memory(GuestPhysAddr::new(walk.table + offset), &mut bytes).is_err() {
                 return None;
@@ -3065,6 +3076,21 @@ fn collect_page_breakpoints<C: VmContext>(
         cursor += 1;
     }
     remember_alias_proof(ctx, batch, hazards, root, key_hash, set, hazard_pages, true);
+    #[cfg(not(feature = "cargo"))]
+    {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static WALKS: AtomicU64 = AtomicU64::new(0);
+        let walks = WALKS.fetch_add(1, Ordering::Relaxed) + 1;
+        if walks % 4093 == 0 {
+            let page = hazards[..batch.code_page_count].iter().position(|h| h.count != 0)
+                .map(|index| batch.pages[index]).unwrap_or(0);
+            kernel::pr_info!("SVM_ALIAS_WALK_SAMPLE n={} root={:#x} page={:#x} selected={} hazards={} gate={} visited={} cached_upper={} skipped_leaf={} read_leaf={} read_upper={} breakpoints={} cycles={}\n",
+                walks, root, page, batch.code_page_count, hazard_pages,
+                ctx.state().svm_guard.gate_count, cursor, cached_upper,
+                skipped_leaf, read_leaf, read_upper, batch.page_breakpoint_count,
+                super::super::timing::rdtsc().saturating_sub(walk_start));
+        }
+    }
     Some(())
 }
 
