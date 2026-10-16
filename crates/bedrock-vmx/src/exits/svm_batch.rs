@@ -4,7 +4,7 @@
 #[cfg(not(feature = "cargo"))]
 use super::super::prelude::*;
 use super::super::traits::{CountedLoopBatch, CowAllocator, InstructionBatch, RepeatBatch};
-use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
+use super::super::vm_state::{SvmAliasEdge, SvmPageSuccessor, SvmSecondSuccessor, SVM_ALIAS_EDGE_CAPACITY, SVM_ALIAS_PROOF_CAPACITY, SVM_ALIAS_PROOF_LOOKUP_CAPACITY, SVM_ALIAS_PROOF_PAGE_CAPACITY, SVM_ALIAS_PROOF_WAYS, SVM_ALIAS_ROOT_FILTER_CAPACITY, SVM_CODE_PAGE_CAPACITY, SVM_GUARDED_HAZARD_HINT_CAPACITY, SVM_LEAF_FILTER_WORDS, SVM_LEAF_PAGE_INDEX_CAPACITY, SVM_REBUILD_GUARD_INDEX_CAPACITY, SVM_RECENT_PAGE_CAPACITY, SVM_RETAINED_GUARD_CAPACITY, SVM_SECOND_SUCCESSOR_CAPACITY, SVM_SUCCESSOR_CAPACITY, SVM_TABLE_CAPACITY};
 use core::sync::atomic::Ordering;
 #[cfg(not(feature = "cargo"))]
 use crate::ept::NptExecutionGuard;
@@ -889,6 +889,93 @@ fn invalidate_alias_proofs(guard: &mut super::super::vm_state::SvmGuardScratch) 
     guard.alias_proofs_nonempty = false;
 }
 
+fn root_table_filter_probe(page: u64) -> (usize, u64, usize, u64) {
+    let hash = (page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let first = (hash >> 52) as usize;
+    let second = (hash.rotate_left(29) >> 52) as usize;
+    (first >> 6, 1u64 << (first & 63), second >> 6, 1u64 << (second & 63))
+}
+
+#[cfg(test)]
+fn root_table_filter_contains(
+    filter: &super::super::vm_state::SvmAliasRootFilter,
+    page: u64,
+) -> bool {
+    let (first, first_bit, second, second_bit) = root_table_filter_probe(page);
+    filter.bits[first] & first_bit != 0 && filter.bits[second] & second_bit != 0
+}
+
+/// Add the complete guarded tree to this root's filter. Unioning across
+/// rebuilds preserves coverage for proofs retained from older generations.
+fn record_root_table_filter(guard: &mut super::super::vm_state::SvmGuardScratch) {
+    let root = guard.gate_root;
+    let slot = if let Some(slot) = guard.alias_root_filters.iter()
+        .position(|filter| filter.valid && filter.root == root) {
+        slot
+    } else {
+        let slot = guard.alias_root_filter_cursor % SVM_ALIAS_ROOT_FILTER_CAPACITY;
+        guard.alias_root_filter_cursor = guard.alias_root_filter_cursor.wrapping_add(1);
+        let next = guard.alias_root_filters[slot].epoch.wrapping_add(1);
+        if next == 0 {
+            // Prevent a generation wrap from matching any old proof.
+            invalidate_alias_proofs(guard);
+        }
+        let filter = &mut guard.alias_root_filters[slot];
+        filter.valid = true;
+        filter.root = root;
+        filter.epoch = next.max(1);
+        filter.bits.fill(0);
+        slot
+    };
+    for index in 0..guard.gate_count {
+        let (first, first_bit, second, second_bit) =
+            root_table_filter_probe(guard.gate_tables[index]);
+        let bits = &mut guard.alias_root_filters[slot].bits;
+        bits[first] |= first_bit;
+        bits[second] |= second_bit;
+    }
+}
+
+/// An inactive table can affect only roots whose guarded tree contains it.
+/// Unknown, evicted, or positive Bloom filters conservatively lose proofs.
+fn invalidate_alias_proofs_for_inactive_table(
+    guard: &mut super::super::vm_state::SvmGuardScratch,
+    page: u64,
+) {
+    guard.alias_proof.valid = false;
+    if !guard.alias_proofs_nonempty {
+        return;
+    }
+    let (first, first_bit, second, second_bit) = root_table_filter_probe(page);
+    // Several proofs usually share a root. Probe its Bloom filter once for
+    // this write, while still checking each proof's slot generation below.
+    let mut absent_by_slot = [0u8; SVM_ALIAS_ROOT_FILTER_CAPACITY];
+    let mut any_valid = false;
+    for proof in &mut guard.alias_proofs {
+        if !proof.valid {
+            continue;
+        }
+        let slot = usize::from(proof.root_filter_slot);
+        let safe = slot != 0 && slot <= SVM_ALIAS_ROOT_FILTER_CAPACITY
+            && {
+                let filter = &guard.alias_root_filters[slot - 1];
+                filter.valid && filter.root == proof.root
+                    && filter.epoch == proof.root_filter_epoch
+                    && {
+                        let result = &mut absent_by_slot[slot - 1];
+                        if *result == 0 {
+                            *result = if filter.bits[first] & first_bit == 0
+                                || filter.bits[second] & second_bit == 0 { 1 } else { 2 };
+                        }
+                        *result == 1
+                    }
+            };
+        proof.valid = safe;
+        any_valid |= safe;
+    }
+    guard.alias_proofs_nonempty = any_valid;
+}
+
 /// A changed leaf PTE can create an executable alias only for the physical
 /// page it names after the write. Removed aliases leave extra breakpoints.
 fn leaf_page_slot(physical: u64) -> usize {
@@ -1302,6 +1389,7 @@ pub(crate) fn refresh_global_tree<C: VmContext, A: CowAllocator<C::CowPage>>(
             proof.valid = alias_proof_retained(&retained, index);
         }
     }
+    record_root_table_filter(guard);
 }
 
 /// Only a decoded scalar store has a verifiable next RIP for rearming the
@@ -1354,7 +1442,7 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
             && ctx.state().svm_guard.gate_levels[current] > 1
     });
     if !active_leaf && !active_upper {
-        invalidate_alias_proofs(&mut ctx.state_mut().svm_guard);
+        invalidate_alias_proofs_for_inactive_table(&mut ctx.state_mut().svm_guard, page);
     }
     true
 }
@@ -2708,6 +2796,18 @@ fn remember_alias_proof<C: VmContext>(
     hazard_pages: usize,
     insert: bool,
 ) {
+    let (root_filter_slot, root_filter_epoch) = {
+        let guard = &ctx.state().svm_guard;
+        if guard.gate_ready && !guard.gate_dirty && !guard.gate_links_untrusted
+            && guard.gate_root == root {
+            guard.alias_root_filters.iter().enumerate()
+                .find(|(_, filter)| filter.valid && filter.root == root)
+                .map(|(index, filter)| ((index + 1) as u8, filter.epoch))
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        }
+    };
     for (i, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
         if hazard.count != 0 {
             ctx.state_mut().svm_guard.mark_possible_code_page(batch.pages[i]);
@@ -2717,6 +2817,8 @@ fn remember_alias_proof<C: VmContext>(
     proof.valid = true;
     proof.key_hash = key_hash;
     proof.root = root;
+    proof.root_filter_slot = root_filter_slot;
+    proof.root_filter_epoch = root_filter_epoch;
     proof.page_count = hazard_pages;
     let mut slot = 0;
     for (i, hazard) in hazards.iter().enumerate().take(batch.code_page_count) {
@@ -6426,6 +6528,59 @@ mod tests {
         ctx.memory[0x3000..0x3008].copy_from_slice(&0x7007u64.to_le_bytes());
         refresh_global_tree(&mut ctx, &allocator, true);
         assert!(!ctx.state().svm_guard.alias_proofs[0].valid);
+    }
+
+    #[test]
+    fn inactive_table_write_keeps_only_proven_unrelated_roots() {
+        let mut ctx = paged_context(&[0x90]);
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.gate_root = 0x3000;
+        guard.gate_count = 2;
+        guard.gate_tables[0] = 0x3000;
+        guard.gate_tables[1] = 0x4000;
+        record_root_table_filter(guard);
+        let epoch = guard.alias_root_filters[0].epoch;
+        assert!(root_table_filter_contains(&guard.alias_root_filters[0], 0x3000));
+        assert!(root_table_filter_contains(&guard.alias_root_filters[0], 0x4000));
+
+        guard.alias_proofs[0].valid = true;
+        guard.alias_proofs[0].root = 0x3000;
+        guard.alias_proofs[0].root_filter_slot = 1;
+        guard.alias_proofs[0].root_filter_epoch = epoch;
+        guard.alias_proofs[1].valid = true;
+        guard.alias_proofs[1].root = 0x3000;
+        guard.alias_proofs[1].root_filter_slot = 0;
+        guard.alias_proofs_nonempty = true;
+        invalidate_alias_proofs_for_inactive_table(guard, 0x9000);
+        assert!(guard.alias_proofs[0].valid);
+        assert!(!guard.alias_proofs[1].valid);
+
+        invalidate_alias_proofs_for_inactive_table(guard, 0x4000);
+        assert!(!guard.alias_proofs[0].valid);
+        assert!(!guard.alias_proofs_nonempty);
+    }
+
+    #[test]
+    fn evicted_root_filter_cannot_retain_an_old_proof() {
+        let mut ctx = paged_context(&[0x90]);
+        let guard = &mut ctx.state_mut().svm_guard;
+        guard.gate_count = 1;
+        guard.gate_tables[0] = 0x3000;
+        guard.gate_root = 0x3000;
+        record_root_table_filter(guard);
+        guard.alias_proofs[0].valid = true;
+        guard.alias_proofs[0].root = 0x3000;
+        guard.alias_proofs[0].root_filter_slot = 1;
+        guard.alias_proofs[0].root_filter_epoch = guard.alias_root_filters[0].epoch;
+        guard.alias_proofs_nonempty = true;
+        for index in 0..SVM_ALIAS_ROOT_FILTER_CAPACITY {
+            guard.gate_root = 0x10000 + (index as u64) * 4096;
+            guard.gate_tables[0] = guard.gate_root;
+            record_root_table_filter(guard);
+        }
+        assert_ne!(guard.alias_root_filters[0].root, 0x3000);
+        invalidate_alias_proofs_for_inactive_table(guard, 0x9000);
+        assert!(!guard.alias_proofs[0].valid);
     }
 
     #[test]

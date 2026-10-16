@@ -29,6 +29,8 @@ pub(crate) const SVM_ALIAS_PROOF_CAPACITY: usize = 2048;
 pub(crate) const SVM_ALIAS_PROOF_LOOKUP_CAPACITY: usize = 1024;
 pub(crate) const SVM_ALIAS_PROOF_WAYS: usize = 4;
 pub(crate) const SVM_ALIAS_PROOF_PAGE_CAPACITY: usize = 4;
+pub(crate) const SVM_ALIAS_ROOT_FILTER_CAPACITY: usize = 32;
+pub(crate) const SVM_ALIAS_ROOT_FILTER_WORDS: usize = 64;
 pub(crate) const SVM_LEAF_PAGE_INDEX_CAPACITY: usize = 1024;
 pub(crate) const SVM_LEAF_FILTER_CACHE_CAPACITY: usize = 2048;
 // The wider filter keeps ordinary executable PTE populations from
@@ -99,6 +101,10 @@ pub(crate) struct SvmGuardScratch {
     pub aliases: [SvmAliasWalk; SVM_ALIAS_WALK_CAPACITY],
     pub alias_proof: SvmAliasProof,
     pub alias_proofs: [SvmAliasProof; SVM_ALIAS_PROOF_CAPACITY],
+    /// Conservative guarded-table sets for roots with cached alias proofs.
+    /// A missing filter or Bloom hit always falls back to invalidation.
+    pub alias_root_filters: [SvmAliasRootFilter; SVM_ALIAS_ROOT_FILTER_CAPACITY],
+    pub alias_root_filter_cursor: usize,
     /// Set whenever a valid entry may exist since the last full clear.
     /// Selective invalidation may leave this true after the last entry dies.
     pub alias_proofs_nonempty: bool,
@@ -347,6 +353,9 @@ pub(crate) struct SvmAliasProof {
     pub valid: bool,
     pub key_hash: u64,
     pub root: u64,
+    /// One-based slot and generation of the guarded-tree filter at creation.
+    pub root_filter_slot: u8,
+    pub root_filter_epoch: u64,
     pub pages: [u64; SVM_ALIAS_PROOF_PAGE_CAPACITY],
     pub offsets: [[u16; 16]; SVM_ALIAS_PROOF_PAGE_CAPACITY],
     pub counts: [usize; SVM_ALIAS_PROOF_PAGE_CAPACITY],
@@ -354,6 +363,14 @@ pub(crate) struct SvmAliasProof {
     pub breakpoints: [u64; 4],
     pub breakpoint_masks: [u16; 4],
     pub breakpoint_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SvmAliasRootFilter {
+    pub valid: bool,
+    pub root: u64,
+    pub epoch: u64,
+    pub bits: [u64; SVM_ALIAS_ROOT_FILTER_WORDS],
 }
 
 /// Leaf PTEs before a guarded page is released for one guest store.
