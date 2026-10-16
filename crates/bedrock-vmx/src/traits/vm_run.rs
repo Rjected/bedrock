@@ -463,6 +463,18 @@ where
         if software_exit {
             ctx.sync_gprs_to_vmx_ctx();
         }
+        // A boundary-trusted page has a root-dependent continuation proof.
+        // Check again after event and software-exit preparation, which may
+        // modify guest memory without entering the guest. Restore temporary
+        // grants first so a saved NX bit cannot undo the revocation.
+        if Ctx::V::uses_nested_paging()
+            && super::super::exits::conditional_code_needs_revoke(ctx)
+        {
+            restore_held_clock_execute(ctx, allocator, &mut held_clock_execute, &mut held_clock_paired);
+            held_clock_page_count = 0;
+            clock_retry_plan = None;
+            super::super::exits::revoke_conditional_code(ctx, allocator);
+        }
         let mut scalar_page = ctx.state().svm_gate_scalar_page;
         if let (Some(page), Some(window)) = (scalar_page, instruction_window.as_ref()) {
             let current = window.physical.as_u64() & !4095;

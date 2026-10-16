@@ -541,6 +541,29 @@ impl<Frame> EptPageTable<Frame> {
         Some(())
     }
 
+    /// Trust code only while the caller's guarded translation/boundary proof
+    /// remains valid. The marker makes a forked EPT drop execute permission:
+    /// a child's fresh VM state has no copy of that parent-specific proof.
+    pub fn trust_conditional_npt_code_4k<A: FrameAllocator>(
+        &mut self,
+        allocator: &A,
+        guest: GuestPhysAddr,
+    ) -> Option<()> {
+        let (table, index) = self.npt_leaf_4k(allocator, guest)?;
+        let leaf = allocator.phys_to_virt(table).cast::<EptEntry>();
+        // SAFETY: the guest is stopped while changing its NPT leaf.
+        unsafe {
+            let entry = &mut *leaf.add(index as usize);
+            if entry.raw() & (1 << 9) != 0 {
+                return None;
+            }
+            entry.set_npt_trusted_code(true);
+            entry.set_npt_conditional_code();
+        }
+        self.trusted_code_generation = self.trusted_code_generation.wrapping_add(1);
+        Some(())
+    }
+
     pub fn invalidate_npt_code_4k<A: FrameAllocator>(
         &mut self,
         allocator: &A,
@@ -928,9 +951,11 @@ impl<Frame> EptPageTable<Frame> {
 
                         let host_phys = src_pte.addr();
                         let perms = if self.format == PageTableFormat::AmdNpt {
-                            EptPermissions::from_bits(
-                                src_pte.permissions_with_format(self.format).bits() & !2,
-                            )
+                            let mut bits = src_pte.permissions_with_format(self.format).bits() & !2;
+                            if src_pte.raw() & (1 << 11) != 0 {
+                                bits &= !4;
+                            }
+                            EptPermissions::from_bits(bits)
                         } else {
                             EptPermissions::READ_EXECUTE
                         };

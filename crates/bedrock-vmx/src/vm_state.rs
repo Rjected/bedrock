@@ -114,6 +114,15 @@ pub(crate) struct SvmGuardScratch {
     pub region_proofs: [SvmRegionProof; 32],
     pub region_cursor: usize,
     pub boundary_continuations: [SvmBoundaryContinuation; 16],
+    /// Root-dependent, boundary-proven NPT code pages. Unlike globally safe
+    /// pages these must be revoked before a changed proof permits guest entry.
+    pub conditional_code_pages: [u64; 16],
+    pub conditional_code_count: usize,
+    pub conditional_root: u64,
+    pub conditional_tree_generation: u64,
+    pub conditional_mapping_generation: u64,
+    pub conditional_code_epoch: u64,
+    pub conditional_trusted_generation: u64,
     pub page_plans: [SvmPagePlan; 128],
     pub code_epoch: u64,
     pub tree_generation: u64,
