@@ -1,0 +1,47 @@
+# AMD pinned-CI exits after frequent-successor planning (2026-10-16)
+
+Production `39f7cc3` passed the exact pinned one-seed, 180-virtual-second
+Tempo DST workload (`failed=0`) on disposable EPYC 4245P / HWE
+`7.0.0-38-generic` box `box-ad3b5fef`. The progress driver logged
+ten-virtual-second snapshots and took 173 host seconds; its userspace binary
+SHA-256 was `f0d4c4c16cd5a25549d83107b1b0161c4432769d0c42e26f2144c5994648f554`.
+Its last branch-VM snapshot at virtual time 233.192 seconds reported:
+
+| Exit/cost | Value | Share |
+| --- | ---: | ---: |
+| All VM exits | 42,813,339 | 100% |
+| Nested-page faults | 21,837,491 | 51.0% of exits |
+| RDTSC + RDTSCP | 13,984,167 | 32.7% of exits |
+| Synthetic MTF exits | 5,512,847 | 12.9% of exits |
+| VM-entry preparation | 156.93 billion TSC cycles | 37.1% of recorded run cycles |
+| Guest/VM-run interval | 226.99 billion TSC cycles | 53.7% of recorded run cycles |
+| Recorded run total | 422.85 billion TSC cycles | 100% |
+
+The earlier [production exit profile](AMD_CI_PRODUCTION_EXIT_PROFILE_1016.md)
+captured 47.05 million exits, including 26.02 million NPT faults, at virtual
+time 233.734 seconds before both guarded boundary trust and the
+frequent-successor change. Those profiles used different boxes and snapshot
+times, so the roughly 4.2-million-fault reduction is directional and cannot
+be assigned to the predictor alone. TSC-read exits remained near 14 million.
+NPT instruction-fetch faults and the cost of preparing their next entries
+remain the largest target for AMD workload performance.
+
+The separate diagnostic branch `dan/amd-postsuccessor-scalar-1016` sampled
+remaining fetch faults and boundary grants. In a short pinned run, 294/775
+sampled one-hazard faults had their sole offset at `0xfff`. The 16-page
+conditional-grant capacity was never reached in 786,432 attempts. Ordered
+revocation counters instead found CR3 changes (33%), pending host writes
+(27%), and guarded translation-tree changes (21%) most often. These counters
+point toward safe proof reuse across address-space and mapping changes; a
+new root must be proved before an NPT execute grant can remain active.
+
+A follow-up that also admitted frequent successors from hazardous source
+pages passed but regressed to 175 seconds versus an adjacent 168-second
+production control on this box. Its source and evidence are on rejected
+branch `dan/amd-hot-successor-untrusted-1016`; that extension is not merged.
+
+The progress campaign log and status are under ignored
+`target/boxctl-evidence/box-ad3b5fef/postsuccessor-profile/` in this
+worktree. All kernel-module builds and loads were confined to the disposable
+box. The production module was restored and passed its full in-box SVM suite
+before the box expired.
