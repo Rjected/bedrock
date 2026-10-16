@@ -15,6 +15,28 @@ use super::super::prelude::*;
 #[cfg(feature = "cargo")]
 use crate::prelude::*;
 
+#[cfg(not(feature = "cargo"))]
+fn profile_npt(kind: usize) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    // execute: scalar, trusted, no-ROGPT; write: table, code guard,
+    // trusted code, COW; then device/PEBS/unhandled.
+    static COUNTS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+    COUNTS[kind].fetch_add(1, Ordering::Relaxed);
+    let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if total % (1 << 20) == 0 {
+        kernel::pr_info!("SVM_NPT_BREAKDOWN total={} scalar={} trusted={} no_rogpt={} table_write={} code_write={} trusted_write={} cow={} other={}\n",
+            total,
+            COUNTS[0].load(Ordering::Relaxed), COUNTS[1].load(Ordering::Relaxed),
+            COUNTS[2].load(Ordering::Relaxed), COUNTS[3].load(Ordering::Relaxed),
+            COUNTS[4].load(Ordering::Relaxed), COUNTS[5].load(Ordering::Relaxed),
+            COUNTS[6].load(Ordering::Relaxed), COUNTS[7].load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(feature = "cargo")]
+fn profile_npt(_: usize) {}
+
 /// Handle EPT violation exit.
 pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
     ctx: &mut C,
@@ -24,6 +46,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
     // PEBS-induced violations (qualification bit 16, EPT-friendly PEBS) are
     // asynchronous to the instruction and only matter for precise exits.
     if is_pebs_induced(&qual) {
+        profile_npt(7);
         return handle_pebs_precise_exit(ctx);
     }
 
@@ -34,10 +57,12 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
         .unwrap_or(0);
 
     if (APIC_BASE..APIC_BASE + APIC_SIZE).contains(&guest_phys) {
+        profile_npt(7);
         return handle_apic_access(ctx, guest_phys, qual);
     }
 
     if (IOAPIC_BASE..IOAPIC_BASE + IOAPIC_SIZE).contains(&guest_phys) {
+        profile_npt(7);
         return handle_ioapic_access(ctx, guest_phys, qual);
     }
 
@@ -52,6 +77,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
                     .is_some()
             {
                 ctx.state_mut().svm_gate_scalar_page = None;
+                profile_npt(2);
                 return ExitHandlerResult::Continue;
             }
             let gate = &ctx.state().svm_guard;
@@ -70,10 +96,12 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
                     .is_some()
                 {
                     ctx.state_mut().svm_gate_scalar_page = None;
+                    profile_npt(1);
                     return ExitHandlerResult::Continue;
                 }
             } else {
                 ctx.state_mut().svm_gate_scalar_page = Some(page);
+                profile_npt(0);
                 return ExitHandlerResult::Continue;
             }
         }
@@ -87,6 +115,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
             ctx.state_mut().svm_gate_replay_start =
                 ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestRip).ok();
             ctx.state_mut().svm_gate_replay_rip = replay_rip;
+            profile_npt(3);
             return ExitHandlerResult::Continue;
         }
         if qual.write && super::svm_batch::release_recurrent_code_write(ctx, allocator, page) {
@@ -94,6 +123,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
                 .ok()
                 .map(|window| window.physical.as_u64() & !4095);
             ctx.state_mut().svm_gate_scalar_page = scalar_page;
+            profile_npt(4);
             return ExitHandlerResult::Continue;
         }
         if qual.write
@@ -112,6 +142,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
                     .ok()
                     .map(|window| window.physical.as_u64() & !4095);
                 ctx.state_mut().svm_gate_scalar_page = scalar_page;
+                profile_npt(5);
                 return ExitHandlerResult::Continue;
             }
         }
@@ -120,9 +151,11 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
     // CoW fault: write to a non-writable page (forked VMs start pages R+X).
     if qual.write && !qual.writable {
         if let Some(result) = ctx.handle_cow_fault(GuestPhysAddr::new(guest_phys), allocator) {
+            profile_npt(6);
             return result;
         }
         // Pool exhausted: exit to refill in sleepable context.
+        profile_npt(6);
         return ExitHandlerResult::ExitToUserspace(ExitReason::PoolExhausted);
     }
 
@@ -160,6 +193,7 @@ pub fn handle_ept_violation<C: VmContext, A: CowAllocator<C::CowPage>>(
         qual.executable
     );
 
+    profile_npt(7);
     ExitHandlerResult::ExitToUserspace(ExitReason::EptViolation)
 }
 
