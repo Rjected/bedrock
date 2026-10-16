@@ -160,6 +160,47 @@ pub(crate) struct SvmGuardScratch {
 }
 
 impl SvmGuardScratch {
+    pub fn can_keep_gate_for_code_cow(&self, root: u64, old_generation: u64) -> bool {
+        self.gate_ready && self.gate_count != 0
+            && !self.gate_dirty && !self.gate_links_untrusted
+            && self.gate_root == root
+            && self.gate_mapping_generation == old_generation
+            && (self.retained_guard_count == 0
+                || self.retained_mapping_generation == old_generation)
+            && self.gate_host_write_count == 0 && !self.gate_host_write_all
+    }
+
+    /// A forked VM remapped a possible code page, leaving the guarded guest
+    /// page-table tree unchanged. Drop byte-dependent proofs for that page
+    /// and advance the unaffected table guards to the new NPT generation.
+    pub fn note_code_cow(&mut self, page: u64, old_generation: u64, generation: u64) {
+        self.valid = false;
+        self.code_count = 0;
+        self.code_epoch = self.code_epoch.wrapping_add(1);
+        self.alias_proof.valid = false;
+        for memo in &mut self.hazard_memos {
+            if (memo.valid || memo.guarded) && memo.proof.page == page {
+                if memo.guarded {
+                    memo.guarded = false;
+                    self.hazard_guard_count = self.hazard_guard_count.saturating_sub(1);
+                }
+                memo.valid = false;
+                memo.hits = 0;
+            }
+        }
+        for hint in &mut self.guarded_hazard_hints {
+            if hint.valid && hint.page == page {
+                hint.valid = false;
+            }
+        }
+        if self.gate_mapping_generation == old_generation {
+            self.gate_mapping_generation = generation;
+        }
+        if self.retained_mapping_generation == old_generation {
+            self.retained_mapping_generation = generation;
+        }
+    }
+
     pub fn mark_possible_code_page(&mut self, page: u64) {
         let hash = (page >> 12).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         let first = (hash >> 48) as usize;
@@ -286,6 +327,69 @@ mod leaf_filter_cache_tests {
 
         guard.note_gate_host_write(u64::MAX, 2);
         assert_eq!(guard.leaf_filter_cache_pages[second_slot], 0);
+    }
+
+    #[test]
+    fn code_cow_revokes_bytes_without_clearing_page_table_filters() {
+        let mut guard = box_svm_guard();
+        let table = 0x6000;
+        let code = 0x9000;
+        let slot = SvmGuardScratch::leaf_filter_cache_slot(table);
+        guard.leaf_filter_cache_pages[slot] = table + 1;
+        guard.gate_leaf_filter_valid[0] = true;
+        guard.gate_mapping_generation = 11;
+        guard.retained_mapping_generation = 11;
+        guard.valid = true;
+        guard.code_count = 1;
+        guard.hazard_guard_count = 1;
+        guard.hazard_memos[0].valid = true;
+        guard.hazard_memos[0].guarded = true;
+        guard.hazard_memos[0].proof.page = code;
+        guard.guarded_hazard_hints[0].valid = true;
+        guard.guarded_hazard_hints[0].page = code;
+        guard.alias_proof.valid = true;
+
+        guard.note_code_cow(code, 11, 12);
+        assert_eq!(guard.leaf_filter_cache_pages[slot], table + 1);
+        assert!(guard.gate_leaf_filter_valid[0]);
+        assert_eq!(guard.gate_mapping_generation, 12);
+        assert_eq!(guard.retained_mapping_generation, 12);
+        assert!(!guard.valid);
+        assert_eq!(guard.code_count, 0);
+        assert_eq!(guard.code_epoch, 1);
+        assert!(!guard.hazard_memos[0].valid);
+        assert!(!guard.hazard_memos[0].guarded);
+        assert_eq!(guard.hazard_guard_count, 0);
+        assert!(!guard.guarded_hazard_hints[0].valid);
+        assert!(!guard.alias_proof.valid);
+    }
+
+    #[test]
+    fn code_cow_fast_path_requires_a_clean_guarded_current_root() {
+        let mut guard = box_svm_guard();
+        guard.gate_ready = true;
+        guard.gate_count = 1;
+        guard.gate_root = 0x3000;
+        guard.gate_mapping_generation = 11;
+        guard.retained_guard_count = 1;
+        guard.retained_mapping_generation = 11;
+        assert!(guard.can_keep_gate_for_code_cow(0x3000, 11));
+        assert!(!guard.can_keep_gate_for_code_cow(0x4000, 11));
+        assert!(!guard.can_keep_gate_for_code_cow(0x3000, 12));
+        guard.gate_dirty = true;
+        assert!(!guard.can_keep_gate_for_code_cow(0x3000, 11));
+        guard.gate_dirty = false;
+        guard.gate_links_untrusted = true;
+        assert!(!guard.can_keep_gate_for_code_cow(0x3000, 11));
+        guard.gate_links_untrusted = false;
+        guard.retained_mapping_generation = 12;
+        assert!(!guard.can_keep_gate_for_code_cow(0x3000, 11));
+        guard.retained_mapping_generation = 11;
+        guard.gate_host_write_count = 1;
+        assert!(!guard.can_keep_gate_for_code_cow(0x3000, 11));
+        guard.gate_host_write_count = 0;
+        guard.gate_count = 0;
+        assert!(!guard.can_keep_gate_for_code_cow(0x3000, 11));
     }
 }
 

@@ -405,7 +405,7 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
         }
 
         let old_mapping_generation = self.state.ept.mapping_generation();
-        let unrelated_data_page = {
+        let (table_page, code_page) = {
             let guard = &self.state.svm_guard;
             let page = page_gpa.as_u64();
             let table = super::super::exits::gate_table_contains(guard, page)
@@ -414,8 +414,21 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
                     .iter().any(|saved| saved.valid && saved.guest == page)
                 || guard.has_cached_leaf_filter(page);
             let code = guard.may_have_code_proof(page);
-            !table && !code
+            (table, code)
         };
+        let unrelated_data_page = !table_page && !code_page;
+        let code_only_page = code_page && !table_page && {
+            let guard = &self.state.svm_guard;
+            self.state.vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()
+                .is_some_and(|root| guard.can_keep_gate_for_code_cow(
+                    root & 0x000f_ffff_ffff_f000, old_mapping_generation,
+                ))
+        };
+        if code_only_page {
+            // Remap replaces the old NPT leaf, including its trusted-code
+            // bit. Revoke the generation before that leaf disappears.
+            let _ = self.state.ept.invalidate_npt_code_4k(allocator, page_gpa);
+        }
         if let Err(_e) = self.state.ept.remap_4k(
             allocator,
             page_gpa,
@@ -442,6 +455,11 @@ impl<V: VirtualMachineControlStructure, P: Page, I: InstructionCounter> VmContex
             if guard.retained_mapping_generation == old_mapping_generation {
                 guard.retained_mapping_generation = generation;
             }
+        } else if code_only_page {
+            let generation = self.state.ept.mapping_generation();
+            self.state.svm_guard.note_code_cow(
+                page_gpa.as_u64(), old_mapping_generation, generation,
+            );
         } else {
             self.state.svm_guard.gate_dirty = true;
             self.state.svm_guard.invalidate_leaf_filters_for_remap();
