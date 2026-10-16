@@ -32,3 +32,21 @@ must preserve that contract and replay, rather than merely avoid the exit.
 The raw campaign log and status are under ignored
 `target/boxctl-evidence/box-e675c0c1/ci-production-progress/`. No kernel
 module was built or loaded on the workstation.
+
+## Breakpoint-mask follow-up on the same CI workload
+
+On disposable box `box-d267068a`, a general hypervisor-only cross-page
+breakpoint-mask union passed the pinned campaign but took 236 host seconds,
+versus adjacent unchanged production runs of 192 and 190 seconds. A
+one-in-256 diagnostic found 47,145 harmless masked-breakpoint samples for
+the union and 1,281 for unchanged production in matched shortened runs. The
+union introduced a 1 KiB mask over a hot user loop, accounting for 33,806
+samples on one page. A follow-up limited new cross-page merges to 256-byte
+masks; it passed the pinned campaign in 199 seconds, versus an adjacent
+production control of 186 seconds. Neither variant is merged. Their code,
+tests, and detailed evidence are on `dan/amd-ci-hot-mask-union-1016` and
+`dan/amd-ci-mask-union-256-1016`; diagnostic samplers are on
+`dan/amd-ci-mask-hit-profile-1016` and
+`dan/amd-ci-production-mask-hit-profile-1016`. These experiments show that
+simply packing more hazardous pages into four debug registers can trade NPT
+fetch faults for even more expensive false breakpoint retries.
