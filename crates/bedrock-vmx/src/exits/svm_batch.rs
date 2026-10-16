@@ -2238,6 +2238,39 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
     ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
     let mapping_generation = ctx.state().ept.mapping_generation();
     let cache = &ctx.state().svm_guard;
+    #[cfg(not(feature = "cargo"))]
+    {
+        static MISS: [core::sync::atomic::AtomicU64; 11] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; 11];
+        if lookups & 255 == 0 {
+            let kind = if !cache.global_plan.valid { 0 }
+                else if cache.global_plan_linear != current_linear { 1 }
+                else if cache.global_plan_root != root { 2 }
+                else if cache.global_plan_predicted != predicted.unwrap_or(u64::MAX) { 3 }
+                else if cache.global_plan.code_epoch != cache.code_epoch { 4 }
+                else if cache.global_plan.tree_generation != cache.tree_generation { 5 }
+                else if cache.global_plan_mapping_generation != mapping_generation { 6 }
+                else if cache.global_plan_trusted_code_generation
+                    != ctx.state().ept.trusted_code_generation() { 7 }
+                else if cache.global_plan_recent != recent { 8 }
+                else if cache.gate_root != root || cache.gate_host_write_all
+                    || cache.gate_host_write_count != 0 { 9 }
+                else { 10 };
+            MISS[kind].fetch_add(1, Ordering::Relaxed);
+        }
+        if lookups & ((1 << 20) - 1) == 0 {
+            kernel::pr_info!(
+                "SVM CI CACHE MISS n={} bins={},{},{},{},{},{},{},{},{},{},{}\n",
+                lookups,
+                MISS[0].load(Ordering::Relaxed), MISS[1].load(Ordering::Relaxed),
+                MISS[2].load(Ordering::Relaxed), MISS[3].load(Ordering::Relaxed),
+                MISS[4].load(Ordering::Relaxed), MISS[5].load(Ordering::Relaxed),
+                MISS[6].load(Ordering::Relaxed), MISS[7].load(Ordering::Relaxed),
+                MISS[8].load(Ordering::Relaxed), MISS[9].load(Ordering::Relaxed),
+                MISS[10].load(Ordering::Relaxed),
+            );
+        }
+    }
     if cache.global_plan.valid
         && cache.global_plan_linear == current_linear
         && cache.global_plan_root == root
