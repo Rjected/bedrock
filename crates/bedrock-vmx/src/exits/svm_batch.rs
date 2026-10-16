@@ -2500,6 +2500,25 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let other_hot = predicted_other_hot_successor(
             &ctx.state().svm_guard, root, current_linear, predicted, hot,
         );
+        #[cfg(not(feature = "cargo"))]
+        {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static PLANS: AtomicU64 = AtomicU64::new(0);
+            static THIRD_OFFERED: AtomicU64 = AtomicU64::new(0);
+            static SCHED_OFFERED: AtomicU64 = AtomicU64::new(0);
+            let n = PLANS.fetch_add(1, Ordering::Relaxed) + 1;
+            if other_hot.is_some() {
+                THIRD_OFFERED.fetch_add(1, Ordering::Relaxed);
+            }
+            if other_hot == Some(0xffffffff81feb000) {
+                SCHED_OFFERED.fetch_add(1, Ordering::Relaxed);
+            }
+            if n % (1 << 18) == 0 {
+                kernel::pr_info!("SVM_THIRD_OFFER plans={} third={} sched={}\n",
+                    n, THIRD_OFFERED.load(Ordering::Relaxed),
+                    SCHED_OFFERED.load(Ordering::Relaxed));
+            }
+        }
         let mut selected_hazards: [Option<PageHazards>; 3] = [None; 3];
         let mut selected_count = 0;
         for linear in predicted.into_iter().chain(hot).chain(other_hot)
@@ -2562,6 +2581,20 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             batch.page_breakpoint_count = count;
             selected_hazards[selected_count] = Some(hazard);
             selected_count += 1;
+            #[cfg(not(feature = "cargo"))]
+            if Some(linear) == other_hot {
+                use core::sync::atomic::{AtomicU64, Ordering};
+                static THIRD_SELECTED: AtomicU64 = AtomicU64::new(0);
+                static SCHED_SELECTED: AtomicU64 = AtomicU64::new(0);
+                let n = THIRD_SELECTED.fetch_add(1, Ordering::Relaxed) + 1;
+                if linear == 0xffffffff81feb000 {
+                    SCHED_SELECTED.fetch_add(1, Ordering::Relaxed);
+                }
+                if n.is_power_of_two() {
+                    kernel::pr_info!("SVM_THIRD_SELECTED count={} sched={}\n", n,
+                        SCHED_SELECTED.load(Ordering::Relaxed));
+                }
+            }
         }
     }
     Some(())
