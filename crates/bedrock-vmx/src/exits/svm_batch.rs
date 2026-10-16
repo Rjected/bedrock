@@ -2301,7 +2301,6 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let current_linear = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
         let mut hazards = [hazard; 4];
-        let mut hazard_count = hazard.count;
         let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
             & 0x000f_ffff_ffff_f000;
         let predicted = predicted_second_successor(
@@ -2310,9 +2309,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // Older code pages rarely earn their repeated screening cost. An
         // omitted page remains NX and traps before it can execute.
         for previous_linear in predicted.into_iter().chain(recent.into_iter().take(4)) {
-            if hazard_count >= batch.page_breakpoints.len()
-                || batch.code_page_count == hazards.len()
-            {
+            if batch.code_page_count == hazards.len() {
                 break;
             }
             if previous_linear == u64::MAX || previous_linear == current_linear {
@@ -2330,8 +2327,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             let Some(other) = cached_page_hazards(ctx, previous) else {
                 continue;
             };
-            if other.count == 0 || hazard_count + other.count > batch.page_breakpoints.len()
-                || !other.boundary_guarded
+            if other.count == 0 || !other.boundary_guarded
                 || hazards[..batch.code_page_count].iter().any(|existing| {
                     !hazard_boundary_safe(existing, &other)
                         || !hazard_boundary_safe(&other, existing)
@@ -2377,7 +2373,6 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             hazards[batch.code_page_count] = other;
             batch.code_page_count += 1;
             batch.page_count += 1;
-            hazard_count += other.count;
         }
     } else {
         // A globally trusted current page uses no debug-register slots. A
@@ -3745,18 +3740,9 @@ pub(crate) fn prepare<C: VmContext>(
                 state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
                 continue;
             };
-            // Each physical hazard needs at least one execution breakpoint.
-            // Do not enumerate the alias tree for a set already known to
-            // exceed the four hardware slots.
-            if hazards[..batch.code_page_count]
-                .iter()
-                .map(|h| h.count)
-                .sum::<usize>()
-                + hazard.count
-                > 4
-            {
-                continue;
-            }
+            // Raw hazard count is only an upper bound on the hardware slots:
+            // AMD breakpoint masks can safely cover several nearby entries.
+            // The guarded alias proof below checks the actual slot budget.
             if hazards[..batch.code_page_count].iter().any(|previous| {
                 !hazard_boundary_safe(previous, &hazard) || !hazard_boundary_safe(&hazard, previous)
             }) {
@@ -5755,7 +5741,7 @@ mod tests {
     }
 
     #[test]
-    fn code_selection_keeps_safe_pages_when_hazards_exhaust_breakpoints() {
+    fn code_selection_uses_masked_ranges_before_rejecting_safe_pages() {
         let mut ctx = paged_context(&[0x90]);
         for page in [0x7000, 0x8000, 0x9000] {
             ctx.memory[page + 0x100..page + 0x104].copy_from_slice(&[0x48, 0x0f, 0xc7, 0xf0]);
@@ -5765,9 +5751,9 @@ mod tests {
         let batch = prepare(&mut ctx, true, true, &window).unwrap();
         assert!(batch.page_execution);
         assert_eq!(batch.page_breakpoint_count, 4);
-        assert_eq!(batch.code_page_count, 4);
+        assert_eq!(batch.code_page_count, 5);
         assert!(batch.pages[..batch.code_page_count].contains(&0xa000));
-        assert!(!batch.pages[..batch.code_page_count].contains(&0x9000));
+        assert!(batch.pages[..batch.code_page_count].contains(&0x9000));
     }
 
     #[test]
