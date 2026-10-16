@@ -70,3 +70,14 @@ with none of the logged zero regions on the hot scheduler page. Broadly
 applying that prover to one-hazard pages would mostly exchange an exact
 hazard breakpoint for one or more frontier stops, so no execution change
 was merged.
+
+A [post-predictor scheduler diagnostic](AMD_CI_POSTPREDICT_SCHEDULER_1016.md)
+found that the hot scheduler page still faulted nearly one million times
+in a passing short campaign. It usually followed a global plan with a
+free breakpoint slot. A later diagnostic sampled the two leading source
+pages and found that nearly all plans naming the scheduler page had an
+available alias proof and breakpoint budget; plans that did not name it
+dominated the sample. That later campaign failed on a one-instruction PMU
+budget overrun, so its counts are hypothesis-generating, not a valid
+performance or correctness comparison. Successor selection and the PMU
+boundary failure both need follow-up.
