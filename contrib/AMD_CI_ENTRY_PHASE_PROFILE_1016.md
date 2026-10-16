@@ -32,6 +32,15 @@ updates as the main source of repeated walks in this campaign. Broad
 invalidation remains necessary when an upper link can expose a new alias;
 any reduction needs an explicit proof about the affected roots or mappings.
 
+A follow-up 60-virtual-second campaign split released table guards by
+location. By its final sampled log point, roughly 4.08 million releases
+were active leaf tables, 29.4 thousand were active upper tables, and 31.5
+thousand were inactive-root tables. The workload therefore exercises both
+upper-table and inactive-root invalidation. Its DST seed passed in 114 wall
+seconds with instrumentation enabled. These are cumulative counters from
+the diagnostic module loaded just before the campaign, including its brief
+SVM smoke suite.
+
 These counters identify the next general optimization target: reduce the
 cost of safe fresh alias enumeration or retain proofs more precisely across
 upper-table changes. They do not yet show a production speedup. The

@@ -1423,6 +1423,27 @@ pub(crate) fn release_global_table_write<C: VmContext, A: CowAllocator<C::CowPag
         ctx.state().svm_guard.gate_tables[current] == page
             && ctx.state().svm_guard.gate_levels[current] == 1
     });
+    #[cfg(not(feature = "cargo"))]
+    {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static ACTIVE_LEAF: AtomicU64 = AtomicU64::new(0);
+        static ACTIVE_UPPER: AtomicU64 = AtomicU64::new(0);
+        static INACTIVE: AtomicU64 = AtomicU64::new(0);
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        if active_leaf {
+            ACTIVE_LEAF.fetch_add(1, Ordering::Relaxed);
+        } else if ctx.state().svm_guard.gate_tables[..count].contains(&page) {
+            ACTIVE_UPPER.fetch_add(1, Ordering::Relaxed);
+        } else {
+            INACTIVE.fetch_add(1, Ordering::Relaxed);
+        }
+        let n = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n & ((1 << 12) - 1) == 0 {
+            kernel::pr_info!("SVM_TABLE_RELEASE calls={} active_leaf={} active_upper={} inactive={}\n",
+                n, ACTIVE_LEAF.load(Ordering::Relaxed),
+                ACTIVE_UPPER.load(Ordering::Relaxed), INACTIVE.load(Ordering::Relaxed));
+        }
+    }
     if active_leaf && snapshot_released_leaf(ctx, page).is_none() {
         ctx.state_mut().svm_guard.leaf_snapshot_overflow = true;
         invalidate_alias_proofs_reason(&mut ctx.state_mut().svm_guard, 5);
