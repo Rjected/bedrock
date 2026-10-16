@@ -21,12 +21,13 @@ All 279 `bedrock-vmx` unit tests passed, including tests of code-memo
 revocation and fast-path rejection on dirty, untrusted, empty, stale, or
 wrong-root gates. The disposable `boxctl` SVM suite passed. On EPYC 4245P
 box `box-b0acd740` with Linux `7.0.0-38-generic`, the pinned one-seed
-180-virtual-second Tempo DST workload passed in 172, 177, and 180 wall
-seconds with this change. Production controls on the same box passed in
-184, 194, and 188 seconds. The final stricter candidate run was 180 seconds
-versus its adjacent 188-second production control. These measurements
-still include host variation; they establish a repeatable improvement on
-this pinned workload, not a universal speedup estimate.
+180-virtual-second Tempo DST workload passed in 180 and 175 wall seconds
+with the final guarded code (the latter on the pushed production commit).
+Earlier candidate builds passed in 172 and 177 seconds. Production controls
+on the same box passed in 184, 194, and 188 seconds. The 180-second final
+candidate run was adjacent to the 188-second production control. These
+measurements still include host variation; they establish a repeatable
+improvement on this pinned workload, not a universal speedup estimate.
 The shortened 60-virtual-second candidate run reported
 `E4/graceful-stop` at its shortened deadline, so it is not used for the
 performance verdict.
