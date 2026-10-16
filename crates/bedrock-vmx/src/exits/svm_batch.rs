@@ -2386,9 +2386,12 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let predicted = predicted_second_successor(
             &ctx.state().svm_guard, root, recent[1], current_linear,
         ).or_else(|| predicted_successor(&ctx.state().svm_guard, root, current_linear));
+        let hot = predicted_hot_successor(
+            &ctx.state().svm_guard, root, current_linear, predicted,
+        );
         // Older code pages rarely earn their repeated screening cost. An
         // omitted page remains NX and traps before it can execute.
-        for previous_linear in predicted.into_iter().chain(recent.into_iter().take(4)) {
+        for previous_linear in predicted.into_iter().chain(hot).chain(recent.into_iter().take(4)) {
             if hazard_count >= batch.page_breakpoints.len()
                 || batch.code_page_count == hazards.len()
             {
@@ -4959,6 +4962,14 @@ mod tests {
         let contextual = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
         assert_eq!(&contextual.pages[..contextual.code_page_count],
             &[0x1000, 0x2000, 0x9000]);
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
+            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000,
+                hot: [0x2000, 0x9000], hot_count: [180, 130],
+                observations: 512, valid: true };
+        let hot = prepare_global(&mut ctx, &allocator, true, true, &window).unwrap();
+        assert_eq!(&hot.pages[..hot.code_page_count], &[0x1000, 0x2000, 0x9000]);
+        ctx.state_mut().svm_recent_pages[..3].copy_from_slice(&[0x1000, 0x2000, 0x9000]);
         let masked = ctx.state_mut().svm_guard.alias_proofs.iter_mut()
             .find(|proof| proof.valid && proof.page_count == 1 && proof.pages[0] == 0x2000)
             .unwrap();
