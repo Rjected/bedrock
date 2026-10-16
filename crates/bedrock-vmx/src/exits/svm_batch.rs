@@ -2301,7 +2301,6 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let current_linear = window.linear & !4095;
         let recent = ctx.state().svm_recent_pages;
         let mut hazards = [hazard; 4];
-        let mut hazard_count = hazard.count;
         let root = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3).ok()?
             & 0x000f_ffff_ffff_f000;
         let predicted = predicted_second_successor(
@@ -2310,9 +2309,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         // Older code pages rarely earn their repeated screening cost. An
         // omitted page remains NX and traps before it can execute.
         for previous_linear in predicted.into_iter().chain(recent.into_iter().take(4)) {
-            if hazard_count >= batch.page_breakpoints.len()
-                || batch.code_page_count == hazards.len()
-            {
+            if batch.code_page_count == hazards.len() {
                 break;
             }
             if previous_linear == u64::MAX || previous_linear == current_linear {
@@ -2330,8 +2327,7 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             let Some(other) = cached_page_hazards(ctx, previous) else {
                 continue;
             };
-            if other.count == 0 || hazard_count + other.count > batch.page_breakpoints.len()
-                || !other.boundary_guarded
+            if other.count == 0 || !other.boundary_guarded
                 || hazards[..batch.code_page_count].iter().any(|existing| {
                     !hazard_boundary_safe(existing, &other)
                         || !hazard_boundary_safe(&other, existing)
@@ -2345,39 +2341,31 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             let Some(proof) = cached_single_page_alias_proof(ctx, root, previous, &other) else {
                 continue;
             };
-            let mut breakpoints = batch.page_breakpoints;
-            let mut masks = batch.page_breakpoint_masks;
-            let mut breakpoint_count = batch.page_breakpoint_count;
+            let mut widened = *batch;
             let mut fits = true;
-            // A singleton proof may cover several unsafe entries with one
-            // masked address. Preserve that range when composing page guards.
+            // Preserve each singleton's complete masked range. If their
+            // union exceeds four slots, merge the cheapest same-page pair
+            // while avoiding a mask over this entry whenever possible.
             for index in 0..proof.breakpoint_count {
-                let address = proof.breakpoints[index];
-                let mask = proof.breakpoint_masks[index];
-                if (0..breakpoint_count).any(|slot| {
-                    breakpoints[slot] == address && masks[slot] == mask
-                }) {
-                    continue;
-                }
-                if breakpoint_count == breakpoints.len() {
+                if add_page_breakpoint_range(
+                    &mut widened,
+                    proof.breakpoints[index], proof.breakpoint_masks[index],
+                    breakpoint_masks_supported(), Some(window.linear),
+                ).is_none() {
                     fits = false;
                     break;
                 }
-                breakpoints[breakpoint_count] = address;
-                masks[breakpoint_count] = mask;
-                breakpoint_count += 1;
             }
-            if !fits || breakpoint_count == batch.page_breakpoint_count {
+            if !fits {
                 continue;
             }
-            batch.page_breakpoints = breakpoints;
-            batch.page_breakpoint_masks = masks;
-            batch.page_breakpoint_count = breakpoint_count;
+            batch.page_breakpoints = widened.page_breakpoints;
+            batch.page_breakpoint_masks = widened.page_breakpoint_masks;
+            batch.page_breakpoint_count = widened.page_breakpoint_count;
             batch.pages[batch.code_page_count] = previous;
             hazards[batch.code_page_count] = other;
             batch.code_page_count += 1;
             batch.page_count += 1;
-            hazard_count += other.count;
         }
     } else {
         // A globally trusted current page uses no debug-register slots. A
@@ -2540,13 +2528,28 @@ fn breakpoint_matches(batch: &InstructionBatch, address: u64) -> bool {
 // Keep every unsafe entry covered while reducing several addresses on one
 // virtual code page to at most four AMD instruction-breakpoint ranges.
 fn add_page_breakpoint(batch: &mut InstructionBatch, address: u64, masks: bool) -> Option<()> {
-    if breakpoint_matches(batch, address) {
+    add_page_breakpoint_range(batch, address, 0, masks, None)
+}
+
+fn add_page_breakpoint_range(
+    batch: &mut InstructionBatch,
+    address: u64,
+    incoming_mask: u16,
+    masks: bool,
+    avoid: Option<u64>,
+) -> Option<()> {
+    if (0..batch.page_breakpoint_count).any(|index| {
+        let mask = batch.page_breakpoint_masks[index];
+        mask >= incoming_mask
+            && address & !u64::from(mask)
+                == batch.page_breakpoints[index] & !u64::from(mask)
+    }) {
         return Some(());
     }
     if batch.page_breakpoint_count < batch.page_breakpoints.len() {
         let index = batch.page_breakpoint_count;
         batch.page_breakpoints[index] = address;
-        batch.page_breakpoint_masks[index] = 0;
+        batch.page_breakpoint_masks[index] = incoming_mask;
         batch.page_breakpoint_count += 1;
         return Some(());
     }
@@ -2558,6 +2561,7 @@ fn add_page_breakpoint(batch: &mut InstructionBatch, address: u64, masks: bool) 
     addresses[..4].copy_from_slice(&batch.page_breakpoints);
     old_masks[..4].copy_from_slice(&batch.page_breakpoint_masks);
     addresses[4] = address;
+    old_masks[4] = incoming_mask;
     let mut best = None;
     for first in 0..5 {
         for second in first + 1..5 {
@@ -2576,8 +2580,15 @@ fn add_page_breakpoint(batch: &mut InstructionBatch, address: u64, masks: bool) 
             let extra = i64::from(mask) + 1
                 - (i64::from(old_masks[first]) + 1)
                 - (i64::from(old_masks[second]) + 1);
-            if best.is_none_or(|(cost, _, _, _)| extra < cost) {
-                best = Some((extra, first, second, mask));
+            let covers_entry = avoid.is_some_and(|entry| {
+                entry & !u64::from(mask) == addresses[first] & !u64::from(mask)
+                    && !breakpoint_matches(batch, entry)
+            });
+            let score = extra + if covers_entry { 1_000_000 } else { 0 };
+            if best.is_none_or(|(cost, old_first, _, _)| {
+                score < cost || (avoid.is_some() && score == cost && first > old_first)
+            }) {
+                best = Some((score, first, second, mask));
             }
         }
     }
@@ -3745,18 +3756,9 @@ pub(crate) fn prepare<C: VmContext>(
                 state.svm_rejected_cursor = (state.svm_rejected_cursor + 1) % 64;
                 continue;
             };
-            // Each physical hazard needs at least one execution breakpoint.
-            // Do not enumerate the alias tree for a set already known to
-            // exceed the four hardware slots.
-            if hazards[..batch.code_page_count]
-                .iter()
-                .map(|h| h.count)
-                .sum::<usize>()
-                + hazard.count
-                > 4
-            {
-                continue;
-            }
+            // Raw hazard count is only an upper bound on the hardware slots:
+            // AMD breakpoint masks can safely cover several nearby entries.
+            // The guarded alias proof below checks the actual slot budget.
             if hazards[..batch.code_page_count].iter().any(|previous| {
                 !hazard_boundary_safe(previous, &hazard) || !hazard_boundary_safe(&hazard, previous)
             }) {
@@ -5755,7 +5757,7 @@ mod tests {
     }
 
     #[test]
-    fn code_selection_keeps_safe_pages_when_hazards_exhaust_breakpoints() {
+    fn code_selection_uses_masked_ranges_before_rejecting_safe_pages() {
         let mut ctx = paged_context(&[0x90]);
         for page in [0x7000, 0x8000, 0x9000] {
             ctx.memory[page + 0x100..page + 0x104].copy_from_slice(&[0x48, 0x0f, 0xc7, 0xf0]);
@@ -5765,9 +5767,71 @@ mod tests {
         let batch = prepare(&mut ctx, true, true, &window).unwrap();
         assert!(batch.page_execution);
         assert_eq!(batch.page_breakpoint_count, 4);
-        assert_eq!(batch.code_page_count, 4);
+        assert_eq!(batch.code_page_count, 5);
         assert!(batch.pages[..batch.code_page_count].contains(&0xa000));
-        assert!(!batch.pages[..batch.code_page_count].contains(&0x9000));
+        assert!(batch.pages[..batch.code_page_count].contains(&0x9000));
+    }
+
+    #[test]
+    fn cross_page_mask_union_keeps_the_current_entry_outside_the_merge() {
+        let mut ctx = paged_context(&[0x90]);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let mut batch = prepare(&mut ctx, true, true, &window).unwrap();
+        batch.page_breakpoints = [0x1172, 0x1372, 0x1572, 0x1772];
+        batch.page_breakpoint_masks = [0; 4];
+        batch.page_breakpoint_count = 4;
+        for address in [0x2ffd, 0x2ffe, 0x2fff] {
+            add_page_breakpoint_range(&mut batch, address, 0, true, Some(0x1310)).unwrap();
+        }
+        assert_eq!(batch.page_breakpoint_count, 4);
+        assert!(!breakpoint_matches(&batch, 0x1310));
+        for address in [0x1172, 0x1372, 0x1572, 0x1772, 0x2ffd, 0x2ffe, 0x2fff] {
+            assert!(breakpoint_matches(&batch, address), "uncovered {address:#x}");
+        }
+        assert!(batch.page_breakpoint_masks.contains(&0x3ff));
+        assert!(batch.page_breakpoint_masks.contains(&3));
+    }
+
+    #[test]
+    fn global_plan_admits_proved_page_after_masked_union() {
+        let mut ctx = paged_context(&[0x90]);
+        ctx.memory[0x1000..0x3000].fill(0x90);
+        for offset in [0x172, 0x372, 0x572, 0x772] {
+            ctx.memory[0x1000 + offset..0x1003 + offset]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        for offset in [0xc10, 0xc20, 0xc30] {
+            ctx.memory[0x2000 + offset..0x2003 + offset]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page),
+                HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        ctx.set_guest_rip(0x2000);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        assert_eq!(prepare_global(&mut ctx, &allocator, true, false, &window)
+            .unwrap().page_breakpoint_count, 3);
+        ctx.set_guest_rip(0x1310);
+        ctx.state_mut().svm_recent_pages[0] = 0x2000;
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
+        assert_eq!(&batch.pages[..batch.code_page_count], &[0x1000, 0x2000]);
+        assert_eq!(batch.page_breakpoint_count, 4);
+        assert!(!breakpoint_matches(&batch, 0x1310));
+        for address in [0x1172, 0x1372, 0x1572, 0x1772, 0x2c10, 0x2c20, 0x2c30] {
+            assert!(breakpoint_matches(&batch, address), "uncovered {address:#x}");
+        }
     }
 
     #[test]
