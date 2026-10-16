@@ -3899,6 +3899,24 @@ pub(crate) fn remember_page<C: VmContext>(ctx: &mut C, linear: u64) {
     if from == page {
         return;
     }
+    #[cfg(not(feature = "cargo"))]
+    if from == 0xffffffff81fe5000 || from == 0xffffffff81258000 {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static TOTAL: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        static TARGET: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        let index = usize::from(from == 0xffffffff81258000);
+        let n = TOTAL[index].fetch_add(1, Ordering::Relaxed) + 1;
+        if page == 0xffffffff81feb000 {
+            TARGET[index].fetch_add(1, Ordering::Relaxed);
+        }
+        if n % (1 << 16) == 0 {
+            kernel::pr_info!("SVM_STICKY_SOURCE from={:#x} total={} target={}\n",
+                from, n, TARGET[index].load(Ordering::Relaxed));
+        }
+        if n % (1 << 12) == 0 {
+            kernel::pr_info!("SVM_STICKY_TRANSITION from={:#x} to={:#x}\n", from, page);
+        }
+    }
     if from != u64::MAX {
         if let Ok(root) = ctx.state().vmcs.read_natural(VmcsFieldNatural::GuestCr3) {
             let root = root & 0x000f_ffff_ffff_f000;
