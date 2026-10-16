@@ -33,6 +33,7 @@ userspace driver SHA-256
 | Candidate, first revision | `failed=0` | 165 s |
 | Unchanged production `5fc001a` | `failed=0` | 183 s |
 | Candidate, final pre-entry revocation ordering | `failed=0` | 173 s |
+| Pushed production code `28a2693`, rebuilt from production tree | `failed=0` | 171 s |
 
 The first candidate branch-VM snapshot ended with 43.58 million exits,
 including 22.73 million NPT faults; the control had 47.68 million exits and
@@ -43,6 +44,8 @@ an approximately 10–18-second gain on this seed, not an Intel-equivalent
 result. A further two-seed, full-duration campaign on the final code passed
 both `14373434789495652599` and `14373434789495652600` (`failed=0`) in 304
 host seconds total.
+The pushed production branch also passed the complete in-box SVM suite before
+its final 171-second pinned campaign.
 
 Raw statuses are under ignored
 `target/boxctl-evidence/box-5e63aad0/conditional-boundary/` in this
