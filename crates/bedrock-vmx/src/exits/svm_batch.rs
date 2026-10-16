@@ -82,6 +82,26 @@ fn predicted_hot_successor(
         .map(|index| entry.hot[index])
 }
 
+fn predicted_other_hot_successor(
+    guard: &super::super::vm_state::SvmGuardScratch,
+    root: u64,
+    from: u64,
+    excluded_a: Option<u64>,
+    excluded_b: Option<u64>,
+) -> Option<u64> {
+    let entry = &guard.successors[successor_slot(root, from)];
+    if !entry.valid || entry.root != root || entry.from != from {
+        return None;
+    }
+    let minimum = (entry.observations / 10).max(16);
+    (0..2)
+        .filter(|&index| entry.hot_count[index] >= minimum
+            && Some(entry.hot[index]) != excluded_a
+            && Some(entry.hot[index]) != excluded_b)
+        .max_by_key(|&index| entry.hot_count[index])
+        .map(|index| entry.hot[index])
+}
+
 fn record_successor(
     entry: &mut super::super::vm_state::SvmPageSuccessor,
     root: u64,
@@ -2474,9 +2494,18 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
         let hot = predicted_hot_successor(
             &ctx.state().svm_guard, root, current_linear, predicted,
         );
-        let mut selected_hazard: Option<PageHazards> = None;
-        for linear in predicted.into_iter().chain(hot).filter(|&linear| linear != current_linear) {
-            if batch.code_page_count >= 3 {
+        // A second-order prediction can be distinct from both sustained
+        // destinations. Admit the remaining hot edge only if its proof and
+        // the shared four-breakpoint budget still fit.
+        let other_hot = predicted_other_hot_successor(
+            &ctx.state().svm_guard, root, current_linear, predicted, hot,
+        );
+        let mut selected_hazards: [Option<PageHazards>; 3] = [None; 3];
+        let mut selected_count = 0;
+        for linear in predicted.into_iter().chain(hot).chain(other_hot)
+            .filter(|&linear| linear != current_linear)
+        {
+            if batch.code_page_count >= 4 {
                 break;
             }
             let Some(physical) = cached_code_translation(ctx, linear) else { continue; };
@@ -2489,9 +2518,9 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             }
             let Some(hazard) = cached_page_hazards(ctx, physical) else { continue; };
             if hazard.count == 0 || !hazard.boundary_guarded
-                || selected_hazard.is_some_and(|selected| {
-                    !hazard_boundary_safe(&selected, &hazard)
-                        || !hazard_boundary_safe(&hazard, &selected)
+                || selected_hazards[..selected_count].iter().flatten().any(|selected| {
+                    !hazard_boundary_safe(selected, &hazard)
+                        || !hazard_boundary_safe(&hazard, selected)
                 })
             {
                 continue;
@@ -2531,7 +2560,8 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             batch.page_breakpoints = breakpoints;
             batch.page_breakpoint_masks = masks;
             batch.page_breakpoint_count = count;
-            selected_hazard = Some(hazard);
+            selected_hazards[selected_count] = Some(hazard);
+            selected_count += 1;
         }
     }
     Some(())
@@ -5105,6 +5135,58 @@ mod tests {
         assert_eq!(batch.page_breakpoint_count, 2);
         assert!(breakpoint_matches(&batch, 0x2100));
         assert!(breakpoint_matches(&batch, 0x9100));
+    }
+
+    #[test]
+    fn trusted_page_guards_two_hot_edges_beside_a_distinct_second_order_edge() {
+        let mut ctx = paged_context(&[0x90]);
+        for page in [0x1000usize, 0x2000, 0x9000, 0xa000] {
+            ctx.memory[page..page + 4096].fill(0x90);
+        }
+        for page in [0x2000usize, 0x9000, 0xa000] {
+            ctx.memory[page + 0x100..page + 0x103]
+                .copy_from_slice(&[0x0f, 0xc7, 0xf0]);
+        }
+        ctx.state_mut().svm_guard.gate_ready = true;
+        ctx.state_mut().svm_guard.gate_root = 0x3000;
+        let mut allocator = crate::test_mocks::MockFrameAllocator::new();
+        ctx.state_mut().ept = bedrock_ept::EptPageTable::new_with_format(
+            &mut allocator, bedrock_ept::PageTableFormat::AmdNpt,
+        ).unwrap();
+        for page in [0x1000, 0x2000, 0x9000, 0xa000] {
+            ctx.state_mut().ept.map_4k(
+                &mut allocator, GuestPhysAddr::new(page), HostPhysAddr::new(page + 0x100000),
+                bedrock_ept::EptPermissions::READ_WRITE_EXECUTE,
+                bedrock_ept::EptMemoryType::WriteBack,
+            ).unwrap();
+        }
+        ctx.state_mut().svm_recent_pages.fill(u64::MAX);
+        for page in [0x2000, 0x9000, 0xa000] {
+            ctx.set_guest_rip(page);
+            let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+            assert_eq!(prepare_global(&mut ctx, &allocator, true, true, &window)
+                .unwrap().page_breakpoint_count, 1);
+        }
+        ctx.state_mut().ept.trust_npt_code_4k(
+            &allocator, GuestPhysAddr::new(0x1000)).unwrap();
+        ctx.state_mut().svm_guard.successors[successor_slot(0x3000, 0x1000)] =
+            SvmPageSuccessor { root: 0x3000, from: 0x1000, to: 0x2000,
+                hot: [0x2000, 0x9000], hot_count: [180, 130],
+                observations: 512, valid: true };
+        ctx.state_mut().svm_recent_pages[1] = 0x7000;
+        ctx.state_mut().svm_guard.second_successors
+            [second_successor_slot(0x3000, 0x7000, 0x1000)] = SvmSecondSuccessor {
+                root: 0x3000, previous: 0x7000, from: 0x1000, to: 0xa000, valid: true,
+            };
+        ctx.set_guest_rip(0x1000);
+        let window = super::super::svm::InstructionWindow::read(&ctx).unwrap();
+        let batch = prepare_global(&mut ctx, &allocator, true, false, &window).unwrap();
+        assert_eq!(&batch.pages[..batch.code_page_count],
+            &[0x1000, 0xa000, 0x2000, 0x9000]);
+        assert_eq!(batch.page_breakpoint_count, 3);
+        for address in [0x2100, 0x9100, 0xa100] {
+            assert!(breakpoint_matches(&batch, address));
+        }
     }
 
     #[test]
