@@ -81,3 +81,10 @@ dominated the sample. That later campaign failed on a one-instruction PMU
 budget overrun, so its counts are hypothesis-generating, not a valid
 performance or correctness comparison. Successor selection and the PMU
 boundary failure both need follow-up.
+
+A [third guarded successor candidate](AMD_CI_THREE_SUCCESSOR_TRIAL_1016.md)
+addresses the observed selection gap when the second-order prediction differs
+from both frequent destinations. It passed 283 local library tests and was
+pushed on isolated branch `dan/amd-three-successor-1016`. Accelerated hardware
+validation is pending because the available disposable boxes provisioned
+EPYC 4244P or EPYC 9124 rather than the previously validated EPYC 4245P.
