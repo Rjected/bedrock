@@ -2751,12 +2751,19 @@ fn leaf_filter_contains(filter: &[u64; SVM_LEAF_FILTER_WORDS], probe: LeafFilter
     filter[probe.0] & probe.1 != 0 && filter[probe.2] & probe.3 != 0
 }
 
-fn guarded_leaf_slot(
+fn guarded_table_slot(
     guard: &super::super::vm_state::SvmGuardScratch,
     page: u64,
+    level: u8,
 ) -> Option<usize> {
     if !guard.gate_table_index_valid {
-        return None;
+        return guard.gate_tables[..guard.gate_count]
+            .iter()
+            .enumerate()
+            .find(|(index, &table)| table == page
+                && guard.gate_levels[*index] == level
+                && guard.gate_guards[*index].valid)
+            .map(|(index, _)| index);
     }
     let index = &guard.gate_table_index;
     let mask = index.len() - 1;
@@ -2769,12 +2776,19 @@ fn guarded_leaf_slot(
         }
         let table = usize::from(entry - 1);
         if guard.gate_tables[table] == page {
-            return (guard.gate_levels[table] == 1 && guard.gate_guards[table].valid)
+            return (guard.gate_levels[table] == level && guard.gate_guards[table].valid)
                 .then_some(table);
         }
         slot = (slot + 1) & mask;
     }
     None
+}
+
+fn guarded_leaf_slot(
+    guard: &super::super::vm_state::SvmGuardScratch,
+    page: u64,
+) -> Option<usize> {
+    guarded_table_slot(guard, page, 1)
 }
 
 fn collect_page_breakpoints<C: VmContext>(
@@ -2943,19 +2957,14 @@ fn collect_page_breakpoints<C: VmContext>(
     while cursor < count {
         let walk = ctx.state().svm_guard.aliases[cursor];
         let cached = if walk.level > 1 && !ctx.state().svm_guard.gate_links_untrusted {
-            ctx.state().svm_guard.gate_tables[..ctx.state().svm_guard.gate_count]
-                .iter()
-                .enumerate()
-                .find(|(index, &page)| {
-                    page == walk.table
-                        && ctx.state().svm_guard.gate_guards[*index].valid
-                        && ctx.state().svm_guard.gate_levels[*index] == walk.level
-                        && ctx.state().svm_guard.gate_upper_lengths[*index] != u16::MAX
-                        && usize::from(ctx.state().svm_guard.gate_upper_starts[*index])
-                            + usize::from(ctx.state().svm_guard.gate_upper_lengths[*index])
-                            <= ctx.state().svm_guard.gate_upper_count
+            guarded_table_slot(&ctx.state().svm_guard, walk.table, walk.level)
+                .filter(|&index| {
+                    let guard = &ctx.state().svm_guard;
+                    guard.gate_upper_lengths[index] != u16::MAX
+                        && usize::from(guard.gate_upper_starts[index])
+                            + usize::from(guard.gate_upper_lengths[index])
+                            <= guard.gate_upper_count
                 })
-                .map(|(index, _)| index)
         } else {
             None
         };
