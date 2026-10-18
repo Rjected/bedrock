@@ -19,7 +19,8 @@ images_tar=${5:-images.tar}
 
 source_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 box_target="ubuntu@${box_name}"
-ssh_opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+ssh_opts=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=6)
 pmc_clock=${BEDROCK_PMC_CLOCK:-0}
 [[ $pmc_clock == 0 || $pmc_clock == 1 ]] || exit 2
 seeds=${BEDROCK_CI_SEEDS:-1}
