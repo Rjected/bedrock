@@ -2364,6 +2364,66 @@ pub(crate) fn prepare_global_into<C: VmContext, A: CowAllocator<C::CowPage>>(
             return Some(());
         }
         collect_page_breakpoints(ctx, batch, core::slice::from_ref(&hazard))?;
+        // Diagnostic only: measure whether a reachable-region proof reduces
+        // the exact alias-breakpoint budget on two-to-four-hazard pages.
+        // Restore the proof cache and batch after sampling; this must not
+        // change the executed plan.
+        #[cfg(not(feature = "cargo"))]
+        if (2..=4).contains(&hazard.count)
+            && hazard_memo_lookup(ctx, page).1.is_some_and(|index| {
+                let memo = &ctx.state().svm_guard.hazard_memos[index];
+                memo.valid && memo.guarded
+            })
+        {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static EVENTS: AtomicU64 = AtomicU64::new(0);
+            static SAMPLES: AtomicU64 = AtomicU64::new(0);
+            static BY_HAZARD: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+            static BETTER: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+            static ZERO: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+            static FAILED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+            let event = EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+            if event % 256 == 0 {
+                let cursor = ctx.state().svm_guard.region_cursor;
+                let previous = ctx.state().svm_guard.region_proofs[cursor];
+                let mut trial = *batch;
+                let original = batch.page_breakpoint_count;
+                let result = collect_reachable_breakpoints(ctx, &mut trial, window.linear);
+                ctx.state_mut().svm_guard.region_proofs[cursor] = previous;
+                ctx.state_mut().svm_guard.region_cursor = cursor;
+                BY_HAZARD[hazard.count].fetch_add(1, Ordering::Relaxed);
+                match result.map(|()| trial.page_breakpoint_count) {
+                    Some(0) => {
+                        ZERO[hazard.count].fetch_add(1, Ordering::Relaxed);
+                        BETTER[hazard.count].fetch_add(1, Ordering::Relaxed);
+                    }
+                    Some(count) if count < original => {
+                        BETTER[hazard.count].fetch_add(1, Ordering::Relaxed);
+                    }
+                    None => {
+                        FAILED[hazard.count].fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+                let samples = SAMPLES.fetch_add(1, Ordering::Relaxed) + 1;
+                if samples % 2048 == 0 {
+                    kernel::pr_info!("SVM_MULTI_REGION events={} samples={} n2={} n3={} n4={} better2={} better3={} better4={} zero2={} zero3={} zero4={} failed2={} failed3={} failed4={}\n",
+                        event, samples,
+                        BY_HAZARD[2].load(Ordering::Relaxed),
+                        BY_HAZARD[3].load(Ordering::Relaxed),
+                        BY_HAZARD[4].load(Ordering::Relaxed),
+                        BETTER[2].load(Ordering::Relaxed),
+                        BETTER[3].load(Ordering::Relaxed),
+                        BETTER[4].load(Ordering::Relaxed),
+                        ZERO[2].load(Ordering::Relaxed),
+                        ZERO[3].load(Ordering::Relaxed),
+                        ZERO[4].load(Ordering::Relaxed),
+                        FAILED[2].load(Ordering::Relaxed),
+                        FAILED[3].load(Ordering::Relaxed),
+                        FAILED[4].load(Ordering::Relaxed));
+                }
+            }
+        }
         let boundary_proven = suppress_safe_single_alias_boundary(
             ctx, allocator, batch, &hazard, window.linear,
         );
