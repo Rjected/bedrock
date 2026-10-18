@@ -91,3 +91,10 @@ took 167/169/170 seconds (candidate/production/candidate). The branch
 performance gain. A short diagnostic showed the third edge was offered in
 only 0.54% of trusted-page plans. The scheduler page accounts for a minority
 of those offers; widening this planner alone will not close the Intel gap.
+
+A [two-to-four-hazard reachable-region probe](https://github.com/Rjected/bedrock/blob/dan/amd-multi-region-feasibility-1016/contrib/AMD_CI_MULTI_HAZARD_REGION_FEASIBILITY_1018.md)
+on isolated branch `dan/amd-multi-region-feasibility-1016` found smaller
+breakpoint sets in 14,206 of 20,480 sampled current-page plans during a
+passing short Tempo campaign. This is capacity evidence, not a speed result:
+the single-page proof cannot safely be substituted into a multi-page plan
+without proving return paths from the additional executable page.
