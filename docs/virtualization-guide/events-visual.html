@@ -1,0 +1,24 @@
+<div class="figure interactive simulation" id="events-simulation">
+  <div class="figure-head"><div><span class="figure-kicker">INTERACTIVE / FOLLOW THE EXECUTING CORE</span><h3>Watch control move, not just a label</h3></div><div class="sim-actions"><button type="button" id="events-play">▶ Play</button><button type="button" id="events-reset">↺ Reset</button></div></div>
+  <div class="segmented sim-choices" role="group" aria-label="Control-transfer cause"><button type="button" data-event-sim="syscall" class="active">System call</button><button type="button" data-event-sim="pagefault">Guest page fault</button><button type="button" data-event-sim="interrupt">Timer interrupt</button><button type="button" data-event-sim="vmexit">VM exit</button></div>
+  <svg class="event-scene" viewBox="0 0 960 520" role="img" aria-labelledby="event-scene-title event-scene-desc">
+    <title id="event-scene-title">Animated CPU control transfer between application, guest kernel and host hypervisor</title><desc id="event-scene-desc">The glowing CPU marker follows execution through one of three lanes. A system call and guest page fault enter the guest kernel. A VM exit enters the host hypervisor.</desc>
+    <defs><marker id="event-arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#de7347"/></marker><filter id="event-glow"><feGaussianBlur stdDeviation="7"/></filter></defs>
+    <rect x="24" y="65" width="912" height="112" rx="14" fill="#e6f2ec"/><rect x="24" y="195" width="912" height="112" rx="14" fill="#d8ece7"/><rect x="24" y="335" width="912" height="112" rx="14" fill="#e5e8e7"/>
+    <text x="42" y="89" class="scene-lane-title">GUEST APPLICATION · CPL3</text><text x="42" y="219" class="scene-lane-title">GUEST LINUX · CPL0</text><text x="42" y="359" class="scene-lane-title">HOST BEDROCK · VMX ROOT / SVM HOST</text>
+    <path d="M44 186 H916" class="scene-boundary"/><path d="M44 324 H916" class="scene-boundary host-boundary"/><text x="733" y="320" class="scene-boundary-label">VIRTUALIZATION BOUNDARY</text>
+    <g id="event-app-code"><text x="75" y="112" class="scene-code">0x4000  mov rax, [rbx]</text><text x="75" y="136" id="event-op" class="scene-code active-code">0x4003  syscall</text></g>
+    <g id="event-kernel-code"><text x="392" y="294" id="event-kernel-op" class="scene-code">syscall entry → service</text><path d="M750 238 h130 v47 h-130 z" fill="none" stroke="#7caaa0" stroke-width="2"/><path d="M760 275 h110 M760 264 h110 M760 253 h110" stroke="#7caaa0" stroke-width="2"/><text x="753" y="231" class="scene-small">KERNEL STACK</text></g>
+    <g id="event-host-code"><text x="392" y="432" id="event-host-op" class="scene-code">VM-exit handler (idle)</text><text x="753" y="409" class="scene-small">VMCS / VMCB</text><path d="M745 418 h145" stroke="#9daaaa" stroke-width="3"/></g>
+    <g id="event-irq" opacity="0"><path d="M320 5 L303 37 h17 l-10 20 38-36 h-17 l10-16" fill="#de7347"/><text x="350" y="31" class="scene-small">TIMER SIGNAL</text></g>
+    <g id="event-fault" opacity="0"><path d="M307 145 v26 M300 145 v26" stroke="#d85d40" stroke-width="5"/><text x="335" y="168" class="scene-small">PTE DENIES ACCESS</text></g>
+    <g id="event-vmguard" opacity="0"><path d="M310 166 v21" stroke="#d85d40" stroke-width="7"/><text x="335" y="177" class="scene-small">NESTED GUARD</text></g>
+    <path id="event-route" d="" class="scene-route" marker-end="url(#event-arrow)"/><path id="event-route-progress" d="" class="scene-route-progress"/>
+    <circle id="event-token-glow" cx="122" cy="158" r="22" fill="#0e706c" opacity=".25" filter="url(#event-glow)"/><circle id="event-token" cx="122" cy="158" r="14" fill="#0e706c" stroke="white" stroke-width="3"/><text id="event-token-label" x="145" y="155" class="scene-token-label">EXECUTING CORE</text>
+    <g class="scene-hud"><rect x="615" y="8" width="319" height="42" rx="7" fill="#10232b"/><text x="630" y="35" id="event-hud" fill="#f0f4ee" class="scene-hud-text">non-root · CPL3 · RIP 0x4000</text></g>
+    <text x="45" y="485" id="event-scene-phase" class="scene-phase">1 / 5 · application executes</text>
+  </svg>
+  <div class="sim-scrubber"><label for="events-step">Scrub the execution</label><input id="events-step" type="range" min="0" max="4" value="0"><span id="events-step-value">1 / 5</span></div>
+  <p class="sim-explanation" id="events-explanation" aria-live="polite">The CPU is executing application instructions inside the guest. The guest Linux and host lanes are present but idle.</p>
+  <p class="figure-caption">One physical core moves between execution contexts. The drawing shows architectural control flow, not separate CPUs or a literal circuit diagram. System calls and guest page faults stay inside the guest unless another intercept occurs; a VM exit crosses into Bedrock.</p>
+</div>

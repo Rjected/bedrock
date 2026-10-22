@@ -5,53 +5,6 @@
   const $$ = (selector) => [...document.querySelectorAll(selector)];
 
   // Keep every diagram useful in the static document; JS only adds controls.
-  const cycleText = [
-    'Bedrock chooses intercepts, memory permissions, counter state and pending events. This is host work before the CPU enters guest mode.',
-    'The CPU validates the VMCS or VMCB and switches to guest state. The guest is still executing on the physical core.',
-    'Ordinary guest instructions execute directly. Caches, TLBs and branch prediction still matter to wall-clock performance.',
-    'A configured intercept, nested-page permission failure, debug event or deadline mechanism returns control to the host.',
-    'Bedrock accounts for retired instructions, emulates the event, revises its proofs and enters the guest again.'
-  ];
-  let cycleStep = 0;
-  function renderCycle() {
-    $$('.cycle-lane').forEach((node, index) => node.classList.toggle('active', index === cycleStep));
-    $('#cycle-count').textContent = `${cycleStep + 1} / ${cycleText.length}`;
-    $('#cycle-description').textContent = cycleText[cycleStep];
-  }
-  $('#cycle-prev').addEventListener('click', () => { cycleStep = (cycleStep + cycleText.length - 1) % cycleText.length; renderCycle(); });
-  $('#cycle-next').addEventListener('click', () => { cycleStep = (cycleStep + 1) % cycleText.length; renderCycle(); });
-  renderCycle();
-
-  const accessExplanations = {
-    read: ['A normal read', 'Guest page tables map the virtual address to a GPA. EPT/NPT maps that GPA to host memory. If both allow the read, the CPU continues.'],
-    write: ['A guarded write', 'Guest Linux may permit the write, while Bedrock marks the code or page-table GPA read-only in EPT/NPT. The CPU exits before the write, allowing proof invalidation.'],
-    fetch: ['A guarded fetch', 'Bedrock can mark a code GPA non-executable in NPT. Fetching it exits before the instruction runs, so the next page can be checked and added to a safe plan.']
-  };
-  function renderAccess(kind) {
-    $$('#translation-figure [data-access]').forEach((button) => button.classList.toggle('active', button.dataset.access === kind));
-    $('#access-label').textContent = accessExplanations[kind][0];
-    $('#permission-detail').textContent = accessExplanations[kind][1];
-  }
-  $$('#translation-figure [data-access]').forEach((button) => button.addEventListener('click', () => renderAccess(button.dataset.access)));
-  renderAccess('read');
-
-  function place(element, start, end) {
-    element.style.left = `${Math.max(0, start) / 1200 * 100}%`;
-    element.style.width = `${Math.max(0, end - Math.max(0, start)) / 1200 * 100}%`;
-  }
-  function renderDeadline() {
-    const target = Number($('#deadline-target').value);
-    $('#deadline-value').textContent = target.toLocaleString();
-    place($('#intel-arm'), target - 100, target - 12);
-    place($('#intel-final'), target - 12, target);
-    place($('#amd-arm'), target - 290, target - 80);
-    place($('#amd-final'), target - 80, target);
-    [$('#intel-marker'), $('#amd-marker')].forEach((marker) => { marker.style.left = `${target / 1200 * 100}%`; });
-    $('#deadline-description').textContent = `At logical instruction ${target.toLocaleString()}, both paths must expose the event at the same guest-visible boundary. Shaded widths are explanatory only; they are not measured skid, margin or CPU cycle counts.`;
-  }
-  $('#deadline-target').addEventListener('input', renderDeadline);
-  renderDeadline();
-
   const exits = [
     { key: 'npt', label: 'NPT faults', count: 21837491 },
     { key: 'clock', label: 'RDTSC / RDTSCP', count: 13984167 },
@@ -94,16 +47,138 @@
   $('#toggle-half-clock').addEventListener('change', renderExits);
   renderExits();
 
+  const toyStories = {
+    a: ['0x12 · 0x34', '0x12 → frame 0xA0 · read-only', 'physical 0xA034', 'the offset 0x34 is unchanged'],
+    b: ['0x1A · 0x34', '0x1A → frame 0xB0 · read/write', 'physical 0xB034', 'a different virtual page reaches a different frame'],
+    missing: ['0x20 · 0x34', 'no entry for virtual page 0x20', 'page fault (#PF)', 'the guest kernel decides how to handle the missing page'],
+    write: ['0x12 · 0x34', '0x12 → frame 0xA0 · read-only', 'page fault (#PF)', 'the mapping exists, but this entry denies writing']
+  };
+  $$('#toy-paging-lab [data-toy]').forEach((button) => button.addEventListener('click', () => {
+    $$('#toy-paging-lab [data-toy]').forEach((item) => item.classList.toggle('active', item === button));
+    const [virtual, entry, outcome, status] = toyStories[button.dataset.toy];
+    $('#toy-virtual').textContent = virtual; $('#toy-entry').textContent = entry;
+    $('#toy-outcome').textContent = outcome; $('#toy-status').textContent = status;
+    $('#toy-paging-lab').classList.toggle('toy-fault', ['missing', 'write'].includes(button.dataset.toy));
+  }));
+
+
+  const intelModes = {
+    app: 'A guest application runs at CPL3 in VMX non-root mode. It is an ordinary process from the guest kernel’s point of view, and the host’s VMX controls still apply.',
+    kernel: 'Guest Linux runs at CPL0 in VMX non-root mode. It can manage guest processes and page tables, while EPT and the host’s intercept controls retain authority.',
+    host: 'Bedrock’s kernel-side VMM runs at CPL0 in VMX root mode. It configures the VMCS, handles exits and owns the physical virtualization boundary.'
+  };
+  $$('#intel-mode-lab [data-intel-mode]').forEach((button) => button.addEventListener('click', () => {
+    $$('#intel-mode-lab [data-intel-mode]').forEach((item) => item.classList.toggle('active', item === button));
+    $$('#intel-mode-lab .mode-cell').forEach((item) => item.classList.remove('selected'));
+    $(`#mode-${button.dataset.intelMode}`).classList.add('selected');
+    $('#intel-mode-explanation').textContent = intelModes[button.dataset.intelMode];
+  }));
+  function renderBudget() {
+    const millions = Number($('#budget-exits').value);
+    const micros = Number($('#budget-cost').value);
+    $('#budget-exits-value').textContent = `${millions}M`;
+    $('#budget-cost-value').textContent = `${micros.toFixed(1)} µs`;
+    $('#budget-time').textContent = `${Math.round(millions * micros)} seconds`;
+    $('#budget-equation').textContent = `${millions}M × ${micros.toFixed(1)} µs`;
+  }
+  $('#budget-exits').addEventListener('input', renderBudget);
+  $('#budget-cost').addEventListener('input', renderBudget);
+  renderBudget();
+
+  const coreCases = {
+    warm: ['100', '100', 'mostly guest instruction work', 'same visible instruction sequence', 'short execution path'],
+    miss: ['100', '320', 'waiting for data from a slower cache level or RAM', 'same visible instruction sequence', 'illustrative memory stall'],
+    branch: ['100', '165', 'discarded speculative work after a wrong prediction', 'same retired instructions', 'illustrative branch penalty'],
+    exit: ['100', '850', 'mode transition and host handler work', 'same guest-visible sequence', 'illustrative VM-exit overhead']
+  };
+  $$('#core-lab [data-core]').forEach((button) => button.addEventListener('click', () => {
+    $$('#core-lab [data-core]').forEach((item) => item.classList.toggle('active', item === button));
+    const [instructions, cycles, reason, instructionNote, cycleNote] = coreCases[button.dataset.core];
+    $('#core-instructions').textContent = instructions;
+    $('#core-cycles').textContent = cycles;
+    $('#core-reason').textContent = reason;
+    $('#core-instruction-note').textContent = instructionNote;
+    $('#core-cycle-note').textContent = cycleNote;
+  }));
+
+  let retirements = 0;
+  function renderPmu() {
+    $('#pmu-count').textContent = `${retirements} / 8`;
+    $('#pmu-overflow').textContent = retirements >= 8 ? 'pending' : 'clear';
+    $('#pmu-rip').textContent = retirements >= 8 ? 'not from overflow alone' : 'no notification yet';
+    $('#pmu-description').textContent = retirements >= 8
+      ? 'The threshold is crossed. A counter event alone does not report an exact stopping RIP; delivery can lag.'
+      : 'The guest retires instructions while the counter advances. No host callback is needed for each retirement.';
+  }
+  $('#pmu-step').addEventListener('click', () => { retirements = Math.min(8, retirements + 1); renderPmu(); });
+  $('#pmu-run').addEventListener('click', () => { retirements = 8; renderPmu(); });
+  $('#pmu-reset').addEventListener('click', () => { retirements = 0; renderPmu(); });
+  renderPmu();
+
+  function renderSkid() {
+    const delay = Number($('#skid-slider').value);
+    $('#skid-value').textContent = String(delay);
+    const track = $('#counter-track'); track.replaceChildren();
+    for (let i = 94; i <= 112; i++) {
+      const cell = document.createElement('div');
+      cell.className = 'counter-cell' + (i === 100 ? ' target' : '') + (i === 100 + delay ? ' observed' : '');
+      const number = document.createElement('b'); number.textContent = String(i);
+      const label = document.createElement('small');
+      label.textContent = i === 100 && delay === 0 ? 'target + exit' : i === 100 ? 'target' : i === 100 + delay ? 'observed exit' : '';
+      cell.append(number, label); track.appendChild(cell);
+    }
+    $('#counter-explain').textContent = delay === 0
+      ? 'Target: 100. The hypothetical exit lands at 100; no instruction-delay correction is needed.'
+      : `Target: 100. An ordinary notification observed after ${100 + delay} retirements would be ${delay} instructions late.`;
+  }
+  $('#skid-slider').addEventListener('input', renderSkid); renderSkid();
+
+  $$('#replay-simulation [data-replay]').forEach((button) => button.addEventListener('click', () => {
+    const before = button.dataset.replay === 'before';
+    $$('#replay-simulation [data-replay]').forEach((item) => item.classList.toggle('active', item === button));
+    const x = before ? 516 : 782;
+    for (const id of ['replay-timer-marker']) { $(`#${id}`).setAttribute('x1', x); $(`#${id}`).setAttribute('x2', x); }
+    $('#replay-timer-circle').setAttribute('cx', x);
+    $('#replay-timer-label').setAttribute('x', before ? '464' : '728');
+    $('#replay-timer-label').textContent = before ? 'TIMER BEFORE' : 'TIMER AFTER';
+    $('#replay-observation').textContent = before ? 'Thread B wakes while A still holds the lock.' : 'Thread B wakes after A releases the lock.';
+    $('#replay-explanation').textContent = before
+      ? 'If the timer wakes thread B before A releases the lock, B can observe the lock as held. Delivering it after the release can expose a different state.'
+      : 'If the timer wakes thread B after A releases the lock, B can observe it as free. The same code ran, but the input arrived at a different logical boundary.';
+  }));
+
+  const hazards = {
+    five: ['5 exact breakpoints required · cannot fit', 'With four DR0–DR3 slots, the planner must narrow the region or fall back.', []],
+    mask: ['4 slots after a masked merge', 'One masked breakpoint covers two hazards, but may also trap at innocent offsets in the aligned range.', [0, 1]],
+    proof: ['4 slots after a reachability proof', 'A hazard needs no breakpoint only if all guarded paths prove that the running region cannot reach it.', [4]]
+  };
+  $$('#hazard-lab [data-hazard]').forEach((button) => button.addEventListener('click', () => {
+    $$('#hazard-lab [data-hazard]').forEach((item) => item.classList.toggle('active', item === button));
+    const [slots, explanation, selected] = hazards[button.dataset.hazard];
+    $('#hazard-slots').textContent = slots; $('#hazard-explain').textContent = explanation;
+    $$('#hazard-lab .hazard-strip > div').forEach((item, index) => item.classList.toggle('selected', selected.includes(index)));
+  }));
+
   const themeToggle = $('#theme-toggle');
   let savedTheme = null;
-  try { savedTheme = localStorage.getItem('bedrock-guide-theme'); } catch (_) { /* local file storage may be unavailable */ }
+  try { savedTheme = localStorage.getItem('bedrock-guide-theme'); } catch (_) { /* storage is optional */ }
   if (savedTheme === 'dark') document.documentElement.dataset.theme = 'dark';
-  if (savedTheme === 'dark') themeToggle.setAttribute('aria-label', 'Switch to light theme');
   themeToggle.addEventListener('click', () => {
-    const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = theme;
-    themeToggle.setAttribute('aria-label', `Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`);
-    try { localStorage.setItem('bedrock-guide-theme', theme); } catch (_) { /* optional preference */ }
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    themeToggle.setAttribute('aria-label', `Switch to ${next === 'dark' ? 'light' : 'dark'} theme`);
+    try { localStorage.setItem('bedrock-guide-theme', next); } catch (_) { /* storage is optional */ }
+  });
+
+  $('#term-search').addEventListener('input', () => {
+    const query = $('#term-search').value.trim().toLowerCase();
+    let visible = 0;
+    $$('.term-atlas [data-term]').forEach((term) => {
+      const match = term.textContent.toLowerCase().includes(query);
+      term.hidden = !match;
+      if (match) visible++;
+    });
+    $('#term-count').textContent = query ? `${visible} matching term${visible === 1 ? '' : 's'}.` : 'All terms shown. Type to filter by name or explanation.';
   });
 
   const sectionLinks = $$('#toc a');

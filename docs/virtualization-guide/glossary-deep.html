@@ -1,0 +1,60 @@
+<section id="glossary-deep" data-nav="Term atlas"><div class="section-index">REFERENCE / TERM ATLAS</div><h2>A field dictionary for reading CPU and Bedrock code.</h2><p class="lead">Search by a term or by what you want to do. These definitions are short reminders after the longer explanations above; they are not prerequisites for chapter one.</p>
+<div class="figure interactive glossary-lab"><div class="figure-head"><div><span class="figure-kicker">INTERACTIVE / FIND A CONCEPT</span><h3>Filter the term atlas</h3></div><label class="glossary-search-label">Search <input id="term-search" type="search" placeholder="e.g. translate, interrupt, PEBS" aria-label="Search virtualization terms"></label></div><p class="figure-caption" id="term-count">All terms shown. Type to filter by name or explanation.</p></div>
+<div class="term-atlas">
+<h3>The ordinary machine</h3>
+<div class="term" data-term><b>Instruction</b><p>An architectural operation encoded in program bytes. A core may implement it with several internal operations. Guest instructions normally execute on the actual CPU under virtualization.</p></div>
+<div class="term" data-term><b>RIP</b><p>The x86-64 instruction pointer: the architectural address of the next guest or host instruction. A VM exit reports guest RIP so the hypervisor can decide whether to retry or advance.</p></div>
+<div class="term" data-term><b>General-purpose register</b><p>Architecturally visible storage such as RAX and RBX used for operands, addresses and results. These are different from control registers and PMU configuration MSRs.</p></div>
+<div class="term" data-term><b>Retirement</b><p>The point at which an instruction's result becomes part of the architectural execution stream. Speculatively executed instructions that are discarded do not retire.</p></div>
+<div class="term" data-term><b>Cycle</b><p>A unit of core clock progress, not a synonym for a retired instruction. Memory stalls, branch recovery and host work can use cycles without advancing the guest instruction count.</p></div>
+<div class="term" data-term><b>CPL</b><p>Current privilege level. CPL3 is typical application execution; CPL0 is kernel execution. VMX/SVM guest status is a separate axis from CPL.</p></div>
+<div class="term" data-term><b>Control register</b><p>A privileged architectural register controlling machine state. CR3 selects a page-table root; other CR registers control paging and execution modes.</p></div>
+<div class="term" data-term><b>MSR</b><p>Model-specific register. A vendor-defined control or status register accessed with privileged instructions. PMU events, PEBS controls and other virtualization-relevant facilities use MSRs.</p></div>
+<div class="term" data-term><b>CPUID</b><p>An instruction through which software discovers processor capabilities. A hypervisor can intercept and present a virtual feature set, as Bedrock does for its guest.</p></div>
+<div class="term" data-term><b>Out-of-order execution</b><p>Internal scheduling of ready work before earlier stalled work completes. The CPU still retires architectural results in a valid order. It helps explain why instruction count and elapsed cycles diverge.</p></div>
+<div class="term" data-term><b>Speculation</b><p>Work performed before the CPU knows it is on the correct path, such as after a branch prediction. Discarded speculation consumes resources but does not advance retired-instruction count.</p></div>
+
+<h3>Memory and protection</h3>
+<div class="term" data-term><b>Virtual address</b><p>The address a process or guest program uses. Its interpretation depends on the active page-table root; the same number can name different physical frames in different processes.</p></div>
+<div class="term" data-term><b>Physical frame</b><p>A page-sized region in physical memory. A guest physical frame is an address in the VM's invented physical address space; a host physical frame is real machine memory.</p></div>
+<div class="term" data-term><b>Page table</b><p>A hierarchy mapping virtual pages to physical frames and carrying permissions. Guest Linux manages its own tables, while EPT or NPT supplies a separate host-owned mapping.</p></div>
+<div class="term" data-term><b>CR3</b><p>The x86-64 control register naming the current guest or host page-table root. Changing CR3 can change what a virtual pointer means.</p></div>
+<div class="term" data-term><b>Page walk</b><p>Hardware following page-table entries to translate an address. A TLB hit can bypass most of this work. Under virtualization, guest and nested walks compose.</p></div>
+<div class="term" data-term><b>TLB</b><p>Translation lookaside buffer: a cache of address translations. It accelerates repeated memory access but requires correct invalidation after mapping or permission changes.</p></div>
+<div class="term" data-term><b>Guest page fault (#PF)</b><p>A guest page-table failure handled by guest Linux, unless the hypervisor specifically intercepts that event. It is not the same as an EPT violation or AMD nested-page fault.</p></div>
+<div class="term" data-term><b>EPT</b><p>Intel Extended Page Tables, the host-controlled second translation from guest physical to host physical memory. EPT can deny read, write or execute and report violations to the VMM.</p></div>
+<div class="term" data-term><b>NPT / RVI</b><p>AMD Nested Page Tables / rapid virtualization indexing. NPT serves the same broad second-stage mapping role as Intel EPT, though controls and detailed semantics differ.</p></div>
+<div class="term" data-term><b>NPF</b><p>AMD nested page fault: a second-stage memory denial returned to the host. Bedrock uses NPFs as guards around code, guest page tables and out-of-region fetches.</p></div>
+<div class="term" data-term><b>NX</b><p>Non-executable permission. If a required execute permission is absent, the CPU cannot fetch that instruction from the page. Bedrock uses nested NX to bound approved code regions.</p></div>
+<div class="term" data-term><b>Alias</b><p>A second virtual address reaching the same guest-physical page. A physical-page guard and a linear-address breakpoint have different coverage; proof logic must account for both aliases.</p></div>
+<div class="term" data-term><b>VPID / ASID</b><p>Intel and AMD mechanisms for tagging guest translation contexts. They can retain TLB entries across transitions, but a changed mapping still needs appropriate invalidation.</p></div>
+<div class="term" data-term><b>ROGPT</b><p>AMD read-only guest page-table support. It makes Bedrock's NPT read-only protection of guest table frames compatible with ordinary page walks on supported CPUs, avoiding a large class of false NPFs.</p></div>
+
+<h3>Virtualization control</h3>
+<div class="term" data-term><b>VMM / hypervisor</b><p>Host software that configures and handles virtual execution. In this guide Bedrock is the VMM, and Linux plus applications run as its guest.</p></div>
+<div class="term" data-term><b>VM entry</b><p>A processor transition from host control into guest execution after the host has configured guest state and controls. Entry has hardware and host-preparation costs.</p></div>
+<div class="term" data-term><b>VM exit</b><p>A transition from guest execution back to the VMM due to an intercept, event or nested-memory violation. The host examines the reason and determines how to resume.</p></div>
+<div class="term" data-term><b>VMCS</b><p>Intel VM-control structure. It holds VMX control choices, guest and host state, and VM-exit information according to the SDM's field-specific rules.</p></div>
+<div class="term" data-term><b>VMCB</b><p>AMD virtual machine control block. Its control and state areas govern SVM guest execution and record exit information.</p></div>
+<div class="term" data-term><b>VMX root / non-root</b><p>Intel's host and guest execution modes. A non-root guest kernel can still be CPL0 within its VM.</p></div>
+<div class="term" data-term><b>SVM / VMRUN</b><p>AMD Secure Virtual Machine architecture and the instruction used to enter a guest according to a VMCB.</p></div>
+<div class="term" data-term><b>Intercept</b><p>A configured operation or event that causes control to return from guest to host. Clock reads, selected MSRs and I/O are examples.</p></div>
+<div class="term" data-term><b>Exit qualification</b><p>Extra information accompanying a VM-exit reason, such as the type of EPT access that failed. The VMM uses it to choose the right handler.</p></div>
+<div class="term" data-term><b>MSR list</b><p>Intel's VM-entry/exit facility for loading or storing selected MSR values as part of transitions. Bedrock uses it to keep guest PMU count separate from host work.</p></div>
+<div class="term" data-term><b>VMCB clean bits</b><p>AMD hints that groups of VMCB fields have not changed, allowing hardware to avoid some reload work. They reduce possible entry overhead, not exit count.</p></div>
+<div class="term" data-term><b>Copy-on-write</b><p>A memory strategy that shares unchanged pages between related VM states and copies a page when it is written. Bedrock uses it for replay forks.</p></div>
+
+<h3>Deterministic time and measurement</h3>
+<div class="term" data-term><b>TSC</b><p>Time stamp counter, read by RDTSC/RDTSCP. Raw host TSC tracks hardware time, so Bedrock intercepts reads and returns a virtual instruction-count-based value.</p></div>
+<div class="term" data-term><b>PMU / PMC</b><p>Performance monitoring unit and counter. Hardware can count events such as retired instructions; a counter alone does not guarantee an exact software stop at the count.</p></div>
+<div class="term" data-term><b>IRPERF</b><p>AMD instruction-retired performance counter facility. Bedrock uses it to account for how many guest instructions actually retired in a bounded region.</p></div>
+<div class="term" data-term><b>PEBS</b><p>Intel Precise Event-Based Sampling. On supported CPUs, Bedrock deliberately denies a PEBS record write through EPT to regain control near a logical deadline.</p></div>
+<div class="term" data-term><b>IBS</b><p>AMD Instruction-Based Sampling. A useful profiling source, but not established in this repo as an exact deadline-stop replacement for the Intel PEBS/EPT interaction.</p></div>
+<div class="term" data-term><b>Skid</b><p>Extra guest instructions that retire between a counter event and observable notification. Variable skid is why an ordinary PMU interrupt is not enough for exact replay timing.</p></div>
+<div class="term" data-term><b>MTF / single-step</b><p>Monitor trap flag on Intel, or a comparable stepping fallback, returns control after a very small amount of guest progress. It is useful for the exact final interval and expensive as a continuous loop.</p></div>
+<div class="term" data-term><b>Virtual NMI</b><p>An AMD SVM mechanism for a non-maskable-interrupt-like notification in guest context. Bedrock uses it as part of its counter-overflow stop path.</p></div>
+<div class="term" data-term><b>IDT</b><p>Interrupt descriptor table, which selects exception and interrupt handlers. The AMD backend temporarily constrains guest IDT delivery to convert a virtual NMI into a host-observable stop.</p></div>
+<div class="term" data-term><b>Breakpoint register</b><p>One of the x86 DR0–DR3 address breakpoint slots. Bedrock's AMD planner uses them to stop before hazardous instruction sites in an approved executable region.</p></div>
+<div class="term" data-term><b>Guarded region</b><p>A set of guest code pages Bedrock has analyzed and allowed to execute under NPT code, table and breakpoint guards. Leaving the region returns to the host before unapproved code runs.</p></div>
+<div class="term" data-term><b>Logical deadline</b><p>A guest instruction-count boundary at which Bedrock must expose a scheduled timer or event. It is not a number of host nanoseconds or CPU cycles.</p></div>
+</div></section>
