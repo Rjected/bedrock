@@ -12,8 +12,8 @@
     <g id="walk-frame"><rect x="828" y="210" width="105" height="110" rx="6" fill="#d9eeea" stroke="#0e706c" stroke-width="3"/><path d="M839 236 h82 M839 260 h82 M839 284 h82" stroke="#75ada4" stroke-width="2"/><text x="847" y="196" class="scene-lane-title">RAM FRAME</text><text x="845" y="273" class="scene-code">+ offset</text></g>
     <path d="M112 265 H160 M285 265 H330 M455 265 H500 M625 265 H670 M795 265 H828" class="walk-pointer"/><path id="walk-progress" d="" class="walk-pointer-progress"/>
     <circle id="walk-token" cx="70" cy="265" r="12" fill="#de7347" stroke="white" stroke-width="3"/>
-    <g id="walk-tlb"><rect x="252" y="388" width="455" height="70" rx="11" fill="#10232b"/><text x="277" y="415" fill="#b4d9cc" class="scene-small">TLB CACHE</text><text x="277" y="441" fill="#f0f4ee" class="scene-code">VA + address-space tag → frame</text></g>
     <path id="walk-hit-path" d="M70 265 Q50 430 252 423 H707 Q870 430 880 265" fill="none" stroke="#de7347" stroke-width="5" stroke-dasharray="10 8"/>
+    <g id="walk-tlb"><rect x="252" y="388" width="455" height="70" rx="11" fill="#10232b"/><text x="277" y="415" fill="#b4d9cc" class="scene-small">TLB CACHE</text><text x="277" y="441" fill="#f0f4ee" class="scene-code">VA + address-space tag → frame</text></g>
     <text x="34" y="492" id="walk-scene-phase" class="scene-phase">1 / 6 · CR3 points to the top-level table</text>
   </svg>
   <div class="sim-scrubber"><label for="walk-step">Scrub the lookup</label><input id="walk-step" type="range" min="0" max="5" value="0"><span id="walk-step-value">1 / 6</span></div>

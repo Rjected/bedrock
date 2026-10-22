@@ -47,21 +47,6 @@
   $('#toggle-half-clock').addEventListener('change', renderExits);
   renderExits();
 
-  const toyStories = {
-    a: ['0x12 · 0x34', '0x12 → frame 0xA0 · read-only', 'physical 0xA034', 'the offset 0x34 is unchanged'],
-    b: ['0x1A · 0x34', '0x1A → frame 0xB0 · read/write', 'physical 0xB034', 'a different virtual page reaches a different frame'],
-    missing: ['0x20 · 0x34', 'no entry for virtual page 0x20', 'page fault (#PF)', 'the guest kernel decides how to handle the missing page'],
-    write: ['0x12 · 0x34', '0x12 → frame 0xA0 · read-only', 'page fault (#PF)', 'the mapping exists, but this entry denies writing']
-  };
-  $$('#toy-paging-lab [data-toy]').forEach((button) => button.addEventListener('click', () => {
-    $$('#toy-paging-lab [data-toy]').forEach((item) => item.classList.toggle('active', item === button));
-    const [virtual, entry, outcome, status] = toyStories[button.dataset.toy];
-    $('#toy-virtual').textContent = virtual; $('#toy-entry').textContent = entry;
-    $('#toy-outcome').textContent = outcome; $('#toy-status').textContent = status;
-    $('#toy-paging-lab').classList.toggle('toy-fault', ['missing', 'write'].includes(button.dataset.toy));
-  }));
-
-
   const intelModes = {
     app: 'A guest application runs at CPL3 in VMX non-root mode. It is an ordinary process from the guest kernel’s point of view, and the host’s VMX controls still apply.',
     kernel: 'Guest Linux runs at CPL0 in VMX non-root mode. It can manage guest processes and page tables, while EPT and the host’s intercept controls retain authority.',
@@ -85,27 +70,23 @@
   $('#budget-cost').addEventListener('input', renderBudget);
   renderBudget();
 
-  const coreCases = {
-    warm: ['100', '100', 'mostly guest instruction work', 'same visible instruction sequence', 'short execution path'],
-    miss: ['100', '320', 'waiting for data from a slower cache level or RAM', 'same visible instruction sequence', 'illustrative memory stall'],
-    branch: ['100', '165', 'discarded speculative work after a wrong prediction', 'same retired instructions', 'illustrative branch penalty'],
-    exit: ['100', '850', 'mode transition and host handler work', 'same guest-visible sequence', 'illustrative VM-exit overhead']
-  };
-  $$('#core-lab [data-core]').forEach((button) => button.addEventListener('click', () => {
-    $$('#core-lab [data-core]').forEach((item) => item.classList.toggle('active', item === button));
-    const [instructions, cycles, reason, instructionNote, cycleNote] = coreCases[button.dataset.core];
-    $('#core-instructions').textContent = instructions;
-    $('#core-cycles').textContent = cycles;
-    $('#core-reason').textContent = reason;
-    $('#core-instruction-note').textContent = instructionNote;
-    $('#core-cycle-note').textContent = cycleNote;
-  }));
-
   let retirements = 0;
+  const pmuTicks = $('#pmu-ticks');
+  for (let i = 1; i <= 8; i++) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const x = 85 + i * 98;
+    const circle = document.createElementNS(ns, 'circle');
+    circle.setAttribute('cx', x); circle.setAttribute('cy', 130); circle.setAttribute('r', 18); circle.setAttribute('class', 'pmu-tick');
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', x - 4); label.setAttribute('y', 135); label.setAttribute('class', 'pmu-tick-label'); label.textContent = String(i);
+    pmuTicks.append(circle, label);
+  }
   function renderPmu() {
     $('#pmu-count').textContent = `${retirements} / 8`;
     $('#pmu-overflow').textContent = retirements >= 8 ? 'pending' : 'clear';
-    $('#pmu-rip').textContent = retirements >= 8 ? 'not from overflow alone' : 'no notification yet';
+    $('#pmu-rip').textContent = retirements >= 8 ? 'not guaranteed' : 'no';
+    $('#pmu-progress-line').setAttribute('x2', 85 + retirements * 98);
+    $$('#pmu-ticks .pmu-tick').forEach((tick, index) => tick.classList.toggle('retired', index < retirements));
     $('#pmu-description').textContent = retirements >= 8
       ? 'The threshold is crossed. A counter event alone does not report an exact stopping RIP; delivery can lag.'
       : 'The guest retires instructions while the counter advances. No host callback is needed for each retirement.';
@@ -114,24 +95,6 @@
   $('#pmu-run').addEventListener('click', () => { retirements = 8; renderPmu(); });
   $('#pmu-reset').addEventListener('click', () => { retirements = 0; renderPmu(); });
   renderPmu();
-
-  function renderSkid() {
-    const delay = Number($('#skid-slider').value);
-    $('#skid-value').textContent = String(delay);
-    const track = $('#counter-track'); track.replaceChildren();
-    for (let i = 94; i <= 112; i++) {
-      const cell = document.createElement('div');
-      cell.className = 'counter-cell' + (i === 100 ? ' target' : '') + (i === 100 + delay ? ' observed' : '');
-      const number = document.createElement('b'); number.textContent = String(i);
-      const label = document.createElement('small');
-      label.textContent = i === 100 && delay === 0 ? 'target + exit' : i === 100 ? 'target' : i === 100 + delay ? 'observed exit' : '';
-      cell.append(number, label); track.appendChild(cell);
-    }
-    $('#counter-explain').textContent = delay === 0
-      ? 'Target: 100. The hypothetical exit lands at 100; no instruction-delay correction is needed.'
-      : `Target: 100. An ordinary notification observed after ${100 + delay} retirements would be ${delay} instructions late.`;
-  }
-  $('#skid-slider').addEventListener('input', renderSkid); renderSkid();
 
   $$('#replay-simulation [data-replay]').forEach((button) => button.addEventListener('click', () => {
     const before = button.dataset.replay === 'before';
@@ -148,15 +111,19 @@
   }));
 
   const hazards = {
-    five: ['5 exact breakpoints required · cannot fit', 'With four DR0–DR3 slots, the planner must narrow the region or fall back.', []],
-    mask: ['4 slots after a masked merge', 'One masked breakpoint covers two hazards, but may also trap at innocent offsets in the aligned range.', [0, 1]],
-    proof: ['4 slots after a reachability proof', 'A hazard needs no breakpoint only if all guarded paths prove that the running region cannot reach it.', [4]]
+    five: {slots:['0x10','0x30','0x50','0x70'], result:'0x90 is uncovered: the region cannot run under this plan.', explanation:'Five exact sites require five breakpoints, but DR0–DR3 provide only four execution-address slots. Bedrock must narrow the region or choose another safe plan.'},
+    mask: {slots:['0x00–0x3F','0x50','0x70','0x90'], result:'The range also covers hot code at 0x20: false-hit exits.', explanation:'One masked breakpoint covers hazards 0x10 and 0x30, freeing a slot. It also intercepts ordinary hot code at 0x20, so this feasible plan can be slow.'},
+    proof: {slots:['0x10','0x30','0x50','0x70'], result:'0x90 needs no slot only while its reachability proof holds.', explanation:'A proof shows that the approved region cannot reach the 0x90 instruction. That omits its breakpoint only while code, mapping and control-flow guards keep the proof valid.'}
   };
   $$('#hazard-lab [data-hazard]').forEach((button) => button.addEventListener('click', () => {
     $$('#hazard-lab [data-hazard]').forEach((item) => item.classList.toggle('active', item === button));
-    const [slots, explanation, selected] = hazards[button.dataset.hazard];
-    $('#hazard-slots').textContent = slots; $('#hazard-explain').textContent = explanation;
-    $$('#hazard-lab .hazard-strip > div').forEach((item, index) => item.classList.toggle('selected', selected.includes(index)));
+    const mode = button.dataset.hazard; const state = hazards[mode];
+    $('#hazard-uncovered').textContent = state.result;
+    $('#hazard-explain').textContent = state.explanation;
+    $('#hazard-mask-band').setAttribute('opacity', mode === 'mask' ? '1' : '0');
+    $('#hazard-false-hit').setAttribute('opacity', mode === 'mask' ? '1' : '0');
+    $('#hazard-lab [data-hazard-point="4"]').classList.toggle('proved', mode === 'proof');
+    $$('#hazard-slots-visual .slot-content').forEach((item, index) => { item.textContent = state.slots[index]; });
   }));
 
   const themeToggle = $('#theme-toggle');

@@ -2,6 +2,17 @@
   'use strict';
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => [...document.querySelectorAll(selector)];
+  $$('.simulation svg').forEach((svg) => {
+    const viewport = document.createElement('div');
+    viewport.className = 'scene-viewport';
+    svg.before(viewport);
+    viewport.append(svg);
+    svg.closest('.simulation').classList.add('js-ready');
+    const hint = document.createElement('p');
+    hint.className = 'swipe-hint';
+    hint.textContent = 'Swipe inside the diagram to see the rest →';
+    viewport.after(hint);
+  });
 
   const eventScenes = {
     syscall: {
@@ -187,7 +198,7 @@
     const hitPositions = [[70, 265], [480, 423], [880, 265]];
     const [x, y] = hit ? hitPositions[walkStep] : [missX[walkStep], 265];
     $('#walk-token').setAttribute('cx', x); $('#walk-token').setAttribute('cy', y);
-    $('#walk-tables').style.opacity = hit ? '.23' : '1';
+    $('#walk-tables').style.opacity = hit ? '.55' : '1';
     $('#walk-hit-path').style.opacity = hit ? '1' : '0';
     $('#walk-tlb').style.opacity = hit ? '1' : '.55';
     $('#walk-progress').setAttribute('d', hit || walkStep === 0 ? '' : `M112 265 H${missX[walkStep]}`);
@@ -226,12 +237,12 @@
   let activeProcess = 'a'; let processTimeout = null;
   function renderProcess() {
     const a = activeProcess === 'a';
-    $('#process-a-lane').style.opacity = a ? '1' : '.28';
-    $('#process-b-lane').style.opacity = a ? '.28' : '1';
-    $('#process-table-a').style.opacity = a ? '1' : '.28';
-    $('#process-table-b').style.opacity = a ? '.28' : '1';
-    $('#process-ram-a').style.opacity = a ? '1' : '.28';
-    $('#process-ram-b').style.opacity = a ? '.28' : '1';
+    $('#process-a-lane').style.opacity = a ? '1' : '.55';
+    $('#process-b-lane').style.opacity = a ? '.55' : '1';
+    $('#process-table-a').style.opacity = a ? '1' : '.55';
+    $('#process-table-b').style.opacity = a ? '.55' : '1';
+    $('#process-ram-a').style.opacity = a ? '1' : '.55';
+    $('#process-ram-b').style.opacity = a ? '.55' : '1';
     $('#process-token').setAttribute('cx', 220);
     $('#process-token').setAttribute('cy', a ? 157 : 327);
     $('#process-token').setAttribute('fill', a ? '#0e706c' : '#de7347');
@@ -253,25 +264,29 @@
   renderProcess();
 
   let instructionStep = 0; let instructionTimer = null;
-  const instructionPoints = [[126, 253], [329, 253], [443, 285], [625, 285], [817, 285], [817, 253]];
-  const instructionPhases = ['fetch bytes at RIP', 'decode MOV RAX, [RBX]', 'RBX supplies virtual address', 'TLB maps and checks read', 'cache or RAM supplies 0x42', 'retire RAX and next RIP'];
+  const instructionPoints = [[92, 112], [486, 112], [260, 280], [556, 331], [873, 278], [263, 345]];
+  const instructionPhases = ['RIP selects instruction bytes', 'bytes decode to a load', 'RBX supplies guest VA 0x9000', 'translation permits the read', 'memory supplies 0x42', 'retire RAX and next RIP'];
   const instructionDescriptions = [
-    'RIP identifies instruction bytes at 0x4000. The CPU fetches them, but RAX has not changed yet.',
-    'The decoder recognizes an architectural load into RAX using the address in RBX. Internal work may be split into smaller operations.',
-    'The address unit reads RBX = 0x4000 from the register file and forms the virtual address to load.',
+    'RIP points to bytes at 0x4010. Reading those bytes does not change RAX.',
+    'The decoder recognizes 48 8B 03 as mov rax, [rbx]: read memory at the address in RBX, then put the value in RAX.',
+    'RBX contains 0x9000. That is the guest virtual address for the data read; it is separate from the code address in RIP.',
     'The translation machinery finds the physical frame and checks read permission, using a TLB hit or a page walk.',
-    'The data value 0x42 comes from cache or RAM. It can be ready before the instruction is allowed to retire.',
-    'Retirement makes RAX = 0x42 and the next RIP architecturally visible. This contributes one retired instruction to Bedrock’s logical count.'
+    'The data at guest virtual address 0x9000 is 0x42. It may come from cache or RAM; the returned value is ready for RAX.',
+    'Retirement makes RAX = 0x42 and RIP = 0x4013 architecturally visible. Bedrock’s logical count advances by one retired instruction.'
   ];
   function stopInstruction() { if (instructionTimer !== null) { clearInterval(instructionTimer); instructionTimer = null; $('#instruction-play').textContent = '▶ Play'; } }
   function renderInstruction() {
     const [x, y] = instructionPoints[instructionStep];
     $('#instruction-token').setAttribute('cx', x); $('#instruction-token').setAttribute('cy', y);
-    $('#instruction-progress').setAttribute('d', instructionPoints.slice(0, instructionStep + 1).map(([px, py], i) => `${i ? 'L' : 'M'}${px} ${py}`).join(' '));
-    const components = ['core-instruction-memory', 'core-decoder', 'core-agu', 'core-tlb', 'core-cache', 'core-retire'];
-    components.forEach((id, index) => $(`#${id}`).classList.toggle('active', index === instructionStep));
-    $('#core-registers').classList.toggle('active', instructionStep === 2 || instructionStep === 5);
-    $('#instruction-rax').textContent = instructionStep === 5 ? 'RAX = 0x42' : 'RAX = old value';
+    const tokenLabel = ['RIP','decode','','','',''][instructionStep];
+    $('#instruction-token-text').textContent = tokenLabel;
+    $('#instruction-token-text').setAttribute('x', Math.min(x + 22, 844));
+    $('#instruction-token-text').setAttribute('y', y + 5);
+    $('#instruction-token').setAttribute('fill', instructionStep >= 4 ? '#0e706c' : '#de7347');
+    $('#instruction-code-highlight').setAttribute('opacity', instructionStep <= 1 ? '1' : '.45');
+    $('#instruction-memory-highlight').setAttribute('fill', instructionStep >= 4 ? '#a9dbcb' : '#d7eee4');
+    $('#instruction-rax').textContent = instructionStep === 5 ? '0x42' : 'old value';
+    $('#instruction-rip').textContent = instructionStep === 5 ? '0x4013' : '0x4010';
     $('#instruction-scene-phase').textContent = `${instructionStep + 1} / 6 · ${instructionPhases[instructionStep]}`;
     $('#instruction-explanation').textContent = instructionDescriptions[instructionStep];
     $('#instruction-step').value = String(instructionStep);
@@ -320,8 +335,8 @@
     $('#deadline-token').setAttribute('cx', deadlineX(positions[deadlineStep]));
     $('#deadline-token').setAttribute('cy', deadlineMode === 'intel' ? 168 : 312);
     $('#deadline-token').setAttribute('fill', deadlineMode === 'intel' ? '#0e706c' : '#de7347');
-    $('#deadline-intel-row').style.opacity = deadlineMode === 'intel' ? '1' : '.43';
-    $('#deadline-amd-row').style.opacity = deadlineMode === 'amd' ? '1' : '.43';
+    $('#deadline-intel-row').style.opacity = deadlineMode === 'intel' ? '1' : '.68';
+    $('#deadline-amd-row').style.opacity = deadlineMode === 'amd' ? '1' : '.68';
     const names = ['guest runs', 'counter armed early', deadlineMode === 'intel' ? 'PEBS write causes EPT exit' : 'virtual NMI path stops guest', 'exact final interval', 'event delivered at target'];
     $('#deadline-scene-phase').textContent = `${deadlineStep + 1} / 5 · ${names[deadlineStep]}`;
     const descriptions = deadlineMode === 'intel'
@@ -362,8 +377,14 @@
       q('step-value').textContent = `${step + 1} / 6`;
       q('count-token').setAttribute('cx', step === 0 ? 307 : step === 1 ? 323 : 330);
       q(vendor === 'intel' ? 'record' : 'vector').setAttribute('cx', step < 3 ? 580 : step === 3 ? 620 : 653);
-      q(vendor === 'intel' ? 'record' : 'vector').style.opacity = step >= 3 ? '1' : '0';
+      q(vendor === 'intel' ? 'record' : 'vector').style.opacity = step >= 3 && !(vendor === 'amd' && step === 5) ? '1' : '0';
       q('gate').style.opacity = step >= 4 ? '1' : '.25';
+      if (vendor === 'amd') {
+        q('idt-mode').textContent = step === 5 ? 'original guest IDT state restored' : 'temporary limit set by Bedrock';
+        q('idt-result').textContent = step === 5 ? 'NMI guard no longer armed' : 'NMI vector outside limit';
+        q('idt-limit').style.opacity = step === 5 ? '.2' : '1';
+        q('gate').style.opacity = step === 5 ? '.2' : step >= 4 ? '1' : '.25';
+      }
       q('exit-token').style.opacity = step >= 4 ? '1' : '0';
       q('exit-token').setAttribute('cx', step === 5 ? 461 : 664);
       q('exit-token').setAttribute('cy', step === 5 ? 404 : 301);
@@ -395,6 +416,54 @@
     {count:'actual',pmu:'OFF',action:'guest IDT state restored',host:'IRPERF count → exact finish',phase:'Bedrock accounts and finishes',explanation:'Bedrock reads actual retired progress, restores the guest’s IDT state, and uses a bounded or precise fallback for the remaining interval.'}
   ]);
 
+  const coreCases = {
+    hit: {loadEnd:536, loadLabel:'L1 hit', predictedX:550, predictedWidth:195, predictedLabel:'correct path', predictedFill:'#cbe9d9', retire:[552,646,740,834], phases:['same guest program and input','front end fetches and decodes','load finds data in L1','predicted path is correct','four instructions retire'], details:['The same four x86 instructions will retire in the same order. This view changes only the work performed before retirement.','The front end fetches and decodes the same instruction bytes.','The load finds its data in L1, so the dependent test and branch can progress promptly.','The predicted path matches the actual not-taken branch; speculative work is useful.','The four architectural instructions retire in order. The elapsed-time width is illustrative, not a count of cycles.']},
+    miss: {loadEnd:696, loadLabel:'cache miss · wait for data', predictedX:707, predictedWidth:154, predictedLabel:'correct path', predictedFill:'#cbe9d9', retire:[710,765,820,875], phases:['same guest program and input','front end fetches and decodes','load waits for data','dependent instructions wait','four instructions retire'], details:['The bytes, input value, actual branch direction and eventual retired instructions match the L1-hit case.','The front end can fetch the code while the load begins.','The requested data is absent from L1. A dependent test cannot complete until the value returns from lower cache or memory.','Independent work may overlap the miss, but this toy sequence depends on the loaded value. The retirement boundary moves later on this qualitative axis.','The same four instructions retire in the same order. The delay changed elapsed time, not the logical retired-instruction count.']},
+    branch: {loadEnd:536, loadLabel:'L1 hit', predictedX:550, predictedWidth:124, predictedLabel:'wrong fetch', predictedFill:'#f4c6ad', retire:[552,620,760,875], phases:['same guest program and input','front end fetches and decodes','load supplies branch input','wrong-path work is discarded','four instructions retire'], details:['The actual branch is still not taken. Only the predictor’s guess changes.','The front end fetches the same visible instruction stream up to the branch.','The load completes, and the branch can resolve against the nonzero value.','The predictor fetched work from the taken path. Once the branch resolves not taken, that speculative work is discarded and the correct path is fetched.','Discarded work used core resources but did not retire. The same four architectural instructions retire in order.']}
+  };
+  let coreCase = 'hit'; let coreStep = 0; let coreTimer = null;
+  function stopCore() { if (coreTimer !== null) { clearInterval(coreTimer); coreTimer = null; $('#core-play').textContent = '▶ Play'; } }
+  function renderCore() {
+    const state = coreCases[coreCase];
+    $('#core-load-bar').setAttribute('width', state.loadEnd - 438);
+    $('#core-load-label').textContent = state.loadLabel;
+    $('#core-predicted-bar').setAttribute('x', state.predictedX);
+    $('#core-predicted-bar').setAttribute('width', state.predictedWidth);
+    $('#core-predicted-bar').setAttribute('fill', state.predictedFill);
+    $('#core-predicted-label').setAttribute('x', state.predictedX + 14);
+    $('#core-predicted-label').textContent = state.predictedLabel;
+    $('#core-discard-cross').setAttribute('d', coreCase === 'branch' ? 'M672 342 L690 385 M690 342 L672 385' : '');
+    $('#core-discard-cross').style.opacity = coreCase === 'branch' ? '1' : '0';
+    $('#core-refetch-bar').style.opacity = coreCase === 'branch' ? '1' : '0';
+    $('#core-refetch-label').style.opacity = coreCase === 'branch' ? '1' : '0';
+    const ticks = $('#core-retire-ticks'); ticks.replaceChildren();
+    ['mov','test','je','add'].forEach((label, i) => {
+      const ns = 'http://www.w3.org/2000/svg';
+      const circle = document.createElementNS(ns, 'circle'); circle.setAttribute('cx', state.retire[i]); circle.setAttribute('cy', 450); circle.setAttribute('r', 9); circle.setAttribute('fill', '#0e706c');
+      const text = document.createElementNS(ns, 'text'); text.setAttribute('x', state.retire[i] - (label.length * 3.5)); text.setAttribute('y', 479); text.setAttribute('class','scene-small'); text.textContent = label;
+      ticks.append(circle,text);
+    });
+    const cursorX = [272,410,coreCase === 'miss' ? 645 : 515,coreCase === 'miss' ? 744 : 685,900][coreStep];
+    $('#core-cursor').setAttribute('x1', cursorX); $('#core-cursor').setAttribute('x2', cursorX);
+    $('#core-phase').textContent = `${coreStep + 1} / 5 · ${state.phases[coreStep]}`;
+    $('#core-explanation').textContent = state.details[coreStep];
+    $('#core-step').value = String(coreStep); $('#core-step-value').textContent = `${coreStep + 1} / 5`;
+  }
+  $$('#core-simulation [data-core-case]').forEach((button) => button.addEventListener('click', () => {
+    stopCore(); coreCase = button.dataset.coreCase; coreStep = 0;
+    $$('#core-simulation [data-core-case]').forEach((item) => item.classList.toggle('active', item === button));
+    renderCore();
+  }));
+  $('#core-step').addEventListener('input', () => { stopCore(); coreStep = Number($('#core-step').value); renderCore(); });
+  $('#core-reset').addEventListener('click', () => { stopCore(); coreStep = 0; renderCore(); });
+  $('#core-play').addEventListener('click', () => {
+    if (coreTimer !== null) { stopCore(); return; }
+    if (coreStep === 4) coreStep = 0;
+    renderCore(); $('#core-play').textContent = '❚❚ Pause';
+    coreTimer = setInterval(() => { if (coreStep === 4) { stopCore(); return; } coreStep++; renderCore(); }, 1100);
+  });
+  renderCore();
+
   const rogptScenes = {
     on: {request:'PTE read', origin:'CPU PAGE WALKER', operation:'translate guest VA', access:'implicit hardware access', label:'read passes', host:'not entered', result:'Hardware reads the PTE; the read-only guard stays in place.', explanation:'With ROGPT, this ordinary read-only walk can use the guest page table despite Bedrock’s NPT write guard. An actual accessed/dirty-bit update is a separate case.', denied:false},
     off: {request:'walk requests W', origin:'CPU PAGE WALKER', operation:'translate guest VA', access:'implicit hardware access', label:'NPT denies', host:'NPF received', result:'A nested write request hits the guard even during a translation.', explanation:'Without ROGPT, a walk that asks for nested write permission can cause an NPF on Bedrock’s protected table frame. The host handles the fault, then the guest can continue.', denied:true},
@@ -414,7 +483,7 @@
     $('#rogpt-access-token').setAttribute('cx', state.denied ? '390' : '472');
     $('#rogpt-access-token').setAttribute('fill', state.denied ? '#de7347' : '#0e706c');
     $('#rogpt-host-token').style.opacity = state.denied ? '1' : '0';
-    $('#rogpt-host-token').setAttribute('cx', state.denied ? '751' : '390');
+    $('#rogpt-host-token').setAttribute('cx', state.denied ? '706' : '390');
     $('#rogpt-host-token').setAttribute('cy', state.denied ? '377' : '296');
   }));
 })();
